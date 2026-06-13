@@ -13,14 +13,17 @@ import {
 import type {
   Agency,
   AgencyMember,
+  CreateLeadInput,
   CreatePropertyInput,
   CreateViewingInput,
+  Lead,
   Paginated,
   Profile,
   Property,
   PropertyFilters,
   PropertyWithMedia,
   SessionUser,
+  TojuChatResponse,
   UpdateProfileInput,
   UpdatePropertyInput,
   Viewing,
@@ -38,6 +41,8 @@ import {
   updateProperty,
 } from './properties';
 import { createViewing, listMyViewings } from './viewings';
+import { sendTojuMessage } from './toju';
+import { createLead, listAgencyLeads, type CreateLeadResult } from './leads';
 
 /** Centralised query keys — never write string keys inline. */
 export const queryKeys = {
@@ -49,6 +54,7 @@ export const queryKeys = {
   property: (id: string) => ['property', id] as const,
   saved: ['saved-properties'] as const,
   viewings: ['viewings'] as const,
+  agencyLeads: (id: string) => ['leads', id] as const,
 };
 
 /* ───────── session + profile ───────── */
@@ -161,4 +167,33 @@ export function useCreateViewing(): UseMutationResult<Viewing, Error, CreateView
     mutationFn: createViewing,
     onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.viewings }),
   });
+}
+
+/* ───────── toju chat ───────── */
+
+/** Send a message to Toju. History/session is managed server-side. */
+export function useSendTojuMessage(): UseMutationResult<
+  TojuChatResponse,
+  Error,
+  { message: string; sessionId?: string }
+> {
+  return useMutation({
+    mutationFn: ({ message, sessionId }) => sendTojuMessage(message, sessionId),
+  });
+}
+
+/* ───────── leads (the bridge) ───────── */
+
+/** Agency leads, reverse-chronological. Pair with subscribeToAgencyLeads. */
+export function useAgencyLeads(agencyId: string | null): UseQueryResult<Lead[]> {
+  return useQuery({
+    queryKey: queryKeys.agencyLeads(agencyId ?? 'none'),
+    queryFn: () => listAgencyLeads(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+/** Trigger the lead bridge. Resolves even on delivery failure (lead persisted). */
+export function useCreateLead(): UseMutationResult<CreateLeadResult, Error, CreateLeadInput> {
+  return useMutation({ mutationFn: createLead });
 }
