@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+body {
+  background: #fdfdfc;
+  color: #16181c;
+  font-family: 'DM Sans', system-ui, sans-serif;
+}
