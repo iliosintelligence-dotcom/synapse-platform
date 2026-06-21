@@ -1,6 +1,12 @@
-/** api/viewings — booking flow between consumers and agencies. */
+/** api/viewings — booking flow + Layer 2 structured outcome capture. */
 import { getDb } from '@synapse/database';
-import type { CreateViewingInput, UpdateViewingInput, Viewing } from '@synapse/types';
+import {
+  ViewingStatus,
+  type CompleteViewingInput,
+  type CreateViewingInput,
+  type UpdateViewingInput,
+  type Viewing,
+} from '@synapse/types';
 
 export async function createViewing(input: CreateViewingInput): Promise<Viewing> {
   const db = getDb();
@@ -46,6 +52,41 @@ export async function updateViewing(id: string, input: UpdateViewingInput): Prom
     .from('viewings')
     .update(input)
     .eq('id', id)
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data as Viewing;
+}
+
+/** Viewings for an agency (agents see their own via RLS). */
+export async function listAgencyViewings(agencyId: string): Promise<Viewing[]> {
+  const { data, error } = await getDb()
+    .from('viewings')
+    .select('*')
+    .eq('agency_id', agencyId)
+    .is('deleted_at', null)
+    .order('scheduled_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as Viewing[];
+}
+
+/**
+ * Capture the structured outcome of a completed viewing. These post-viewing
+ * fields are the AI signal layer for future lead scoring.
+ */
+export async function completeViewing(input: CompleteViewingInput): Promise<Viewing> {
+  const { data, error } = await getDb()
+    .from('viewings')
+    .update({
+      status: ViewingStatus.COMPLETED,
+      completed_at: new Date().toISOString(),
+      post_viewing_interest_level: input.post_viewing_interest_level,
+      post_viewing_concerns: input.post_viewing_concerns ?? null,
+      post_viewing_budget_fit: input.post_viewing_budget_fit,
+      post_viewing_likelihood_to_proceed: input.post_viewing_likelihood_to_proceed,
+      outcome: input.outcome,
+    })
+    .eq('id', input.viewing_id)
     .select('*')
     .single();
   if (error) throw error;

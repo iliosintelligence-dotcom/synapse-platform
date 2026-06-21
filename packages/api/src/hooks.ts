@@ -43,6 +43,30 @@ import {
 import { createViewing, listMyViewings } from './viewings';
 import { sendTojuMessage } from './toju';
 import { createLead, listAgencyLeads, type CreateLeadResult } from './leads';
+import { listPipelineLeads, moveLeadStage, assignLead, getLeadStageHistory } from './crm';
+import { listAgencyDealRooms, getDealRoom, openDealRoom, closeDeal } from './dealRooms';
+import { listLeadCommunications, logCommunication } from './communications';
+import { listAgentTasks, listLeadTasks, createTask, setTaskStatus } from './tasks';
+import { listAgencyActivity, listLeadActivity } from './activity';
+import { listMyNotifications, unreadCount, markRead } from './notifications';
+import { getAgencySnapshots } from './performance';
+import type {
+  AgencyDailySnapshot,
+  Activity,
+  AssignLeadInput,
+  CloseDealInput,
+  Communication,
+  CreateTaskInput,
+  DealRoom,
+  LeadStageHistory,
+  LogCommunicationInput,
+  MoveLeadStageInput,
+  Notification,
+  OpenDealRoomInput,
+  PipelineLead,
+  Task,
+  TaskStatus,
+} from '@synapse/types';
 
 /** Centralised query keys — never write string keys inline. */
 export const queryKeys = {
@@ -55,6 +79,18 @@ export const queryKeys = {
   saved: ['saved-properties'] as const,
   viewings: ['viewings'] as const,
   agencyLeads: (id: string) => ['leads', id] as const,
+  pipeline: (agencyId: string) => ['pipeline', agencyId] as const,
+  stageHistory: (leadId: string) => ['stage-history', leadId] as const,
+  dealRooms: (agencyId: string) => ['deal-rooms', agencyId] as const,
+  dealRoom: (id: string) => ['deal-room', id] as const,
+  leadComms: (leadId: string) => ['communications', leadId] as const,
+  agentTasks: (agentId: string) => ['tasks', 'agent', agentId] as const,
+  leadTasks: (leadId: string) => ['tasks', 'lead', leadId] as const,
+  agencyActivity: (agencyId: string) => ['activity', agencyId] as const,
+  leadActivity: (leadId: string) => ['activity', 'lead', leadId] as const,
+  myNotifications: ['notifications', 'me'] as const,
+  unreadCount: ['notifications', 'unread'] as const,
+  agencySnapshots: (agencyId: string) => ['snapshots', 'agency', agencyId] as const,
 };
 
 /* ───────── session + profile ───────── */
@@ -196,4 +232,181 @@ export function useAgencyLeads(agencyId: string | null): UseQueryResult<Lead[]> 
 /** Trigger the lead bridge. Resolves even on delivery failure (lead persisted). */
 export function useCreateLead(): UseMutationResult<CreateLeadResult, Error, CreateLeadInput> {
   return useMutation({ mutationFn: createLead });
+}
+
+/* ───────── Layer 2: pipeline ───────── */
+
+export function usePipeline(agencyId: string | null): UseQueryResult<PipelineLead[]> {
+  return useQuery({
+    queryKey: queryKeys.pipeline(agencyId ?? 'none'),
+    queryFn: () => listPipelineLeads(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useMoveLeadStage(agencyId: string): UseMutationResult<void, Error, MoveLeadStageInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: moveLeadStage,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.pipeline(agencyId) }),
+  });
+}
+
+export function useAssignLead(agencyId: string): UseMutationResult<unknown, Error, AssignLeadInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: assignLead,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.pipeline(agencyId) }),
+  });
+}
+
+export function useStageHistory(leadId: string | null): UseQueryResult<LeadStageHistory[]> {
+  return useQuery({
+    queryKey: queryKeys.stageHistory(leadId ?? 'none'),
+    queryFn: () => getLeadStageHistory(leadId as string),
+    enabled: leadId !== null,
+  });
+}
+
+/* ───────── Layer 2: deal rooms ───────── */
+
+export function useDealRooms(agencyId: string | null): UseQueryResult<DealRoom[]> {
+  return useQuery({
+    queryKey: queryKeys.dealRooms(agencyId ?? 'none'),
+    queryFn: () => listAgencyDealRooms(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useDealRoom(id: string | null): UseQueryResult<DealRoom> {
+  return useQuery({
+    queryKey: queryKeys.dealRoom(id ?? 'none'),
+    queryFn: () => getDealRoom(id as string),
+    enabled: id !== null,
+  });
+}
+
+export function useOpenDealRoom(): UseMutationResult<DealRoom, Error, OpenDealRoomInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: openDealRoom,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['deal-rooms'] }),
+  });
+}
+
+export function useCloseDeal(): UseMutationResult<DealRoom, Error, CloseDealInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: closeDeal,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['deal-rooms'] }),
+  });
+}
+
+/* ───────── Layer 2: communications ───────── */
+
+export function useLeadCommunications(leadId: string | null): UseQueryResult<Communication[]> {
+  return useQuery({
+    queryKey: queryKeys.leadComms(leadId ?? 'none'),
+    queryFn: () => listLeadCommunications(leadId as string),
+    enabled: leadId !== null,
+  });
+}
+
+export function useLogCommunication(leadId: string): UseMutationResult<
+  Communication,
+  Error,
+  LogCommunicationInput
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: logCommunication,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.leadComms(leadId) }),
+  });
+}
+
+/* ───────── Layer 2: tasks ───────── */
+
+export function useAgentTasks(agentId: string | null): UseQueryResult<Task[]> {
+  return useQuery({
+    queryKey: queryKeys.agentTasks(agentId ?? 'none'),
+    queryFn: () => listAgentTasks(agentId as string),
+    enabled: agentId !== null,
+  });
+}
+
+export function useLeadTasks(leadId: string | null): UseQueryResult<Task[]> {
+  return useQuery({
+    queryKey: queryKeys.leadTasks(leadId ?? 'none'),
+    queryFn: () => listLeadTasks(leadId as string),
+    enabled: leadId !== null,
+  });
+}
+
+export function useCreateTask(): UseMutationResult<Task, Error, CreateTaskInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createTask,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['tasks'] }),
+  });
+}
+
+export function useSetTaskStatus(): UseMutationResult<
+  Task,
+  Error,
+  { taskId: string; status: TaskStatus }
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, status }) => setTaskStatus(taskId, status),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['tasks'] }),
+  });
+}
+
+/* ───────── Layer 2: activity + notifications + performance ───────── */
+
+export function useAgencyActivity(agencyId: string | null): UseQueryResult<Activity[]> {
+  return useQuery({
+    queryKey: queryKeys.agencyActivity(agencyId ?? 'none'),
+    queryFn: () => listAgencyActivity(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useLeadActivity(leadId: string | null): UseQueryResult<Activity[]> {
+  return useQuery({
+    queryKey: queryKeys.leadActivity(leadId ?? 'none'),
+    queryFn: () => listLeadActivity(leadId as string),
+    enabled: leadId !== null,
+  });
+}
+
+export function useMyNotifications(): UseQueryResult<Notification[]> {
+  return useQuery({ queryKey: queryKeys.myNotifications, queryFn: () => listMyNotifications() });
+}
+
+export function useUnreadCount(): UseQueryResult<number> {
+  return useQuery({ queryKey: queryKeys.unreadCount, queryFn: unreadCount });
+}
+
+export function useMarkNotificationRead(): UseMutationResult<void, Error, string> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: markRead,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.myNotifications });
+      void qc.invalidateQueries({ queryKey: queryKeys.unreadCount });
+    },
+  });
+}
+
+export function useAgencySnapshots(
+  agencyId: string | null,
+  fromDate: string,
+  toDate: string,
+): UseQueryResult<AgencyDailySnapshot[]> {
+  return useQuery({
+    queryKey: [...queryKeys.agencySnapshots(agencyId ?? 'none'), fromDate, toDate],
+    queryFn: () => getAgencySnapshots(agencyId as string, fromDate, toDate),
+    enabled: agencyId !== null,
+  });
 }

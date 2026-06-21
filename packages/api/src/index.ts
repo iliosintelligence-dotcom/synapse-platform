@@ -6,6 +6,16 @@ export * as media from './media';
 export * as viewings from './viewings';
 export * as toju from './toju';
 export * as leads from './leads';
+// ── Layer 2 ──
+export * as crm from './crm';
+export * as dealRooms from './dealRooms';
+export * as communications from './communications';
+export * as tasks from './tasks';
+export * as attribution from './attribution';
+export * as activity from './activity';
+export * as notifications from './notifications';
+export * as performance from './performance';
 export * from './hooks';
 export { initMedia } from './media';
 export type { CreateLeadResult } from './leads';
+export type { ChannelRevenue } from './attribution';
