@@ -24,6 +24,11 @@ const NAV: NavItem[] = [
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN, UserRole.AGENT],
   },
   {
+    href: '/leads',
+    label: 'Leads',
+    roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN, UserRole.AGENT],
+  },
+  {
     href: '/agents',
     label: 'Agents',
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN],
