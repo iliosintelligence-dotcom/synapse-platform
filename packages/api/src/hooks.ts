@@ -50,6 +50,27 @@ import { listAgentTasks, listLeadTasks, createTask, setTaskStatus } from './task
 import { listAgencyActivity, listLeadActivity } from './activity';
 import { listMyNotifications, unreadCount, markRead } from './notifications';
 import { getAgencySnapshots } from './performance';
+import {
+  getAgencyTrustPublic,
+  getAgencyTrustTimeline,
+  getPropertyTrustSummary,
+  getReputationTimeline,
+} from './trust';
+import { listPublishedReviews, submitReview, openDispute, listAgencyDisputes } from './reviews';
+import { listDocuments, getVaultCompleteness } from './documents';
+import type {
+  AgencyTrustPublic,
+  AgencyTrustScoreSnapshot,
+  ConsumerReview,
+  Dispute,
+  DocumentEntityType,
+  OpenDisputeInput,
+  PropertyTrustSummary,
+  ReputationTimeline,
+  SubmitReviewInput,
+  SynapseDocument,
+  VaultCompleteness,
+} from '@synapse/types';
 import type {
   AgencyDailySnapshot,
   Activity,
@@ -91,6 +112,14 @@ export const queryKeys = {
   myNotifications: ['notifications', 'me'] as const,
   unreadCount: ['notifications', 'unread'] as const,
   agencySnapshots: (agencyId: string) => ['snapshots', 'agency', agencyId] as const,
+  agencyTrust: (agencyId: string) => ['trust', 'agency', agencyId] as const,
+  agencyTrustTimeline: (agencyId: string) => ['trust', 'agency', agencyId, 'timeline'] as const,
+  propertyTrust: (propertyId: string) => ['trust', 'property', propertyId] as const,
+  reputationTimeline: (t: string, id: string) => ['reputation', t, id] as const,
+  reviews: (t: string, id: string) => ['reviews', t, id] as const,
+  agencyDisputes: (agencyId: string) => ['disputes', 'agency', agencyId] as const,
+  vaultDocs: (id: string) => ['documents', id] as const,
+  vault: (dealRoomId: string) => ['vault', dealRoomId] as const,
 };
 
 /* ───────── session + profile ───────── */
@@ -408,5 +437,101 @@ export function useAgencySnapshots(
     queryKey: [...queryKeys.agencySnapshots(agencyId ?? 'none'), fromDate, toDate],
     queryFn: () => getAgencySnapshots(agencyId as string, fromDate, toDate),
     enabled: agencyId !== null,
+  });
+}
+
+/* ───────── Layer 4: trust + reputation ───────── */
+
+export function useAgencyTrust(agencyId: string | null): UseQueryResult<AgencyTrustPublic> {
+  return useQuery({
+    queryKey: queryKeys.agencyTrust(agencyId ?? 'none'),
+    queryFn: () => getAgencyTrustPublic(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useAgencyTrustTimeline(
+  agencyId: string | null,
+  fromDate: string,
+): UseQueryResult<AgencyTrustScoreSnapshot[]> {
+  return useQuery({
+    queryKey: [...queryKeys.agencyTrustTimeline(agencyId ?? 'none'), fromDate],
+    queryFn: () => getAgencyTrustTimeline(agencyId as string, fromDate),
+    enabled: agencyId !== null,
+  });
+}
+
+export function usePropertyTrust(propertyId: string | null): UseQueryResult<PropertyTrustSummary> {
+  return useQuery({
+    queryKey: queryKeys.propertyTrust(propertyId ?? 'none'),
+    queryFn: () => getPropertyTrustSummary(propertyId as string),
+    enabled: propertyId !== null,
+  });
+}
+
+export function useReputationTimeline(
+  entityType: 'agency' | 'agent',
+  entityId: string | null,
+): UseQueryResult<ReputationTimeline[]> {
+  return useQuery({
+    queryKey: queryKeys.reputationTimeline(entityType, entityId ?? 'none'),
+    queryFn: () => getReputationTimeline(entityType, entityId as string),
+    enabled: entityId !== null,
+  });
+}
+
+export function useReviews(
+  entityType: 'agency' | 'agent',
+  entityId: string | null,
+): UseQueryResult<ConsumerReview[]> {
+  return useQuery({
+    queryKey: queryKeys.reviews(entityType, entityId ?? 'none'),
+    queryFn: () => listPublishedReviews(entityType, entityId as string),
+    enabled: entityId !== null,
+  });
+}
+
+export function useSubmitReview(): UseMutationResult<ConsumerReview, Error, SubmitReviewInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: submitReview,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['reviews'] }),
+  });
+}
+
+export function useOpenDispute(): UseMutationResult<Dispute, Error, OpenDisputeInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: openDispute,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['disputes'] }),
+  });
+}
+
+export function useAgencyDisputes(agencyId: string | null): UseQueryResult<Dispute[]> {
+  return useQuery({
+    queryKey: queryKeys.agencyDisputes(agencyId ?? 'none'),
+    queryFn: () => listAgencyDisputes(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+/* ───────── Layer 4: document vault ───────── */
+
+export function useDocuments(
+  entityType: DocumentEntityType,
+  entityId: string | null,
+): UseQueryResult<SynapseDocument[]> {
+  return useQuery({
+    queryKey: queryKeys.vaultDocs(entityId ?? 'none'),
+    queryFn: () => listDocuments(entityType, entityId as string),
+    enabled: entityId !== null,
+  });
+}
+
+export function useVaultCompleteness(dealRoomId: string | null): UseQueryResult<VaultCompleteness> {
+  return useQuery({
+    queryKey: queryKeys.vault(dealRoomId ?? 'none'),
+    queryFn: () => getVaultCompleteness(dealRoomId as string),
+    enabled: dealRoomId !== null,
   });
 }

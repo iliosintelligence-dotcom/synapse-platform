@@ -103,5 +103,25 @@ export type {
   BudgetFitKind,
 } from './ViewingManagementCard';
 
+// ── Layer 4: trust operating system ──
+export { default as VerificationTierBadge } from './VerificationTierBadge';
+export type { VerificationTierBadgeProps, TierKind } from './VerificationTierBadge';
+export { default as TrustScoreRing } from './TrustScoreRing';
+export type { TrustScoreRingProps } from './TrustScoreRing';
+export { default as PropertyVerificationPanel } from './PropertyVerificationPanel';
+export type { PropertyVerificationPanelProps, VerificationNodeView } from './PropertyVerificationPanel';
+export { default as DocumentVaultCard } from './DocumentVaultCard';
+export type { DocumentVaultCardProps, VaultCategory } from './DocumentVaultCard';
+export { default as DisputeCard } from './DisputeCard';
+export type { DisputeCardProps, DisputeCardData, DisputeCardAction } from './DisputeCard';
+export { default as FraudFlagCard } from './FraudFlagCard';
+export type { FraudFlagCardProps, FraudFlagCardData, FraudSeverityKind } from './FraudFlagCard';
+export { default as TrustTimelineStrip } from './TrustTimelineStrip';
+export type { TrustTimelineStripProps, TimelineMilestone } from './TrustTimelineStrip';
+export { default as ConsumerReviewCard } from './ConsumerReviewCard';
+export type { ConsumerReviewCardProps, ConsumerReviewCardData } from './ConsumerReviewCard';
+export { default as ReputationSummaryCard } from './ReputationSummaryCard';
+export type { ReputationSummaryCardProps, ReputationSummaryCardData } from './ReputationSummaryCard';
+
 // Storybook-style mock props
 export * as mocks from './mocks';
