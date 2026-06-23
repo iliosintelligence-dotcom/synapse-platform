@@ -58,6 +58,24 @@ import {
 } from './trust';
 import { listPublishedReviews, submitReview, openDispute, listAgencyDisputes } from './reviews';
 import { listDocuments, getVaultCompleteness } from './documents';
+import { generateContent, listPropertyContent, approveContent, listCampaignSuggestions } from './content';
+import { listSocialAccounts, listSocialPosts, listCampaigns, createCampaign } from './social';
+import { getDiscoveryFeed, createReferral, getReferralSummary } from './distribution';
+import type {
+  ApproveContentInput,
+  Campaign,
+  CampaignSuggestion,
+  CreateCampaignInput,
+  CreateReferralInput,
+  DiscoveryFeedRecord,
+  DiscoveryFeedType,
+  GenerateContentInput,
+  GeneratedContent,
+  Referral,
+  ReferralSummary,
+  SocialAccount,
+  SocialPost,
+} from '@synapse/types';
 import type {
   AgencyTrustPublic,
   AgencyTrustScoreSnapshot,
@@ -120,6 +138,13 @@ export const queryKeys = {
   agencyDisputes: (agencyId: string) => ['disputes', 'agency', agencyId] as const,
   vaultDocs: (id: string) => ['documents', id] as const,
   vault: (dealRoomId: string) => ['vault', dealRoomId] as const,
+  propertyContent: (propertyId: string) => ['content', propertyId] as const,
+  campaignSuggestions: (agencyId: string) => ['campaign-suggestions', agencyId] as const,
+  socialAccounts: (agencyId: string) => ['social-accounts', agencyId] as const,
+  socialPosts: (agencyId: string) => ['social-posts', agencyId] as const,
+  campaigns: (agencyId: string) => ['campaigns', agencyId] as const,
+  discoveryFeed: (feed: string, date: string) => ['discovery', feed, date] as const,
+  referralSummary: ['referral-summary'] as const,
 };
 
 /* ───────── session + profile ───────── */
@@ -533,5 +558,95 @@ export function useVaultCompleteness(dealRoomId: string | null): UseQueryResult<
     queryKey: queryKeys.vault(dealRoomId ?? 'none'),
     queryFn: () => getVaultCompleteness(dealRoomId as string),
     enabled: dealRoomId !== null,
+  });
+}
+
+/* ───────── Layer 5: content + social + campaigns ───────── */
+
+export function usePropertyContent(propertyId: string | null): UseQueryResult<GeneratedContent[]> {
+  return useQuery({
+    queryKey: queryKeys.propertyContent(propertyId ?? 'none'),
+    queryFn: () => listPropertyContent(propertyId as string),
+    enabled: propertyId !== null,
+  });
+}
+
+export function useGenerateContent(): UseMutationResult<GeneratedContent, Error, GenerateContentInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: generateContent,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['content'] }),
+  });
+}
+
+export function useApproveContent(): UseMutationResult<GeneratedContent, Error, ApproveContentInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: approveContent,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['content'] }),
+  });
+}
+
+export function useCampaignSuggestions(agencyId: string | null): UseQueryResult<CampaignSuggestion[]> {
+  return useQuery({
+    queryKey: queryKeys.campaignSuggestions(agencyId ?? 'none'),
+    queryFn: () => listCampaignSuggestions(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useSocialAccounts(agencyId: string | null): UseQueryResult<SocialAccount[]> {
+  return useQuery({
+    queryKey: queryKeys.socialAccounts(agencyId ?? 'none'),
+    queryFn: () => listSocialAccounts(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useSocialPosts(agencyId: string | null): UseQueryResult<SocialPost[]> {
+  return useQuery({
+    queryKey: queryKeys.socialPosts(agencyId ?? 'none'),
+    queryFn: () => listSocialPosts(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useCampaigns(agencyId: string | null): UseQueryResult<Campaign[]> {
+  return useQuery({
+    queryKey: queryKeys.campaigns(agencyId ?? 'none'),
+    queryFn: () => listCampaigns(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useCreateCampaign(): UseMutationResult<Campaign, Error, CreateCampaignInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createCampaign,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['campaigns'] }),
+  });
+}
+
+/* ───────── Layer 5: discovery + referrals ───────── */
+
+export function useDiscoveryFeed(
+  feedType: DiscoveryFeedType,
+  date: string,
+): UseQueryResult<DiscoveryFeedRecord[]> {
+  return useQuery({
+    queryKey: queryKeys.discoveryFeed(feedType, date),
+    queryFn: () => getDiscoveryFeed(feedType, date),
+  });
+}
+
+export function useReferralSummary(): UseQueryResult<ReferralSummary> {
+  return useQuery({ queryKey: queryKeys.referralSummary, queryFn: getReferralSummary });
+}
+
+export function useCreateReferral(): UseMutationResult<Referral, Error, CreateReferralInput> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createReferral,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.referralSummary }),
   });
 }

@@ -19,6 +19,10 @@ export * as performance from './performance';
 export * as trust from './trust';
 export * as reviews from './reviews';
 export * as documents from './documents';
+// ── Layer 5 (distribution) ──
+export * as content from './content';
+export * as social from './social';
+export * as distribution from './distribution';
 export * from './hooks';
 export { initMedia } from './media';
 export type { CreateLeadResult } from './leads';

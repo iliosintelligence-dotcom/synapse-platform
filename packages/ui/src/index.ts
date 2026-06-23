@@ -123,5 +123,25 @@ export type { ConsumerReviewCardProps, ConsumerReviewCardData } from './Consumer
 export { default as ReputationSummaryCard } from './ReputationSummaryCard';
 export type { ReputationSummaryCardProps, ReputationSummaryCardData } from './ReputationSummaryCard';
 
+// ── Layer 5: distribution operating system ──
+export { default as ContentCard } from './ContentCard';
+export type { ContentCardProps, ContentCardData, ContentCardState } from './ContentCard';
+export { default as CaptionPreviewCard } from './CaptionPreviewCard';
+export type { CaptionPreviewCardProps, CaptionPlatform } from './CaptionPreviewCard';
+export { default as CampaignCard } from './CampaignCard';
+export type { CampaignCardProps, CampaignCardData } from './CampaignCard';
+export { default as DiscoveryFeedCard } from './DiscoveryFeedCard';
+export type { DiscoveryFeedCardProps, DiscoveryFeedCardData, FeedKind } from './DiscoveryFeedCard';
+export { default as ReferralCard } from './ReferralCard';
+export type { ReferralCardProps, ReferralCardData } from './ReferralCard';
+export { default as MarketplaceHealthCard } from './MarketplaceHealthCard';
+export type { MarketplaceHealthCardProps, MarketplaceHealthCardData, HealthStatusKind } from './MarketplaceHealthCard';
+export { default as GrowthMetricCard } from './GrowthMetricCard';
+export type { GrowthMetricCardProps, GrowthMetricCardData } from './GrowthMetricCard';
+export { default as ViralLoopCard } from './ViralLoopCard';
+export type { ViralLoopCardProps, ViralLoopCardData, LoopStep } from './ViralLoopCard';
+export { default as SocialAccountCard } from './SocialAccountCard';
+export type { SocialAccountCardProps, SocialAccountCardData, SocialPlatformKind } from './SocialAccountCard';
+
 // Storybook-style mock props
 export * as mocks from './mocks';
