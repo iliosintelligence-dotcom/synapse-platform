@@ -63,6 +63,15 @@ export default function TojuConversation() {
 
   const openProperty = (p: PropertyData) => router.push(`/property/${p.id}`);
 
+  // The suggestedAction is rendered as its own affordance, never folded into the
+  // message text (Layer 9 "half-open door"). For now every actionable kind opens
+  // the referenced property; a future 9.4 surface can branch on `kind`.
+  const runAction = (action: NonNullable<MockTojuTurn['suggestedAction']>) => {
+    if (action.kind !== 'none' && action.property_id) {
+      router.push(`/property/${action.property_id}`);
+    }
+  };
+
   return (
     <View style={styles.screen}>
       {/* Ambient header */}
@@ -110,6 +119,15 @@ export default function TojuConversation() {
                   <PropertyCard key={pid} property={p} onPress={() => openProperty(p)} />
                 ) : null;
               })}
+
+              {turn.suggestedAction && turn.suggestedAction.kind !== 'none' ? (
+                <Pressable
+                  style={styles.actionButton}
+                  onPress={() => runAction(turn.suggestedAction!)}
+                >
+                  <Label style={styles.actionLabel}>{turn.suggestedAction.label}</Label>
+                </Pressable>
+              ) : null}
 
               {turn.suggestions ? (
                 <View style={styles.suggestions}>
@@ -167,5 +185,13 @@ const styles = StyleSheet.create({
     borderColor: color.glassBorder,
     backgroundColor: color.surface,
   },
+  actionButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm + 2,
+    borderRadius: radius.pill,
+    backgroundColor: color.accent,
+  },
+  actionLabel: { color: color.canvas, letterSpacing: 0.5 },
   dock: { position: 'absolute', left: space.lg, right: space.lg },
 });

@@ -79,9 +79,28 @@ export interface ChatSession extends BaseEntity {
   pref_listing_type: ListingType | null;
 }
 
+/**
+ * A discrete next step Toju surfaces, kept structurally separate from the
+ * recommendation prose in `message`. The Layer 9 north star (the "half-open
+ * door") requires "what I observed and recommend" and "the action you'd need to
+ * take" to be distinct labeled fields, so the future 9.4 advisory Personal
+ * Property Agent is an extension rather than a UI rewrite.
+ */
+export interface TojuSuggestedAction {
+  label: string;
+  kind: 'start_conversation' | 'view_property' | 'none';
+  property_id?: string;
+}
+
 /** Response of the toju-chat Edge Function */
 export interface TojuChatResponse {
   message: string;
   property_ids: string[];
   session_id: string;
+  /**
+   * The action the user could take, separate from the recommendation text in
+   * `message` — never merged into the prose. Optional and null when Toju is only
+   * asking or observing, so existing callers are unaffected.
+   */
+  suggestedAction?: TojuSuggestedAction | null;
 }

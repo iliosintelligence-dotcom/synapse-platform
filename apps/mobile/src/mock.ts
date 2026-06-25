@@ -7,6 +7,7 @@
  * properties.getProperty, leads.createLead). Replace the mock, keep the UI.
  */
 import type { PropertyData } from '@synapse/ui';
+import type { TojuSuggestedAction } from '@synapse/types';
 
 export const MOCK_PROPERTIES: PropertyData[] = [
   {
@@ -121,6 +122,12 @@ export interface MockTojuTurn {
   reasoning?: string;
   propertyIds?: string[];
   suggestions?: string[];
+  /**
+   * The action-to-take, mirroring `TojuChatResponse.suggestedAction` — kept
+   * structurally separate from `message` so the UI renders it as a distinct
+   * affordance, never merged into the prose (Layer 9 "half-open door").
+   */
+  suggestedAction?: TojuSuggestedAction | null;
 }
 
 /**
@@ -158,6 +165,11 @@ export function mockToju(userText: string, turnIndex: number): MockTojuTurn {
     reasoning:
       'Both clear independent verification, sit inside your budget, and show stronger appreciation than the Phase 1 average. Tap either to see my full take and the trust report.',
     propertyIds: ['p1', 'p2'],
+    suggestedAction: {
+      kind: 'start_conversation',
+      label: 'Start a conversation about this property',
+      property_id: 'p1',
+    },
     suggestions: ['Why these two?', 'Show me cheaper options'],
   };
 }

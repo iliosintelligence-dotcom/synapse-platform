@@ -134,13 +134,43 @@ interface SearchArgs {
   bedrooms_min?: number;
 }
 
+/**
+ * A discrete next step Toju surfaces, kept structurally separate from the
+ * recommendation prose. Layer 9's "half-open door" (docs/layer9.md, instruction
+ * 2) requires the observation/recommendation and the action-to-take to be
+ * distinct labeled fields so the future 9.4 advisory agent extends this contract
+ * rather than rewriting the UI. Mirrors `TojuSuggestedAction` in @synapse/types.
+ */
+interface SuggestedAction {
+  label: string;
+  kind: 'start_conversation' | 'view_property' | 'none';
+  property_id?: string;
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   property_ids?: string[];
+  /** The action surfaced this turn — derived from the tool result, never the prose. */
+  suggested_action?: SuggestedAction | null;
   prompt_version?: string;
   model?: string;
   at: string;
+}
+
+/**
+ * Derive the next-step action from the structured tool outcome — NOT by parsing
+ * the answer text. When the search returned listings, the user's natural next
+ * step is to reach out about the top-ranked one; otherwise there is no action
+ * (Toju is asking a question or has no listings to act on).
+ */
+function deriveSuggestedAction(ids: string[]): SuggestedAction | null {
+  if (ids.length === 0) return null;
+  return {
+    kind: 'start_conversation',
+    label: 'Start a conversation about this property',
+    property_id: ids[0],
+  };
 }
 
 Deno.serve(async (req: Request) => {
@@ -205,12 +235,16 @@ Deno.serve(async (req: Request) => {
       history,
     );
     const extractedPrefs = toolArgs as SearchArgs | null;
+    // Action is derived from the structured tool outcome, kept separate from the
+    // recommendation prose (Layer 9 instruction 2 / the "half-open door").
+    const suggestedAction = deriveSuggestedAction(recommendedIds);
 
     // ── persist assistant turn + trim ──
     history.push({
       role: 'assistant',
       content: finalText,
       property_ids: recommendedIds,
+      suggested_action: suggestedAction,
       prompt_version: ACTIVE_PROMPT.version,
       model: provider.model,
       at: new Date().toISOString(),
@@ -227,7 +261,12 @@ Deno.serve(async (req: Request) => {
     }
     await supabase.from('chat_sessions').update(sessionUpdate).eq('id', sessionId);
 
-    return json({ message: finalText, property_ids: recommendedIds, session_id: sessionId });
+    return json({
+      message: finalText,
+      property_ids: recommendedIds,
+      session_id: sessionId,
+      suggestedAction,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return json({ error: message }, 500);
