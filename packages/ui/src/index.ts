@@ -143,5 +143,17 @@ export type { ViralLoopCardProps, ViralLoopCardData, LoopStep } from './ViralLoo
 export { default as SocialAccountCard } from './SocialAccountCard';
 export type { SocialAccountCardProps, SocialAccountCardData, SocialPlatformKind } from './SocialAccountCard';
 
+// Layer 6 — financial infrastructure
+export { default as EscrowCard } from './EscrowCard';
+export type { EscrowCardProps, EscrowCardData, EscrowStatusKind, EscrowMilestoneView } from './EscrowCard';
+export { default as CommissionLedgerCard } from './CommissionLedgerCard';
+export type { CommissionLedgerCardProps, CommissionLedgerCardData, CommissionStatusKind } from './CommissionLedgerCard';
+export { default as RepaymentScheduleCard } from './RepaymentScheduleCard';
+export type { RepaymentScheduleCardProps, RepaymentScheduleCardData, RepaymentRow, RepaymentRowStatus } from './RepaymentScheduleCard';
+export { default as FinancialIdentityCard } from './FinancialIdentityCard';
+export type { FinancialIdentityCardProps, FinancialIdentityCardData, ScoreComponent } from './FinancialIdentityCard';
+export { default as WalletCard } from './WalletCard';
+export type { WalletCardProps, WalletCardData } from './WalletCard';
+
 // Storybook-style mock props
 export * as mocks from './mocks';

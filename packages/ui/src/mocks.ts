@@ -10,6 +10,11 @@ import type { PaymentScenario } from './AffordabilityCard';
 import type { TimeSlot } from './ViewingCard';
 import type { NeighbourhoodCategory } from './NeighbourhoodCard';
 import type { MapPin } from './MapCard';
+import type { EscrowCardData } from './EscrowCard';
+import type { CommissionLedgerCardData } from './CommissionLedgerCard';
+import type { RepaymentScheduleCardData } from './RepaymentScheduleCard';
+import type { FinancialIdentityCardData } from './FinancialIdentityCard';
+import type { WalletCardData } from './WalletCard';
 
 export const mockNodes: VerificationNode[] = [
   { name: 'Title', status: 'pass' },
@@ -88,3 +93,59 @@ export const mockImages = [
   'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200&q=80',
   'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1200&q=80',
 ];
+
+/* ───────── Layer 6 — financial infrastructure ───────── */
+
+export const mockEscrow: EscrowCardData = {
+  amountLabel: '₦12,500,000',
+  status: 'held',
+  partnerName: 'Sterling MFB',
+  typeLabel: 'Purchase escrow',
+  milestones: [
+    { id: 'm1', name: 'Documents verified', status: 'approved', releaseLabel: '10%' },
+    { id: 'm2', name: 'Survey & title check passed', status: 'approved', releaseLabel: '20%' },
+    { id: 'm3', name: 'Possession handover confirmed', status: 'pending', releaseLabel: '70%' },
+  ],
+};
+
+export const mockCommission: CommissionLedgerCardData = {
+  dealLabel: '3-Bed · Lekki Phase 1',
+  agentName: 'Bola Adeyemi',
+  transactionValueLabel: '₦165M',
+  grossLabel: '₦4,950,000',
+  netPayoutLabel: '₦2,970,000',
+  splitLabel: 'Agent 60% · Team lead 10% · Agency 30%',
+  status: 'approved',
+  paidLabel: null,
+};
+
+export const mockRepayment: RepaymentScheduleCardData = {
+  title: 'Rent — 2-Bed, Yaba',
+  paidCount: 4,
+  totalCount: 12,
+  nextDueLabel: '12 Jul',
+  rows: [
+    { id: 'r1', label: 'Installment 4 · 12 Jun', amountLabel: '₦220,000', status: 'paid' },
+    { id: 'r2', label: 'Installment 5 · 12 Jul', amountLabel: '₦220,000', status: 'upcoming' },
+    { id: 'r3', label: 'Installment 6 · 12 Aug', amountLabel: '₦220,000', status: 'upcoming' },
+  ],
+};
+
+export const mockFinancialIdentity: FinancialIdentityCardData = {
+  overallScore: 78,
+  components: [
+    { label: 'Payment reliability', value: 82 },
+    { label: 'Verification completeness', value: 90 },
+    { label: 'Transaction history', value: 64 },
+  ],
+  rentalHistoryVerified: true,
+  improveHint: 'Complete one more on-time rent cycle to push your reliability score past 85.',
+};
+
+export const mockWallet: WalletCardData = {
+  purposeLabel: 'Rent savings',
+  balanceLabel: '₦640,000',
+  partnerName: 'Sterling MFB',
+  status: 'active',
+  goal: { label: 'Annual rent target', targetLabel: '₦640k / ₦1.2M', progressPct: 53 },
+};

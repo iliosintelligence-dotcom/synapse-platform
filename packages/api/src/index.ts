@@ -23,6 +23,14 @@ export * as documents from './documents';
 export * as content from './content';
 export * as social from './social';
 export * as distribution from './distribution';
+// ── Layer 6 (financial infrastructure) ──
+export * as commission from './commission';
+export * as affordability from './affordability';
+export * as financialIdentity from './financialIdentity';
+export * as escrow from './escrow';
+export * as developer from './developer';
+export * as financing from './financing';
+export * as wallet from './wallet';
 export * from './hooks';
 export { initMedia } from './media';
 export type { CreateLeadResult } from './leads';

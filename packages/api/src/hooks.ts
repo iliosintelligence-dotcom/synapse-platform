@@ -61,6 +61,24 @@ import { listDocuments, getVaultCompleteness } from './documents';
 import { generateContent, listPropertyContent, approveContent, listCampaignSuggestions } from './content';
 import { listSocialAccounts, listSocialPosts, listCampaigns, createCampaign } from './social';
 import { getDiscoveryFeed, createReferral, getReferralSummary } from './distribution';
+import { listAgencyCommissions, listAgentCommissions, runCommissionPayout } from './commission';
+import { analyseAffordability, listMyAffordability } from './affordability';
+import { getMyFinancialIdentity } from './financialIdentity';
+import { listDealEscrows, getEscrowAccount } from './escrow';
+import { getMyInstallmentPlans } from './developer';
+import { listMyRentApplications, listMortgageProviders } from './financing';
+import { getMyWallets } from './wallet';
+import type {
+  AffordabilityAnalysis,
+  AffordabilityRequest,
+  CommissionLedgerEntry,
+  EscrowAccount,
+  FinancialIdentity,
+  InstallmentPlan,
+  MortgageProvider,
+  RentFinancingApplication,
+  Wallet,
+} from '@synapse/types';
 import type {
   ApproveContentInput,
   Campaign,
@@ -145,6 +163,15 @@ export const queryKeys = {
   campaigns: (agencyId: string) => ['campaigns', agencyId] as const,
   discoveryFeed: (feed: string, date: string) => ['discovery', feed, date] as const,
   referralSummary: ['referral-summary'] as const,
+  agencyCommissions: (agencyId: string) => ['commissions', 'agency', agencyId] as const,
+  agentCommissions: (agentId: string) => ['commissions', 'agent', agentId] as const,
+  affordability: ['affordability', 'me'] as const,
+  financialIdentity: ['financial-identity', 'me'] as const,
+  dealEscrows: (dealRoomId: string) => ['escrow', dealRoomId] as const,
+  installmentPlans: ['installment-plans', 'me'] as const,
+  rentApplications: ['rent-financing', 'me'] as const,
+  mortgageProviders: ['mortgage-providers'] as const,
+  wallets: ['wallets', 'me'] as const,
 };
 
 /* ───────── session + profile ───────── */
@@ -649,4 +676,82 @@ export function useCreateReferral(): UseMutationResult<Referral, Error, CreateRe
     mutationFn: createReferral,
     onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.referralSummary }),
   });
+}
+
+/* ───────── Layer 6: financial infrastructure ───────── */
+
+export function useAgencyCommissions(agencyId: string | null): UseQueryResult<CommissionLedgerEntry[]> {
+  return useQuery({
+    queryKey: queryKeys.agencyCommissions(agencyId ?? 'none'),
+    queryFn: () => listAgencyCommissions(agencyId as string),
+    enabled: agencyId !== null,
+  });
+}
+
+export function useAgentCommissions(agentId: string | null): UseQueryResult<CommissionLedgerEntry[]> {
+  return useQuery({
+    queryKey: queryKeys.agentCommissions(agentId ?? 'none'),
+    queryFn: () => listAgentCommissions(agentId as string),
+    enabled: agentId !== null,
+  });
+}
+
+export function useRunCommissionPayout(): UseMutationResult<{ paid: number }, Error, string> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: runCommissionPayout,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['commissions'] }),
+  });
+}
+
+export function useMyAffordability(): UseQueryResult<AffordabilityAnalysis[]> {
+  return useQuery({ queryKey: queryKeys.affordability, queryFn: listMyAffordability });
+}
+
+export function useAnalyseAffordability(): UseMutationResult<
+  AffordabilityAnalysis,
+  Error,
+  AffordabilityRequest & { property_monthly_cost?: number; property_price?: number }
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: analyseAffordability,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.affordability }),
+  });
+}
+
+export function useMyFinancialIdentity(): UseQueryResult<FinancialIdentity | null> {
+  return useQuery({ queryKey: queryKeys.financialIdentity, queryFn: getMyFinancialIdentity });
+}
+
+export function useDealEscrows(dealRoomId: string | null): UseQueryResult<EscrowAccount[]> {
+  return useQuery({
+    queryKey: queryKeys.dealEscrows(dealRoomId ?? 'none'),
+    queryFn: () => listDealEscrows(dealRoomId as string),
+    enabled: dealRoomId !== null,
+  });
+}
+
+export function useEscrowAccount(id: string | null): UseQueryResult<EscrowAccount> {
+  return useQuery({
+    queryKey: ['escrow-account', id ?? 'none'],
+    queryFn: () => getEscrowAccount(id as string),
+    enabled: id !== null,
+  });
+}
+
+export function useMyInstallmentPlans(): UseQueryResult<InstallmentPlan[]> {
+  return useQuery({ queryKey: queryKeys.installmentPlans, queryFn: getMyInstallmentPlans });
+}
+
+export function useMyRentApplications(): UseQueryResult<RentFinancingApplication[]> {
+  return useQuery({ queryKey: queryKeys.rentApplications, queryFn: listMyRentApplications });
+}
+
+export function useMortgageProviders(): UseQueryResult<MortgageProvider[]> {
+  return useQuery({ queryKey: queryKeys.mortgageProviders, queryFn: listMortgageProviders });
+}
+
+export function useMyWallets(): UseQueryResult<Wallet[]> {
+  return useQuery({ queryKey: queryKeys.wallets, queryFn: getMyWallets });
 }

@@ -6,3 +6,4 @@ export * from './mvp';
 export * from './layer2';
 export * from './layer4';
 export * from './layer5';
+export * from './layer6';
