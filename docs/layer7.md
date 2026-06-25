@@ -30,7 +30,7 @@
 | 7.4 | **Property Management Cloud** | NEEDS SCALE | Rent collection, maintenance, occupancy, landlord reporting. Distinct buyer (landlord), distinct sales motion. Revisit once enough completed rentals exist — those landlords are the warm first customers, sourced from Synapse's own transaction history. |
 | 7.5 | **Community Layer** | NEEDS SCALE | Building/development resident communities. A *retention* play, not acquisition. A 3-member community is a ghost town that damages trust. Revisit once geographic density in specific developments is proven. |
 | 7.6 | **Market Intelligence** | NEEDS SCALE | Not new — this is **Layer 5's** marketplace-health/growth analytics, *productised and sold externally* (banks, developers, investors) once the data has volume + history worth paying for. A go-to-market decision, not new architecture. |
-| 7.7 | **AI Property OS** | NEEDS SCALE | Toju's evolution from finder → portfolio/ops decision engine ("which property to sell," "which tenants will renew," "which agents underperform"). A later capability of the **Layer 3 AI Gateway**, gated on the underlying data layers having *history*. ⚠ See door 3 below. |
+| 7.7 | **AI Property OS** | NEEDS SCALE | Toju's evolution from finder → portfolio/ops decision engine ("which property to sell," "which tenants will renew," "which agents underperform"). A later capability of the **Layer 3 AI Gateway**, gated on the underlying data layers having *history*. The gateway is now provider-agnostic + prompt-versioned (door 3, below), so this is an evolution, not a rewrite. |
 | 7.8 | **Developer Cloud** | NEEDS SCALE | Extends L6 System 6 (inventory, installments, reservations, reminders) into full SaaS — launch tooling, lead distribution, sales-velocity forecasting. Revisit once 3–5 developers actively use the L6 infra and ask for more. |
 | 7.9 | **Investment Marketplace** | **NEEDS LICENSING** | Fractional property investment / syndication = a **securities product**. Requires SEC (Nigeria) registration or a licensed capital-markets partner and a separate legal/compliance structure. **Do not write schema until that legal structure is confirmed in writing** — exactly the Layer-6 escrow/lending rule. Needs board-level + legal-counsel sign-off, not an engineering sprint. |
 | 7.10 | **API Platform** | NEEDS SCALE | Open Synapse verification/trust/identity data to banks, insurers, government. The natural endpoint of the whole roadmap, and entirely demand-led: an API with no data of consequence is just an API. The L6 Financial Identity Graph + L4 Trust OS are the two assets most likely to make it compelling. Revisit once those have scale **and** a partner expresses inbound interest. |
@@ -49,26 +49,28 @@ the repo today:
 |---|-----------------------------|--------|----------|
 | 1 | Identity data structured for later unification (UUID keys, clean FKs) | ✅ **Open** | `profiles`, `agencies`, `financial_identities` are all UUID-keyed tables with clean FKs — 7.1 can reference them without migration. |
 | 2 | Trust/reputation as discrete, attributable, append-only events (not opaque scores) | ✅ **Open** | `reject_mutation()` append-only guard across **12+** migrations incl. all of L4 trust (`0011`–`0016`) and L6 (`0023`/`0025`/`0026`). 7.2 aggregates a real event history. |
-| 3 | **AI Gateway provider-agnostic + prompt-versioned** (so 7.7 isn't a rewrite) | ⚠️ **NOT open yet** | `toju-chat/index.ts` hardcodes a single provider + model (`OPENAI_URL`, `MODEL = 'gpt-4o'`), a single inline **unversioned** `SYSTEM_PROMPT` const, and one tool. There is **no** provider abstraction, prompt registry, or version field. |
+| 3 | **AI Gateway provider-agnostic + prompt-versioned** (so 7.7 isn't a rewrite) | ✅ **Open** (as of `96565b2`, 2026-06-25) | `toju-chat/index.ts` now has an `LLMProvider` abstraction with OpenAI + Anthropic adapters (default `claude-opus-4-8`), a versioned prompt registry that records prompt version + model per turn, and a tool registry. Was closed; widened the same day it was flagged. |
 | 4 | Synapse stays out of fund custody (keeps 7.9 / banking optionality open) | ✅ **Open** | `0027_layer6_lending_wallet.sql` verbatim: *"Synapse originates, packages, mirrors. It does not underwrite or custody"*; wallet balance *"MIRRORED + reconciled — never the source of truth."* |
 
-### The one closed door — door 3, and what it means
+### Door 3 — flagged closed, then opened the same day
 
-Today's Toju is a single-provider (OpenAI), single-model (`gpt-4o`),
-single-hardcoded-unversioned-prompt, one-tool Edge Function. That is fine for an
-MVP property finder. It is **not** the "provider-agnostic, prompt-versioned AI
-Gateway" this document assumes 7.7 will extend — so 7.7 as written would today
-require an architecture change, not a feature add.
+When this document was first written, Toju was a single-provider (OpenAI),
+single-model (`gpt-4o`), single-hardcoded-unversioned-prompt, one-tool Edge
+Function — fine for an MVP finder, but **not** the provider-agnostic,
+prompt-versioned gateway 7.7 assumes, so 7.7 as written would have required an
+architecture change, not a feature add.
 
-This does **not** need fixing now (7.7 is far off and this is out of scope for a
-vision pass). But it is the one door to widen *before* 7.7 — and the cheap time
-to do it is the next time Toju is touched, not when a portfolio-decision-engine
-sprint is blocked on it. The widening is small and low-risk: (a) a
-provider/model abstraction behind the `callOpenAI` call site, (b) a versioned
-prompt source (even versioned constants beat an inline literal), (c) a tool
-registry instead of a single inline tool. Worth noting too: per current
-guidance, new AI work should default to the latest Claude models — so the
-provider abstraction and a Claude default are the same piece of work.
+It was widened the same day (commit `96565b2`), exactly along the lines flagged:
+(a) an `LLMProvider` abstraction with OpenAI + Anthropic adapters, defaulting to
+`claude-opus-4-8`; (b) a versioned prompt registry that records prompt version +
+model on every assistant turn; (c) a tool registry the gateway iterates instead
+of a single inline tool. Toju's behavior, prompt text, RLS scoping, and
+mandatory-city rule were left unchanged.
+
+So all three keep-Layer-7-open doors are now verified open. The lesson worth
+keeping: a vision doc is only useful if its self-checks are run against the
+*code*, not the *intent* — this one caught a door that intent said was open and
+code said was shut, and the gap got closed because the check was honest.
 
 ## The one-line test for every future Layer 7 decision
 

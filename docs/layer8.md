@@ -54,11 +54,12 @@ Verified against the codebase, 2026-06-25:
    ✅ **Yes.** `reject_mutation` append-only event tables; scores recompute from history. This is what makes 8.3 possible later without a rewrite.
 
 3. **AI Gateway provider-agnostic and prompt-versioned, not hardcoded to one model + one prompt set?**
-   ⚠️ **Not yet — specified that way, but not built that way.** `supabase/functions/toju-chat/index.ts` today hardcodes a single provider + model (`OPENAI_URL`, `MODEL = 'gpt-4o'`), a single inline **unversioned** `SYSTEM_PROMPT`, and one inline tool. There is no provider abstraction, prompt registry, or version field. Until that is widened, 8.7 (and 7.7) would require an architecture change, not a feature add. Tracked as a flagged refactor to do the next time Toju is touched — *not* a reason to build anything Layer-8-shaped now. See [layer7.md](layer7.md) "door 3."
+   ✅ **Yes** (as of `96565b2`, 2026-06-25). When first checked this was **not** built that way — `toju-chat/index.ts` hardcoded OpenAI `gpt-4o` + a single inline unversioned prompt + one tool. It was widened the same day into an `LLMProvider` abstraction (OpenAI + Anthropic adapters, default `claude-opus-4-8`), a versioned prompt registry recording version + model per turn, and a tool registry — so 8.7 (and 7.7) is now an evolution, not a rewrite. See [layer7.md](layer7.md) "door 3."
 
 If checks 1–3 all stay **yes** as Layers 1–6 actually get built, Layer 8 remains
-genuinely possible without anyone needing to think about it for years. Check 3 is
-the one currently at risk.
+genuinely possible without anyone needing to think about it for years. All three
+are currently yes — check 3 was caught at risk and closed the same day (`96565b2`);
+re-run all three at each layer's real implementation, since a "yes" can regress.
 
 ## What to do with this document
 

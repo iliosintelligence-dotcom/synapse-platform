@@ -73,16 +73,16 @@ list is a hardcoded array.
 > **Task 3 — real Toju.** In `home.tsx`, capture the user's typed text from
 > `FloatingSearch` and pass it to `send(text)`; swap `mockToju()` for
 > `toju.sendTojuMessage(text, sessionId)`, tracking `session_id` across turns and
-> resuming via `getCurrentSession()`. Add error + offline states. **Do not touch
-> the model/provider** — that is the separate door-3 refactor (see below).
+> resuming via `getCurrentSession()`. Add error + offline states. The model/provider
+> layer is already provider-agnostic + prompt-versioned (`96565b2`), so this is a
+> straight `sendTojuMessage` call — no gateway work needed here.
 >
 > Verify: typecheck mobile + dashboard; smoke-test the lead loop against a
 > Supabase project with migrations applied (see prerequisite).
 
 ### Explicit non-goals (do NOT do these here)
-- The AI Gateway provider/prompt-versioning refactor — **already tracked
-  separately** (layer7.md / layer8.md "door 3", task `task_1775701b`). Task 3 is
-  wiring only.
+- The AI Gateway provider/prompt-versioning refactor — **already done** (`96565b2`,
+  layer7.md / layer8.md "door 3"). Task 3 is wiring only.
 - Auth screens / onboarding flows, property ingestion pipeline, Layer 2 pipeline
   stages. Out of scope for the defining trio.
 
