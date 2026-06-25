@@ -1,27 +1,53 @@
 /**
  * toju-chat — Toju, the AI property consultant. Deno / Supabase Edge Function.
  *
- * GPT-4o with exactly one tool: search_properties. Runs with the CALLER's
- * JWT so all reads/writes obey RLS (chat_sessions is owner-only; properties
- * exposes only verified+active+live rows to consumers).
+ * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
+ * Property OS" without an architecture rewrite). The LLM backend is swappable
+ * behind an `LLMProvider` adapter, the system prompt comes from a versioned
+ * registry, and tools come from a registry the gateway iterates. Toju's
+ * behaviour is unchanged — same prompt text, same single `search_properties`
+ * tool, same mandatory-city rule, same 30-message trim, same no-listings line.
+ *
+ * Defaults to Claude (`claude-opus-4-8`); OpenAI (`gpt-4o`) remains available
+ * via TOJU_LLM_PROVIDER=openai. Both run with the CALLER's JWT so all
+ * reads/writes obey RLS (chat_sessions is owner-only; properties exposes only
+ * verified+active+live rows to consumers).
  *
  * Hard constraints:
  *  - city is MANDATORY on every search. Toju never shows listings from a
  *    city the user did not ask about.
  *  - No embeddings / vectors / memory service. History lives in
- *    chat_sessions.messages (jsonb), trimmed to the last 30 messages.
+ *    chat_sessions.messages (jsonb), trimmed to the last 30 messages. Each
+ *    assistant turn records the prompt version + model that produced it.
  *  - Extracted preferences (city, budget, type) are promoted to columns.
  *
- * Env: OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY (auto-injected).
+ * Env: ANTHROPIC_API_KEY (default provider) and/or OPENAI_API_KEY,
+ *      optional TOJU_LLM_PROVIDER ('anthropic' | 'openai', default 'anthropic'),
+ *      SUPABASE_URL, SUPABASE_ANON_KEY (auto-injected).
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
 
 const MAX_MESSAGES = 30;
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-const MODEL = 'gpt-4o';
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_MAX_TOKENS = 1024;
 
-const SYSTEM_PROMPT = `You are Toju, an AI real estate consultant for Synapse in Nigeria.
+/* ───────── prompt registry ─────────
+ * Versioned source for Toju's system prompt. The active version is recorded on
+ * every assistant turn so prompt changes are traceable (and A/B-able later). */
+
+interface PromptVersion {
+  id: string;
+  version: string;
+  text: string;
+}
+
+const TOJU_SYSTEM_V1: PromptVersion = {
+  id: 'toju-system',
+  version: '2026-06-25.1',
+  text: `You are Toju, an AI real estate consultant for Synapse in Nigeria.
 You ADVISE and RECOMMEND — you are not a search box. You reason out loud and
 explain WHY a property fits before showing it.
 
@@ -39,33 +65,65 @@ Hard rules:
   in {city} yet — want me to notify you when one does?" Do not invent
   listings or suggest other cities unprompted.
 - All listings are independently verified; you can speak to that trust.
-- Naira amounts use the ₦ symbol.`;
+- Naira amounts use the ₦ symbol.`,
+};
 
-const TOOLS = [
+const PROMPT_REGISTRY: Record<string, PromptVersion> = {
+  [TOJU_SYSTEM_V1.version]: TOJU_SYSTEM_V1,
+};
+
+const ACTIVE_PROMPT = TOJU_SYSTEM_V1;
+// `PROMPT_REGISTRY` is the lookup surface for future versioned prompts; the
+// active one is exported via ACTIVE_PROMPT. Referenced to keep it live.
+void PROMPT_REGISTRY;
+
+/* ───────── tool registry ─────────
+ * Gateway-neutral tool definitions. Each provider adapter translates these into
+ * its own wire format, and the gateway dispatches a tool call to `run` by name.
+ * Adding a tool later means appending an entry here — no edits to request bodies. */
+
+interface GatewayTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  // deno-lint-ignore no-explicit-any
+  run(supabase: any, args: Record<string, unknown>): Promise<{ content: string; ids: string[] }>;
+}
+
+const TOOLS: GatewayTool[] = [
   {
-    type: 'function',
-    function: {
-      name: 'search_properties',
-      description:
-        'Search verified, active Synapse listings. city is mandatory. Returns matching properties to recommend.',
-      parameters: {
-        type: 'object',
-        properties: {
-          city: { type: 'string', description: 'City the user is searching in. REQUIRED.' },
-          listing_type: { type: 'string', enum: ['sale', 'rent', 'shortlet'] },
-          property_type: {
-            type: 'string',
-            enum: ['apartment', 'house', 'duplex', 'terrace', 'penthouse', 'bungalow', 'land', 'commercial'],
-          },
-          budget_min: { type: 'number', description: 'Minimum price in naira' },
-          budget_max: { type: 'number', description: 'Maximum price in naira' },
-          bedrooms_min: { type: 'number' },
+    name: 'search_properties',
+    description:
+      'Search verified, active Synapse listings. city is mandatory. Returns matching properties to recommend.',
+    parameters: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City the user is searching in. REQUIRED.' },
+        listing_type: { type: 'string', enum: ['sale', 'rent', 'shortlet'] },
+        property_type: {
+          type: 'string',
+          enum: ['apartment', 'house', 'duplex', 'terrace', 'penthouse', 'bungalow', 'land', 'commercial'],
         },
-        required: ['city'],
+        budget_min: { type: 'number', description: 'Minimum price in naira' },
+        budget_max: { type: 'number', description: 'Maximum price in naira' },
+        bedrooms_min: { type: 'number' },
       },
+      required: ['city'],
+    },
+    async run(supabase, args) {
+      const searchArgs = args as unknown as SearchArgs;
+      const { results, ids } = await runSearch(supabase, searchArgs);
+      // Feed tool result back for the final natural-language answer.
+      const content =
+        results.length > 0
+          ? JSON.stringify(results)
+          : `NO_RESULTS for city "${searchArgs.city}". Use the exact no-listings line.`;
+      return { content, ids };
     },
   },
 ];
+
+const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 interface SearchArgs {
   city: string;
@@ -80,6 +138,8 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   property_ids?: string[];
+  prompt_version?: string;
+  model?: string;
   at: string;
 }
 
@@ -90,8 +150,12 @@ Deno.serve(async (req: Request) => {
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
 
-    const openaiKey = Deno.env.get('OPENAI_API_KEY');
-    if (!openaiKey) return json({ error: 'Server misconfigured: no OpenAI key' }, 500);
+    let provider: LLMProvider;
+    try {
+      provider = resolveProvider();
+    } catch (e) {
+      return json({ error: `Server misconfigured: ${(e as Error).message}` }, 500);
+    }
 
     // Caller-scoped client — RLS enforced on every query.
     const supabase = createClient(
@@ -133,60 +197,22 @@ Deno.serve(async (req: Request) => {
     const nowIso = new Date().toISOString();
     history.push({ role: 'user', content: body.message, at: nowIso });
 
-    // ── compose OpenAI messages ──
-    const oaMessages: { role: string; content: string }[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-    ];
-
-    // ── first model call (may request the tool) ──
-    let recommendedIds: string[] = [];
-    let extractedPrefs: SearchArgs | null = null;
-
-    const first = await callOpenAI(openaiKey, oaMessages, TOOLS);
-    const choice = first.choices?.[0]?.message;
-    let finalText = choice?.content ?? '';
-
-    const toolCall = choice?.tool_calls?.[0];
-    if (toolCall && toolCall.function?.name === 'search_properties') {
-      const args = JSON.parse(toolCall.function.arguments || '{}') as SearchArgs;
-      extractedPrefs = args;
-
-      const { results, ids } = await runSearch(supabase, args);
-      recommendedIds = ids;
-
-      // Feed tool result back for the final natural-language answer.
-      const toolResultContent =
-        results.length > 0
-          ? JSON.stringify(results)
-          : `NO_RESULTS for city "${args.city}". Use the exact no-listings line.`;
-
-      const second = await callOpenAI(
-        openaiKey,
-        [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...history.map((m) => ({ role: m.role, content: m.content })),
-          {
-            role: 'assistant',
-            content: '',
-            tool_calls: [toolCall],
-          } as unknown as { role: string; content: string },
-          {
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: toolResultContent,
-          } as unknown as { role: string; content: string },
-        ],
-        undefined,
-      );
-      finalText = second.choices?.[0]?.message?.content ?? finalText;
-    }
+    // ── run the gateway (may call a tool, then answer) ──
+    const { text: finalText, ids: recommendedIds, toolArgs } = await runGateway(
+      provider,
+      supabase,
+      ACTIVE_PROMPT.text,
+      history,
+    );
+    const extractedPrefs = toolArgs as SearchArgs | null;
 
     // ── persist assistant turn + trim ──
     history.push({
       role: 'assistant',
       content: finalText,
       property_ids: recommendedIds,
+      prompt_version: ACTIVE_PROMPT.version,
+      model: provider.model,
       at: new Date().toISOString(),
     });
     const trimmed = history.slice(-MAX_MESSAGES);
@@ -208,7 +234,87 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-/* ───────── helpers ───────── */
+/* ───────── AI gateway ─────────
+ * A normalized conversation model that each provider adapter translates into
+ * its own wire format. This is the swappable seam: the handler talks to
+ * `LLMProvider`, never to a specific vendor's request shape. */
+
+interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+type GatewayMessage =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string }
+  | { role: 'assistant_tool_call'; toolCall: ToolCall }
+  | { role: 'tool_result'; toolCallId: string; toolName: string; content: string };
+
+interface GatewayResponse {
+  text: string;
+  toolCall: ToolCall | null;
+}
+
+interface LLMProvider {
+  readonly id: string;
+  readonly model: string;
+  complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse>;
+}
+
+function resolveProvider(): LLMProvider {
+  const choice = (Deno.env.get('TOJU_LLM_PROVIDER') ?? 'anthropic').toLowerCase();
+  if (choice === 'openai') {
+    const key = Deno.env.get('OPENAI_API_KEY');
+    if (!key) throw new Error('no OpenAI key');
+    return new OpenAIProvider(key);
+  }
+  // Default: Claude. New AI work defaults to the latest Claude models.
+  const key = Deno.env.get('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('no Anthropic key');
+  return new AnthropicProvider(key);
+}
+
+/**
+ * The two-call flow: ask the model (with tools), and if it requests a known
+ * tool, run it and ask again (without tools) for the final answer. Provider-
+ * agnostic — the adapter handles each vendor's message/tool-call shape.
+ */
+async function runGateway(
+  provider: LLMProvider,
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  system: string,
+  history: ChatMessage[],
+): Promise<{ text: string; ids: string[]; toolArgs: Record<string, unknown> | null }> {
+  const messages: GatewayMessage[] = history.map((m) => ({ role: m.role, content: m.content }));
+
+  const first = await provider.complete(system, messages, TOOLS);
+  let finalText = first.text;
+  let ids: string[] = [];
+  let toolArgs: Record<string, unknown> | null = null;
+
+  const call = first.toolCall;
+  if (call && TOOL_BY_NAME.has(call.name)) {
+    const tool = TOOL_BY_NAME.get(call.name)!;
+    toolArgs = call.arguments;
+
+    const { content, ids: foundIds } = await tool.run(supabase, call.arguments);
+    ids = foundIds;
+
+    const followUp: GatewayMessage[] = [
+      ...messages,
+      { role: 'assistant_tool_call', toolCall: call },
+      { role: 'tool_result', toolCallId: call.id, toolName: call.name, content },
+    ];
+    const second = await provider.complete(system, followUp, []);
+    finalText = second.text || finalText;
+  }
+
+  return { text: finalText, ids, toolArgs };
+}
+
+/* ───────── provider adapters ───────── */
 
 interface OpenAIResponse {
   choices?: {
@@ -219,24 +325,165 @@ interface OpenAIResponse {
   }[];
 }
 
-async function callOpenAI(
-  key: string,
-  messages: unknown[],
-  tools?: unknown[],
-): Promise<OpenAIResponse> {
-  const res = await fetch(OPENAI_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      ...(tools ? { tools, tool_choice: 'auto' } : {}),
+/**
+ * OpenAI Chat Completions: `system` is the first message in the array; an
+ * assistant tool request carries a `tool_calls` array with stringified JSON
+ * arguments; the result returns as a `tool` role message keyed by tool_call_id.
+ */
+class OpenAIProvider implements LLMProvider {
+  readonly id = 'openai';
+  readonly model = 'gpt-4o';
+  constructor(private readonly key: string) {}
+
+  async complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse> {
+    const oaMessages: unknown[] = [
+      { role: 'system', content: system },
+      ...messages.map(toOpenAIMessage),
+    ];
+    const requestBody: Record<string, unknown> = {
+      model: this.model,
+      messages: oaMessages,
       temperature: 0.4,
-    }),
-  });
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
-  return (await res.json()) as OpenAIResponse;
+    };
+    if (tools.length > 0) {
+      requestBody.tools = tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+      requestBody.tool_choice = 'auto';
+    }
+
+    const res = await fetch(OPENAI_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+    if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
+
+    const data = (await res.json()) as OpenAIResponse;
+    const choice = data.choices?.[0]?.message;
+    const tc = choice?.tool_calls?.[0];
+    const toolCall: ToolCall | null = tc
+      ? { id: tc.id, name: tc.function.name, arguments: safeJsonParse(tc.function.arguments) }
+      : null;
+    return { text: choice?.content ?? '', toolCall };
+  }
 }
+
+function toOpenAIMessage(m: GatewayMessage): unknown {
+  switch (m.role) {
+    case 'user':
+      return { role: 'user', content: m.content };
+    case 'assistant':
+      return { role: 'assistant', content: m.content };
+    case 'assistant_tool_call':
+      return {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: m.toolCall.id,
+            type: 'function',
+            function: { name: m.toolCall.name, arguments: JSON.stringify(m.toolCall.arguments) },
+          },
+        ],
+      };
+    case 'tool_result':
+      return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+  }
+}
+
+interface AnthropicResponse {
+  content?: {
+    type: string;
+    text?: string;
+    id?: string;
+    name?: string;
+    input?: Record<string, unknown>;
+  }[];
+}
+
+/**
+ * Anthropic Messages API: `system` is a top-level field (not a message); an
+ * assistant tool request is a `tool_use` content block with the arguments as a
+ * parsed `input` object; the result returns as a `user` message containing a
+ * `tool_result` block keyed by tool_use_id. No `temperature` — it is rejected
+ * on claude-opus-4-8.
+ */
+class AnthropicProvider implements LLMProvider {
+  readonly id = 'anthropic';
+  readonly model = 'claude-opus-4-8';
+  constructor(private readonly key: string) {}
+
+  async complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse> {
+    const requestBody: Record<string, unknown> = {
+      model: this.model,
+      max_tokens: ANTHROPIC_MAX_TOKENS,
+      system,
+      messages: messages.map(toAnthropicMessage),
+    };
+    if (tools.length > 0) {
+      requestBody.tools = tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+      }));
+      // tool_choice defaults to auto when tools are present.
+    }
+
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': this.key,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+    if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
+
+    const data = (await res.json()) as AnthropicResponse;
+    let text = '';
+    let toolCall: ToolCall | null = null;
+    for (const block of data.content ?? []) {
+      if (block.type === 'text' && typeof block.text === 'string') {
+        text += block.text;
+      } else if (block.type === 'tool_use' && !toolCall && block.id && block.name) {
+        toolCall = { id: block.id, name: block.name, arguments: block.input ?? {} };
+      }
+    }
+    return { text, toolCall };
+  }
+}
+
+function toAnthropicMessage(m: GatewayMessage): unknown {
+  switch (m.role) {
+    case 'user':
+      return { role: 'user', content: m.content };
+    case 'assistant':
+      return { role: 'assistant', content: m.content };
+    case 'assistant_tool_call':
+      return {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: m.toolCall.id, name: m.toolCall.name, input: m.toolCall.arguments }],
+      };
+    case 'tool_result':
+      return {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.toolCallId, content: m.content }],
+      };
+  }
+}
+
+function safeJsonParse(raw: string | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(raw || '{}') as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/* ───────── search ───────── */
 
 interface SearchRow {
   id: string;
