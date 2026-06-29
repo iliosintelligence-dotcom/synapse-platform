@@ -1,0 +1,6 @@
+{
+  "//": "Scope the Deno language server to the Edge Functions only. Everything else in the monorepo (packages/*, apps/*) stays on the TypeScript/Node server. Requires the 'denoland.vscode-deno' extension.",
+  "deno.enablePaths": ["supabase/functions"],
+  "deno.lint": true,
+  "deno.unstable": false
+}
