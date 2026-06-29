@@ -1,15 +1,16 @@
 /**
  * Toju Conversation — the consumer home and the front door of Synapse.
- * A reasoned conversation, not a results page: Toju asks progressive questions,
- * then recommends a short, relevant set of verified listings (last 14 days),
- * chaining PropertyCards inline. Tapping one opens the Property Experience.
- * (Defining screen 1/3.)
+ *
+ * Hero-first: opens on a centered FloatingSearch capsule + a short Toju intro
+ * (the signature entry), which fades into the conversation the moment the
+ * consumer taps the capsule, taps a starter, or types. From there Toju asks
+ * progressive questions and recommends a short set of verified listings (last
+ * 14 days), chaining PropertyCards inline. (Defining screen 1/3.)
  *
  * Functionality: wired to the live toju-chat Edge Function via
- * `toju.sendTojuMessage`. The function returns property UUIDs; we fetch and map
- * them to cards. A persistent composer lets the consumer type freely; chips are
- * shortcuts, not the only input. `suggestedAction` renders as its own affordance,
- * never folded into the prose (Layer 9 "half-open door").
+ * `toju.sendTojuMessage` (returns property UUIDs → fetched and mapped to cards).
+ * A persistent composer drives the conversation; `suggestedAction` renders as
+ * its own affordance, never folded into the prose (Layer 9 "half-open door").
  *
  * Set USE_MOCK = true to drive the screen from src/mock without a backend.
  */
@@ -24,13 +25,16 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import Animated, { FadeIn, FadeOut, FadeInDown } from 'react-native-reanimated';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   PropertyCard,
   TypingIndicator,
+  FloatingSearch,
   GlassCard,
   Icon,
+  Display,
   Title,
   Body,
   Caption,
@@ -47,6 +51,8 @@ import { mockToju } from '../../src/mock';
 
 /** Flip to true to exercise the screen without a live backend. */
 const USE_MOCK = false;
+
+const STARTERS = ['I want to buy a home', "I'm looking to invest", '3-bed in Lekki under ₦180M'];
 
 type TojuEntry = {
   kind: 'toju';
@@ -68,7 +74,6 @@ const GREETING: TojuEntry = {
   message:
     "I'm Toju — your property consultant. Tell me what you're looking for and I'll do the rest. No forms, no endless scrolling.",
   properties: [],
-  suggestions: ['I want to buy a home', "I'm looking to invest", '3-bed in Lekki under ₦180M'],
 };
 
 type UiNode = { name: string; status: 'pass' | 'pending' };
@@ -120,6 +125,8 @@ export default function TojuConversation() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
+  const [active, setActive] = useState(false);
   const [entries, setEntries] = useState<Entry[]>([GREETING]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -141,17 +148,22 @@ export default function TojuConversation() {
       });
   }, []);
 
+  // Enter the conversation (hero → chat), optionally focusing the composer.
+  const enter = (focus: boolean) => {
+    setActive(true);
+    if (focus) setTimeout(() => inputRef.current?.focus(), 120);
+  };
+
   async function resolveCards(ids: string[]): Promise<PropertyData[]> {
     if (ids.length === 0) return [];
-    const rows = await Promise.all(
-      ids.map((id) => properties.getProperty(id).catch(() => null)),
-    );
+    const rows = await Promise.all(ids.map((id) => properties.getProperty(id).catch(() => null)));
     return rows.filter((r): r is PropertyWithMedia => r !== null).map(toCard);
   }
 
   const send = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
+    if (!active) setActive(true);
     setInput('');
     setSending(true);
     setEntries((e) => [...e.filter((x) => x.kind !== 'error'), { kind: 'user', text: trimmed }, { kind: 'typing' }]);
@@ -184,11 +196,7 @@ export default function TojuConversation() {
     } catch {
       setEntries((e) => [
         ...e.filter((x) => x.kind !== 'typing'),
-        {
-          kind: 'error',
-          text: "I couldn't reach the network just now. Tap to try again.",
-          retryText: trimmed,
-        },
+        { kind: 'error', text: "I couldn't reach the network just now. Tap to try again.", retryText: trimmed },
       ]);
     } finally {
       setSending(false);
@@ -197,123 +205,172 @@ export default function TojuConversation() {
   };
 
   const openProperty = (id: string) => router.push(`/property/${id}`);
-  const runAction = (action: TojuSuggestedAction) => {
-    if (action.kind !== 'none' && action.property_id) openProperty(action.property_id);
+  const runAction = (a: TojuSuggestedAction) => {
+    if (a.kind !== 'none' && a.property_id) openProperty(a.property_id);
   };
 
   return (
     <KeyboardAvoidingView
       style={styles.screen}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
     >
-      {/* Ambient header */}
-      <View style={[styles.header, { paddingTop: insets.top + space.md }]}>
-        <Label style={{ letterSpacing: 3, color: color.inkDim }}>SYNAPSE</Label>
-        <View style={styles.headerRow}>
-          <Title style={{ fontSize: 30, letterSpacing: 1 }}>Toju</Title>
-          <View style={styles.statusDot} />
-          <Caption>Online · your consultant</Caption>
-        </View>
-      </View>
-
-      <ScrollView
-        ref={scrollRef}
-        style={{ flex: 1 }}
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {entries.map((entry, i) => {
-          if (entry.kind === 'user') {
-            return (
-              <View key={i} style={styles.userBubble}>
-                <Body style={styles.userText}>{entry.text}</Body>
-              </View>
-            );
-          }
-          if (entry.kind === 'typing') return <TypingIndicator key={i} />;
-          if (entry.kind === 'error') {
-            return (
-              <Pressable key={i} style={styles.errorCard} onPress={() => send(entry.retryText)}>
-                <Icon name="arrow.up" size="xs" color={color.warning} />
-                <Body style={{ flex: 1, fontSize: 13.5, color: color.inkDim }}>{entry.text}</Body>
-              </Pressable>
-            );
-          }
-
-          return (
-            <View key={i} style={{ gap: space.sm }}>
-              <GlassCard depthLayer={2} edgeGlow>
-                <Body>{entry.message}</Body>
-                {entry.reasoning ? (
-                  <View style={styles.reasoning}>
-                    <Caption style={{ color: color.accent }}>WHY</Caption>
-                    <Body style={{ fontSize: 13, lineHeight: 19 }}>{entry.reasoning}</Body>
-                  </View>
-                ) : null}
-              </GlassCard>
-
-              {entry.properties.map((p) => (
-                <PropertyCard key={p.id} property={p} onPress={() => openProperty(p.id)} />
-              ))}
-
-              {entry.suggestedAction && entry.suggestedAction.kind !== 'none' ? (
-                <Pressable style={styles.actionButton} onPress={() => runAction(entry.suggestedAction!)}>
-                  <Label style={styles.actionLabel}>{entry.suggestedAction.label}</Label>
-                </Pressable>
-              ) : null}
-
-              {entry.suggestions ? (
-                <View style={styles.suggestions}>
-                  {entry.suggestions.map((s) => (
-                    <Pressable key={s} style={styles.suggestion} onPress={() => send(s)} disabled={sending}>
-                      <Caption style={{ color: color.inkMuted }}>{s}</Caption>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
+      {/* ───────── Hero (resting state) ───────── */}
+      {!active ? (
+        <Animated.View
+          exiting={FadeOut.duration(220)}
+          style={[styles.hero, { paddingTop: insets.top, paddingBottom: insets.bottom + space.lg }]}
+        >
+          <Animated.View entering={FadeInDown.duration(420)} style={styles.heroInner}>
+            <Label style={{ letterSpacing: 4, color: color.inkDim }}>SYNAPSE</Label>
+            <View style={styles.heroTitleRow}>
+              <Display style={styles.heroTitle}>TOJU</Display>
+              <View style={styles.statusDot} />
             </View>
-          );
-        })}
-      </ScrollView>
+            <Body style={styles.heroIntro}>
+              Your property consultant. Tell me what you're looking for — I'll find verified homes that
+              fit. No forms, no endless scrolling.
+            </Body>
 
-      {/* Persistent composer */}
-      <View style={[styles.composer, { paddingBottom: insets.bottom + space.sm }]}>
-        <View style={styles.inputRow}>
-          <TextInput
-            style={styles.input}
-            placeholder="Tell Toju what you're looking for…"
-            placeholderTextColor={color.inkDim}
-            value={input}
-            onChangeText={setInput}
-            onSubmitEditing={() => send(input)}
-            returnKeyType="send"
-            multiline
-            editable={!sending}
-          />
-          <Pressable
-            style={[styles.sendButton, (!input.trim() || sending) && styles.sendButtonDisabled]}
-            onPress={() => send(input)}
-            disabled={!input.trim() || sending}
+            <View style={styles.heroSearch}>
+              <FloatingSearch
+                prompts={['Find a home near my office', 'What can I afford in Lekki?', '3-bed under ₦150M']}
+                onActivate={() => enter(true)}
+                onVoice={() => enter(true)}
+              />
+            </View>
+
+            <View style={styles.heroChips}>
+              {STARTERS.map((s) => (
+                <Pressable key={s} style={styles.suggestion} onPress={() => send(s)}>
+                  <Caption style={{ color: color.inkMuted }}>{s}</Caption>
+                </Pressable>
+              ))}
+            </View>
+          </Animated.View>
+        </Animated.View>
+      ) : (
+        /* ───────── Conversation ───────── */
+        <Animated.View entering={FadeIn.duration(260)} style={{ flex: 1 }}>
+          <View style={[styles.header, { paddingTop: insets.top + space.md }]}>
+            <Label style={{ letterSpacing: 3, color: color.inkDim }}>SYNAPSE</Label>
+            <View style={styles.headerRow}>
+              <Title style={{ fontSize: 26, letterSpacing: 1 }}>Toju</Title>
+              <View style={styles.statusDot} />
+              <Caption>Online · your consultant</Caption>
+            </View>
+          </View>
+
+          <ScrollView
+            ref={scrollRef}
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.scroll}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
           >
-            {sending ? (
-              <ActivityIndicator size="small" color={color.onAccent} />
-            ) : (
-              <Icon name="arrow.up" size="sm" color={color.onAccent} weight={2.4} />
-            )}
-          </Pressable>
-        </View>
-      </View>
+            {entries.map((entry, i) => {
+              if (entry.kind === 'user') {
+                return (
+                  <View key={i} style={styles.userBubble}>
+                    <Body style={styles.userText}>{entry.text}</Body>
+                  </View>
+                );
+              }
+              if (entry.kind === 'typing') return <TypingIndicator key={i} />;
+              if (entry.kind === 'error') {
+                return (
+                  <Pressable key={i} style={styles.errorCard} onPress={() => send(entry.retryText)}>
+                    <Icon name="arrow.up" size="xs" color={color.warning} />
+                    <Body style={{ flex: 1, fontSize: 13.5, color: color.inkDim }}>{entry.text}</Body>
+                  </Pressable>
+                );
+              }
+
+              return (
+                <View key={i} style={{ gap: space.sm }}>
+                  <GlassCard depthLayer={2} edgeGlow>
+                    <Body>{entry.message}</Body>
+                    {entry.reasoning ? (
+                      <View style={styles.reasoning}>
+                        <Caption style={{ color: color.accent }}>WHY</Caption>
+                        <Body style={{ fontSize: 13, lineHeight: 19 }}>{entry.reasoning}</Body>
+                      </View>
+                    ) : null}
+                  </GlassCard>
+
+                  {entry.properties.map((p) => (
+                    <PropertyCard key={p.id} property={p} onPress={() => openProperty(p.id)} />
+                  ))}
+
+                  {entry.suggestedAction && entry.suggestedAction.kind !== 'none' ? (
+                    <Pressable style={styles.actionButton} onPress={() => runAction(entry.suggestedAction!)}>
+                      <Label style={styles.actionLabel}>{entry.suggestedAction.label}</Label>
+                    </Pressable>
+                  ) : null}
+
+                  {entry.suggestions ? (
+                    <View style={styles.suggestions}>
+                      {entry.suggestions.map((s) => (
+                        <Pressable key={s} style={styles.suggestion} onPress={() => send(s)} disabled={sending}>
+                          <Caption style={{ color: color.inkMuted }}>{s}</Caption>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+          </ScrollView>
+
+          {/* Persistent composer */}
+          <View style={[styles.composer, { paddingBottom: insets.bottom + space.sm }]}>
+            <View style={styles.inputRow}>
+              <TextInput
+                ref={inputRef}
+                style={styles.input}
+                placeholder="Tell Toju what you're looking for…"
+                placeholderTextColor={color.inkDim}
+                value={input}
+                onChangeText={setInput}
+                onSubmitEditing={() => send(input)}
+                returnKeyType="send"
+                multiline
+                editable={!sending}
+              />
+              <Pressable
+                style={[styles.sendButton, (!input.trim() || sending) && styles.sendButtonDisabled]}
+                onPress={() => send(input)}
+                disabled={!input.trim() || sending}
+              >
+                {sending ? (
+                  <ActivityIndicator size="small" color={color.onAccent} />
+                ) : (
+                  <Icon name="arrow.up" size="sm" color={color.onAccent} weight={2.4} />
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </Animated.View>
+      )}
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: color.canvas },
+
+  // hero
+  hero: { flex: 1, paddingHorizontal: space.lg, justifyContent: 'center' },
+  heroInner: { gap: space.md },
+  heroTitleRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  heroTitle: { fontSize: 64, letterSpacing: 2, color: color.ink },
+  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: color.success },
+  heroIntro: { fontSize: 16, lineHeight: 24, color: color.inkMuted, maxWidth: 360 },
+  heroSearch: { marginTop: space.md },
+  heroChips: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, marginTop: space.xs },
+
+  // conversation
   header: { paddingHorizontal: space.lg, paddingBottom: space.md },
   headerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: color.success },
   scroll: { padding: space.lg, gap: space.md, paddingBottom: space.xl },
   userBubble: {
     alignSelf: 'flex-end',
