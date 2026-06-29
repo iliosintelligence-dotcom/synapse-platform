@@ -16,6 +16,8 @@
  * Hard constraints:
  *  - city is MANDATORY on every search. Toju never shows listings from a
  *    city the user did not ask about.
+ *  - Recommendation, not catalogue: search is constrained to listings from the
+ *    last 14 days (build-plan v2.0), so consumers see fresh inventory only.
  *  - No embeddings / vectors / memory service. History lives in
  *    chat_sessions.messages (jsonb), trimmed to the last 30 messages. Each
  *    assistant turn records the prompt version + model that produced it.
@@ -94,7 +96,7 @@ const TOOLS: GatewayTool[] = [
   {
     name: 'search_properties',
     description:
-      'Search verified, active Synapse listings. city is mandatory. Returns matching properties to recommend.',
+      'Search verified, active Synapse listings from the last 14 days. city is mandatory. Returns matching properties to recommend.',
     parameters: {
       type: 'object',
       properties: {
@@ -535,6 +537,11 @@ interface SearchRow {
   trust_score: number | null;
 }
 
+/** Recency window for recommendations (build-plan v2.0): Toju only recommends
+ *  properties listed within the last 14 days, so consumers see fresh, relevant
+ *  inventory rather than a stale catalogue. */
+const RECOMMENDATION_WINDOW_DAYS = 14;
+
 async function runSearch(
   // deno-lint-ignore no-explicit-any
   supabase: any,
@@ -542,6 +549,7 @@ async function runSearch(
 ): Promise<{ results: SearchRow[]; ids: string[] }> {
   // city is mandatory and case-insensitive; RLS already restricts to
   // verified + active + live, but we assert it explicitly for clarity.
+  const since = new Date(Date.now() - RECOMMENDATION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   let query = supabase
     .from('properties')
     .select('id, title, city, price, listing_type, property_type, bedrooms, trust_score')
@@ -549,6 +557,8 @@ async function runSearch(
     .eq('verification_status', 'verified')
     .eq('is_active', true)
     .eq('status', 'live')
+    // Recommendation, not catalogue: only listings from the last 14 days.
+    .gte('listed_at', since)
     .order('trust_score', { ascending: false, nullsFirst: false })
     .limit(5);
 
