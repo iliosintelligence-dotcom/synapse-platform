@@ -297,9 +297,20 @@ export default function TojuConversation() {
                     ) : null}
                   </GlassCard>
 
-                  {entry.properties.map((p) => (
-                    <PropertyCard key={p.id} property={p} onPress={() => openProperty(p.id)} />
-                  ))}
+                  {entry.properties.length > 0 ? (
+                    <View style={styles.matches}>
+                      <View style={styles.matchesHeader}>
+                        <Icon name="sparkles" size="xs" color={color.accent} />
+                        <Label style={styles.matchesLabel}>VERIFIED MATCHES</Label>
+                        <View style={styles.matchesCount}>
+                          <Caption style={styles.matchesCountText}>{entry.properties.length}</Caption>
+                        </View>
+                      </View>
+                      {entry.properties.map((p) => (
+                        <PropertyCard key={p.id} property={p} onPress={() => openProperty(p.id)} />
+                      ))}
+                    </View>
+                  ) : null}
 
                   {entry.suggestedAction && entry.suggestedAction.kind !== 'none' ? (
                     <Pressable style={styles.actionButton} onPress={() => runAction(entry.suggestedAction!)}>
@@ -389,6 +400,19 @@ const styles = StyleSheet.create({
     borderTopColor: color.glassBorder,
     gap: 4,
   },
+  matches: { gap: space.sm },
+  matchesHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: space.xs, marginTop: 2 },
+  matchesLabel: { letterSpacing: 1.5, color: color.accent, fontSize: 11 },
+  matchesCount: {
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 5,
+    borderRadius: 9,
+    backgroundColor: color.accentSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  matchesCountText: { color: color.accent, fontSize: 11, fontFamily: fontFamily.semibold },
   suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, paddingHorizontal: space.xs },
   suggestion: {
     paddingHorizontal: space.md,
