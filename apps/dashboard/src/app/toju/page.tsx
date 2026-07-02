@@ -262,7 +262,7 @@ export default function TojuPage() {
         .newchat { background: none; border: none; cursor: pointer; font: inherit; font-size: 13px; color: var(--ink-muted); }
         .newchat:hover { color: var(--ink); }
         .wrap { position: relative; z-index: 1; max-width: 480px; margin: 0 auto; padding: 26px 22px 190px; }
-        .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--brand); }
+        .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: #b3541e; text-shadow: 0 1px 6px rgba(255,250,246,0.9); }
         .title { font-family: 'Fraunces', Georgia, serif; font-weight: 300; font-size: 40px; letter-spacing: -0.02em; margin: 2px 0 0; display: flex; align-items: center; gap: 10px; }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(46,125,79,0.14); }
         .convo { display: flex; flex-direction: column; gap: 18px; padding-top: 22px; }
@@ -275,9 +275,9 @@ export default function TojuPage() {
         .av { width: 30px; height: 30px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; font-size: 14px; }
         .avt { background: var(--brand); color: #fff; }
         .avu { background: rgba(15,18,24,0.05); border: 1px solid var(--border); color: var(--ink-muted); font-size: 13px; font-weight: 600; }
-        .sender { font-size: 11.5px; font-weight: 600; color: var(--brand); margin: 0 0 5px 3px; }
+        .sender { font-size: 11.5px; font-weight: 600; color: var(--brand); margin: 0 0 5px 3px; text-shadow: 0 1px 6px rgba(255,250,246,0.9); }
         .bubble { padding: 13px 16px; border-radius: 20px; font-size: 14.5px; line-height: 1.55; }
-        .toju .bubble { background: rgba(255,250,246,0.44); backdrop-filter: blur(30px) saturate(1.9); -webkit-backdrop-filter: blur(30px) saturate(1.9); border: 1px solid rgba(40,24,14,0.06); color: var(--ink); border-bottom-left-radius: 6px; box-shadow: 0 14px 38px rgba(20,26,38,0.08); }
+        .toju .bubble { background: rgba(255,250,246,0.72); backdrop-filter: blur(30px) saturate(1.9); -webkit-backdrop-filter: blur(30px) saturate(1.9); border: 1px solid rgba(40,24,14,0.06); color: var(--ink); border-bottom-left-radius: 6px; box-shadow: 0 14px 38px rgba(20,26,38,0.08); }
         .user .bubble { background: rgba(255,123,44,0.58); backdrop-filter: blur(18px) saturate(1.7); -webkit-backdrop-filter: blur(18px) saturate(1.7); color: #fff; border: 1px solid rgba(150,60,25,0.12); border-bottom-right-radius: 6px; box-shadow: 0 10px 26px rgba(255,123,44,0.2); }
         .bubble.typing { display: flex; align-items: center; gap: 9px; color: var(--ink-muted); }
         .bubble.typing em { font-style: italic; }
@@ -298,10 +298,10 @@ export default function TojuPage() {
         .pcard .watch b { color: #b0521f; font-weight: 600; }
         .composer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; padding: 14px 22px 34px; display: flex; flex-direction: column; align-items: center; gap: 9px; background: none; }
         .hint { width: 100%; max-width: 480px; text-align: center; font-size: 12.5px; color: var(--ink-muted); background: rgba(255,250,246,0.6); backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 12px; padding: 8px 14px; box-shadow: 0 6px 18px rgba(20,26,38,0.08); }
-        .chatbox { width: 100%; max-width: 480px; border-radius: 24px; padding: 6px 6px 8px; background: rgba(255,250,246,0.34); backdrop-filter: blur(32px) saturate(1.9); -webkit-backdrop-filter: blur(32px) saturate(1.9); border: 1px solid rgba(40,24,14,0.06); box-shadow: 0 22px 54px rgba(20,26,38,0.16); }
+        .chatbox { width: 100%; max-width: 480px; border-radius: 24px; padding: 6px 6px 8px; background: rgba(255,250,246,0.6); backdrop-filter: blur(32px) saturate(1.9); -webkit-backdrop-filter: blur(32px) saturate(1.9); border: 1px solid rgba(40,24,14,0.06); box-shadow: 0 22px 54px rgba(20,26,38,0.16); }
         .pillrow { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 15px; }
         .pillrow input { flex: 1; border: none; outline: none; font-size: 14.5px; background: transparent; color: var(--ink); font-family: inherit; }
-        .pillrow input::placeholder { color: var(--ink-dim); }
+        .pillrow input::placeholder { color: rgba(21,23,26,0.52); }
         .mic, .send { width: 38px; height: 38px; border-radius: 13px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex: none; }
         .mic { background: rgba(255,255,255,0.5); color: var(--ink-muted); }
         .mic.on { background: var(--brand); color: #fff; animation: mp 1.3s infinite; }
@@ -310,7 +310,7 @@ export default function TojuPage() {
         .send:disabled { opacity: .45; cursor: default; }
         .suggest { display: flex; gap: 7px; padding: 9px 5px 2px; margin-top: 4px; overflow-x: auto; border-top: 1px solid rgba(255,255,255,0.42); }
         .suggest::-webkit-scrollbar { display: none; }
-        .suggest button { white-space: nowrap; font-size: 12px; color: var(--ink-muted); cursor: pointer; background: rgba(255,250,246,0.35); border: 1px solid var(--border); border-radius: 100px; padding: 6px 12px; transition: all .18s; font-family: inherit; }
+        .suggest button { white-space: nowrap; font-size: 12px; font-weight: 500; color: rgba(21,23,26,0.72); cursor: pointer; background: rgba(255,250,246,0.6); border: 1px solid var(--border); border-radius: 100px; padding: 6px 12px; transition: all .18s; font-family: inherit; }
         .suggest button:hover { color: var(--ink); border-color: rgba(255,123,44,0.35); }
       `}</style>
     </div>
