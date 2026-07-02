@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@synapse/types": "*"
+    "@synapse/types": "*",
+    "lottie-react-native": "~7.2.2"
   },
   "peerDependencies": {
     "expo-blur": "*",

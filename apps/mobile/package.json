@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "mobile",
   "version": "0.1.0",
   "private": true,
@@ -34,7 +34,8 @@
     "react-native-safe-area-context": "~5.8.0",
     "react-native-screens": "~4.25.2",
     "react-native-svg": "15.15.4",
-    "zustand": "^5.0.2"
+    "zustand": "^5.0.2",
+    "lottie-react-native": "~7.2.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

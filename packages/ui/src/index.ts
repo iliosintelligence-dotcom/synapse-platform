@@ -157,3 +157,6 @@ export type { WalletCardProps, WalletCardData } from './WalletCard';
 
 // Storybook-style mock props
 export * as mocks from './mocks';
+
+// Motion system (Lottie + tokens)
+export * from './motion';

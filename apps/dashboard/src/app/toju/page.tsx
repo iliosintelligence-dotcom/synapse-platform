@@ -28,6 +28,38 @@ const STARTERS: Array<[string, string]> = [
   ['Best value areas for a first home', 'Good areas for a first home'],
 ];
 
+/** Minimal web Lottie mount — same JSON files as packages/ui motion system. */
+let lottiePromise: Promise<any> | null = null;
+function loadLottieWeb(): Promise<any> {
+  if (typeof window === 'undefined') return Promise.reject();
+  if ((window as any).lottie) return Promise.resolve((window as any).lottie);
+  if (!lottiePromise) {
+    lottiePromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie_light.min.js';
+      s.onload = () => resolve((window as any).lottie);
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  return lottiePromise;
+}
+
+function Lottie({ name, loop = true, speed = 1, style }: { name: string; loop?: boolean; speed?: number; style?: React.CSSProperties }) {
+  const el = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    let anim: any;
+    let dead = false;
+    loadLottieWeb().then((lottie) => {
+      if (dead || !el.current) return;
+      anim = lottie.loadAnimation({ container: el.current, renderer: 'svg', loop, autoplay: true, path: `/motion/${name}.json` });
+      anim.setSpeed(speed);
+    }).catch(() => {});
+    return () => { dead = true; anim?.destroy(); };
+  }, [name, loop, speed]);
+  return <span ref={el} style={{ display: 'inline-block', lineHeight: 0, ...style }} />;
+}
+
 function naira(n: number) {
   n = Number(n) || 0;
   if (n >= 1e9) return '₦' + (n / 1e9).toFixed(n % 1e9 === 0 ? 0 : 1) + 'B';
@@ -140,7 +172,7 @@ export default function TojuPage() {
 
       <main className="wrap">
         <div className="eyebrow">AI Property Consultant</div>
-        <h1 className="title">Toju <span className="dot" /></h1>
+        <h1 className="title">Toju <span className="orbwrap"><Lottie name="orb-pulse" speed={0.8} style={{ position: 'absolute', width: 56, height: 56, margin: '-24px 0 0 -24px', opacity: 0.6, pointerEvents: 'none' }} /><span className="dot" /></span></h1>
 
         <div className="convo">
           {entries.map((entry, i) => {
@@ -156,7 +188,7 @@ export default function TojuPage() {
                 <div className="msg toju" key={i}>
                   <div className="av avt">✦</div>
                   <div className="col"><div className="sender">Toju</div>
-                    <div className="bubble typing"><span className="dots"><i /><i /><i /></span><em>thinking…</em></div>
+                    <div className="bubble typing"><Lottie name="toju-typing" style={{ width: 48, height: 20 }} /><em>thinking…</em></div>
                   </div>
                 </div>
               );
@@ -234,7 +266,10 @@ export default function TojuPage() {
         .title { font-family: 'Fraunces', Georgia, serif; font-weight: 300; font-size: 40px; letter-spacing: -0.02em; margin: 2px 0 0; display: flex; align-items: center; gap: 10px; }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(46,125,79,0.14); }
         .convo { display: flex; flex-direction: column; gap: 18px; padding-top: 22px; }
-        .msg { display: flex; align-items: flex-end; gap: 9px; }
+        .orbwrap { position: relative; display: inline-flex; }
+        .msg { display: flex; align-items: flex-end; gap: 9px; animation: mEnter 250ms cubic-bezier(0.34,1.4,0.44,1) both; }
+        @keyframes mEnter { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+        @media (prefers-reduced-motion: reduce) { .msg { animation: none; } }
         .msg.user { flex-direction: row-reverse; }
         .col { max-width: 84%; display: flex; flex-direction: column; }
         .av { width: 30px; height: 30px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; font-size: 14px; }
