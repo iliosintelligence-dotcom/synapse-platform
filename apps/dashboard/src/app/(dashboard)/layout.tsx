@@ -41,18 +41,30 @@ const NAV: NavItem[] = [
   { href: '/settings', label: 'Settings', roles: [UserRole.AGENCY_OWNER] },
 ];
 
+// Build/test mode: skip the login wall and act as a demo agency owner.
+// Set NEXT_PUBLIC_BYPASS_AUTH=false (or remove this) before launch.
+const BYPASS_AUTH = process.env.NEXT_PUBLIC_BYPASS_AUTH !== 'false';
+const DEMO_USER = {
+  id: 'd0000000-0000-4000-8000-000000000001',
+  email: 'demo@synapse.test',
+  full_name: 'Synapse Demo (no sign-in)',
+  role: UserRole.AGENCY_OWNER,
+} as never;
+
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const status = useSessionStore((s) => s.status);
-  const user = useSessionStore((s) => s.user);
+  const sessionUser = useSessionStore((s) => s.user);
   const signOut = useSessionStore((s) => s.signOut);
   const pathname = usePathname();
   const router = useRouter();
 
+  const user = sessionUser ?? (BYPASS_AUTH ? DEMO_USER : null);
+
   useEffect(() => {
-    if (status === 'signed_out') router.replace('/login');
+    if (!BYPASS_AUTH && status === 'signed_out') router.replace('/login');
   }, [status, router]);
 
-  if (status !== 'signed_in' || !user) {
+  if (!user || (!BYPASS_AUTH && status !== 'signed_in')) {
     return (
       <main className="min-h-screen flex items-center justify-center bg-canvas">
         <div className="h-2 w-2 rounded-full bg-accent animate-ping" />
