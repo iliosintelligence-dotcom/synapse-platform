@@ -251,8 +251,8 @@ export default function TojuPage() {
         .bg { position: fixed; inset: 0; z-index: 0; background: url('https://images.unsplash.com/photo-1493809842364-78817add7ffb?auto=format&fit=crop&w=1600&q=80') center/cover no-repeat; }
         .wash { position: fixed; inset: 0; z-index: 0;
           background:
-            radial-gradient(120% 80% at 78% 0%, rgba(212,110,60,0.22), transparent 58%),
-            linear-gradient(180deg, rgba(250,242,234,0.5) 0%, rgba(248,238,228,0.6) 55%, rgba(244,230,216,0.72) 100%); }
+            radial-gradient(120% 80% at 78% 0%, rgba(212,110,60,0.14), transparent 58%),
+            linear-gradient(180deg, rgba(250,242,234,0.18) 0%, rgba(248,238,228,0.22) 55%, rgba(244,230,216,0.38) 100%); }
         .bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 22px; padding: 14px 22px; background: rgba(250,245,239,0.6); backdrop-filter: blur(24px) saturate(1.5); border-bottom: 1px solid rgba(255,255,255,0.6); }
         .brand { font-weight: 700; letter-spacing: 0.22em; font-size: 12px; color: var(--ink); text-decoration: none; }
         nav { display: flex; gap: 4px; }

@@ -10,7 +10,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        canvas: '#FDFDFC',
+        canvas: '#f7efe7',
         surface: '#FFFFFF',
         ink: '#16181C',
         'ink-muted': 'rgba(22,24,28,0.55)',
