@@ -44,9 +44,16 @@ reacting specifically to what they just said:
      remote/hybrid/office, school runs.
   4. The rhythm of their life — do they cook or eat out, gym, church/mosque,
      host guests, nightlife or quiet evenings, weekends.
-  5. Money, warmly and last — rent or buy, and a comfortable budget or income
-     band, framed as being on their side: "so I only show you homes that
-     genuinely make sense for you."
+  5. The deal and the money, warmly and last — FIRST pin down the deal type:
+     are they RENTING, BUYING, or open to a SHARED home? Never show homes
+     before this is clear — a renter shown purchase prices is a broken promise.
+     Then the payment route if it comes up naturally: outright, mortgage, or a
+     FlexPay-style plan (Synapse lets renters split annual rent into monthly
+     payments, and buyers pay verified homes in structured installments).
+     Then a comfortable budget — ANNUAL RENT if renting, TOTAL PRICE if buying
+     — framed as being on their side: "so I only show you homes that genuinely
+     make sense for you." If they give monthly income, translate: roughly 25–30%
+     of annual income is a sane annual rent ceiling; say the number you're using.
 
 How to sound: a knowledgeable friend, not a form. 2–3 sentences per turn, max.
 Between questions, give one small, real insight about their city (commute
@@ -57,22 +64,26 @@ picture.
 
 Never invent specific listings, prices, or facts about a particular property.
 
-When you have the real picture — their city + household + a sense of budget —
-set "showMatches": true. Until then keep it false and keep taking the history.
+When you have the real picture — their city + household + RENT-OR-BUY + a sense
+of budget — set "showMatches": true. Until then keep it false and keep taking
+the history.
 
 Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
   • city: EXACTLY the city they named (e.g. "Ibadan" if they said Ibadan)
-  • maxPrice: their ceiling in whole naira, else null
+  • dealType: "rent" | "buy" | "shared" — REQUIRED before matches; never guess
+  • maxPrice: their ceiling in whole naira — ANNUAL RENT if renting (e.g.
+    1000000 for ₦1M/yr), TOTAL PRICE if buying (e.g. 150000000), else null
   • minBedrooms: inferred from the household (couple + 2 kids → 3), else null
-  • intent: "live" | "invest" | "rent" | null
-  • brief: one plain sentence for their matches page, e.g. "3-bed in Ibadan
-    under ₦80M for a couple with two kids; he works from home, they cook."
+  • intent: "live" | "invest" | null (what the home is FOR; dealType is the deal)
+  • paymentPlan: "outright" | "mortgage" | "flexpay" | null
+  • brief: one plain sentence for their matches page, e.g. "Renting a 1-bed in
+    Ibadan around ₦700k–1M/yr for a young analyst; no car, gyms nearby."
   • profile: what you learned about their LIFE — {"household": <string|null>,
     "work": <string|null>, "transport": <string|null>,
     "lifestyle": [<short tags like "cooks at home","gym","church","hosts guests","has car","remote work">]}
 
 Output STRICT JSON ONLY, no markdown, exactly:
-{"reply": "<your message>", "showMatches": <true|false>, "criteria": {"city": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "intent": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
+{"reply": "<your message>", "showMatches": <true|false>, "criteria": {"city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
 
 const ADVISOR_PROMPT = `You are Toju, Synapse's Nigerian real-estate consultant, writing the moment you
 present verified matches. You are given the person's brief, their lifestyle
@@ -83,9 +94,13 @@ run, the home office, the cooking, the car or lack of one — and weigh flood
 risk, power, total cost of living, not just price. If something is slightly
 over budget but the trade-off is worth it, say so plainly. If a home has a
 flood or title flag, name it — trust is the product. If the search had to be
-relaxed (noted in the input), be honest about it. Max ~110 words, warm,
-specific, no filler. Then give ONE short "why" line per match (max 16 words),
-concrete, grounded ONLY in the provided data — never invent facts.
+relaxed (noted in the input), be honest about it. RENTALS are priced PER YEAR —
+always say "₦900k/yr", never present rent like a purchase price. If money is
+tight: renters can split annual rent into monthly payments with FlexPay; buyers
+can ask about mortgage (~20% down) or structured installments — mention the one
+that fits their profile, once, naturally. Max ~110 words, warm, specific, no
+filler. Then give ONE short "why" line per match (max 16 words), concrete,
+grounded ONLY in the provided data — never invent facts.
 
 Output STRICT JSON ONLY: {"reply": "<message>", "why": {"<matchId>": "<reason>", ...}}`;
 
@@ -152,7 +167,8 @@ Deno.serve(async (req: Request) => {
           search_note: found.note,
           conversation_tail: messages.slice(-4),
           matches: matches.map((m) => ({
-            id: m.id, title: m.title, price: m.price, bedrooms: m.bedrooms,
+            id: m.id, title: m.title, deal: m.listingType, pricePeriod: m.pricePeriod,
+            price: m.price, bedrooms: m.bedrooms,
             trustScore: m.trustScore, yieldPct: m.yieldPct, whatToWatch: m.whatToWatch,
             neighbourhood: m.neighbourhood,
           })),
@@ -164,8 +180,9 @@ Deno.serve(async (req: Request) => {
           if (adv.why) matches = matches.map((m) => ({ ...m, why: adv.why?.[m.id] ?? null }));
         }
       } else if (criteria.city) {
-        // Honest zero-state: never show homes from a different city.
-        reply = `${reply}\n\nOne honest note — I checked our verified inventory in ${criteria.city} and nothing fits that brief yet. Want me to widen the budget or size a little, or alert you the moment something lands?`;
+        // Honest zero-state: never show homes from a different city or deal type.
+        const dt = criteria.dealType === 'rent' ? 'rentals' : criteria.dealType === 'shared' ? 'shared homes' : 'homes for sale';
+        reply = `${reply}\n\nOne honest note — I checked our verified ${dt} in ${criteria.city} and nothing fits that brief yet. Want me to widen the budget or size a little, or alert you the moment something lands?`;
       }
     }
 
@@ -226,9 +243,11 @@ async function saveSession(visitorId: string, messages: Msg[], criteria?: unknow
 // ── matches from the digital twin ──
 interface Criteria {
   city?: string | null;
-  maxPrice?: number | null;
+  dealType?: string | null;   // rent | buy | shared
+  maxPrice?: number | null;   // annual rent when renting, total price when buying
   minBedrooms?: number | null;
   intent?: string | null;
+  paymentPlan?: string | null;
   brief?: string | null;
   profile?: {
     household?: string | null;
@@ -241,6 +260,8 @@ interface Match {
   id: string;
   title: string;
   city: string;
+  listingType: string;   // sale | rent | shortlet
+  pricePeriod: string;   // total | per_year | ...
   price: number;
   bedrooms: number;
   bathrooms: number;
@@ -260,9 +281,9 @@ interface Match {
 }
 
 /**
- * Progressive relaxation: the CITY is law (never cross it silently); budget
- * stretches 15%, then bedrooms relax, then budget drops entirely — each step
- * noted so the advisor can be honest about the compromise.
+ * Progressive relaxation: the CITY and DEAL TYPE are law (never cross them
+ * silently); bedrooms relax first, then budget — each step noted so the
+ * advisor can be honest about the compromise.
  */
 async function fetchMatchesRelaxed(c: Criteria): Promise<{ matches: Match[]; note: string | null }> {
   let m = await fetchMatches(c);
@@ -284,15 +305,18 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   if (!s) return [];
 
   const intent = (c.intent ?? 'live') as string;
-  const fitCol = intent === 'invest' ? 'investment_score' : intent === 'rent' ? 'young_professional_score' : 'family_score';
+  const renting = c.dealType === 'rent' || c.dealType === 'shared';
+  const fitCol = intent === 'invest' ? 'investment_score' : renting ? 'young_professional_score' : 'family_score';
 
-  const conds = [`status=eq.live`, `verification_status=eq.verified`, `is_active=is.true`];
+  // The deal type is a hard wall: renters see rentals (₦/yr), buyers see sales.
+  const conds = [`status=eq.live`, `verification_status=eq.verified`, `is_active=is.true`,
+    `listing_type=eq.${renting ? 'rent' : 'sale'}`];
   if (c.city && typeof c.city === 'string') conds.push(`city=ilike.*${encodeURIComponent(c.city.trim())}*`);
   if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
   if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
-    'id,title,city,price,bedrooms,bathrooms,trust_score,' +
+    'id,title,city,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
     'agencies(name,verification_tier),' +
     'neighbourhoods(name,safety_score,family_score,flood_risk,power_reliability,toju_summary),' +
     `property_enrichment!inner(${fitCol},rental_yield_estimate_pct,who_this_suits,what_to_watch,toju_summary)`;
@@ -313,6 +337,8 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       id: String(r.id),
       title: String(r.title ?? ''),
       city: String(r.city ?? ''),
+      listingType: String(r.listing_type ?? 'sale'),
+      pricePeriod: String(r.price_period ?? 'total'),
       price: Number(r.price ?? 0),
       bedrooms: Number(r.bedrooms ?? 0),
       bathrooms: Number(r.bathrooms ?? 0),
