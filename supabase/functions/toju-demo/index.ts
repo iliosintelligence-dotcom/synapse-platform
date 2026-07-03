@@ -196,11 +196,15 @@ Deno.serve(async (req: Request) => {
             neighbourhood: m.neighbourhood, room: m.room ?? null,
           })),
         });
-        const second = await claude(key, ADVISOR_PROMPT, [{ role: 'user', content: advisorInput }], 500);
+        const second = await claude(key, ADVISOR_PROMPT, [{ role: 'user', content: advisorInput }], 900);
         if (!('error' in second)) {
           const adv = parseLoose(second.text) as { reply?: string; why?: Record<string, string> };
-          if (typeof adv.reply === 'string' && adv.reply.trim()) reply = adv.reply.trim();
-          if (adv.why) matches = matches.map((m) => ({ ...m, why: adv.why?.[m.id] ?? null }));
+          // Salvage from truncated/imperfect JSON rather than silently falling
+          // back to pass-1's one-line stub ("Pulling those up now").
+          const advReply = (typeof adv.reply === 'string' && adv.reply.trim()) ? adv.reply.trim() : salvageReply(second.text);
+          if (advReply) reply = advReply;
+          const whys = adv.why ?? salvageWhys(second.text);
+          if (whys) matches = matches.map((m) => ({ ...m, why: whys[m.id] ?? null }));
         }
       } else if (criteria.city) {
         // Honest zero-state: never show homes from a different city or deal type.
@@ -438,6 +442,23 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       } : null,
     };
   });
+}
+
+/** Pull "reply" out of truncated/broken advisor JSON. */
+function salvageReply(raw: string): string | null {
+  const m = raw.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (!m) return null;
+  const text = m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
+  return text.length > 30 ? text : null;
+}
+
+/** Pull per-match "why" pairs out of truncated/broken advisor JSON. */
+function salvageWhys(raw: string): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const m of raw.matchAll(/"([0-9a-f-]{36})"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+    out[m[1]] = m[2].replace(/\\"/g, '"').trim();
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function parseLoose(raw: string): Record<string, unknown> {
