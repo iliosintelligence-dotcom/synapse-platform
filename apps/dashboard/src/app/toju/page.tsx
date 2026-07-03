@@ -15,8 +15,15 @@ const STORE = 'toju_chat_v1';
 
 type Match = {
   price: number; title: string; bedrooms: number; trustScore: number;
-  city: string; yieldPct?: number | null; whatToWatch?: string | null;
+  city: string; yieldPct?: number | null; whatToWatch?: string | null; why?: string | null;
 };
+
+const VKEY = 'toju_visitor_v1';
+function visitorId(): string {
+  let v = localStorage.getItem(VKEY);
+  if (!v) { v = crypto.randomUUID(); try { localStorage.setItem(VKEY, v); } catch {} }
+  return v;
+}
 type Saved = { role: 'user' | 'assistant'; content: string; matches?: Match[] };
 type Entry = Saved | { role: 'typing'; content?: never };
 
@@ -77,7 +84,8 @@ export default function TojuPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const recogRef = useRef<any>(null);
 
-  // restore the saved conversation so people continue where they left off
+  // restore the saved conversation so people continue where they left off:
+  // local copy renders instantly, then the server copy (visitor id) wins.
   useEffect(() => {
     let s: Saved[] = [];
     try { s = JSON.parse(localStorage.getItem(STORE) || '[]') || []; } catch {}
@@ -85,6 +93,17 @@ export default function TojuPage() {
     saved.current = s;
     persist();
     setEntries([...s]);
+    fetch(`${SUPABASE_URL}/functions/v1/toju-demo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+      body: JSON.stringify({ action: 'restore', visitorId: visitorId() }),
+    }).then((r) => r.json()).then((d) => {
+      if (Array.isArray(d.messages) && d.messages.length > saved.current.length) {
+        saved.current = d.messages;
+        persist();
+        setEntries([...d.messages]);
+      }
+    }).catch(() => {});
   }, []);
 
   useEffect(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }, [entries]);
@@ -92,7 +111,7 @@ export default function TojuPage() {
   function persist() { try { localStorage.setItem(STORE, JSON.stringify(saved.current)); } catch {} }
 
   function newChat() {
-    try { localStorage.removeItem(STORE); } catch {}
+    try { localStorage.removeItem(STORE); localStorage.setItem(VKEY, crypto.randomUUID()); } catch {}
     saved.current = [{ role: 'assistant', content: GREETING }];
     persist();
     setEntries([...saved.current]);
@@ -110,7 +129,7 @@ export default function TojuPage() {
       const res = await fetch(`${SUPABASE_URL}/functions/v1/toju-demo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
-        body: JSON.stringify({ messages: saved.current.slice(-14).map((m) => ({ role: m.role, content: m.content })) }),
+        body: JSON.stringify({ visitorId: visitorId(), messages: saved.current.slice(-14).map((m) => ({ role: m.role, content: m.content })) }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error || !data.reply) {
@@ -209,6 +228,7 @@ export default function TojuPage() {
                             <div className="price">{naira(m.price)}</div>
                             <div className="ttl">{m.title}</div>
                             <div className="meta"><span className="trust">✦ Trust {Number(m.trustScore) || 0}</span> · {m.city}{m.yieldPct != null && m.yieldPct > 0 ? ` · ${m.yieldPct}% yield` : ''}</div>
+                            {m.why && <div className="watch"><b>Why:</b> {m.why}</div>}
                             {m.whatToWatch && m.whatToWatch !== 'No major synthetic flags' && (
                               <div className="watch"><b>Watch:</b> {m.whatToWatch}</div>
                             )}

@@ -25,8 +25,23 @@ const NAV: NavItem[] = [
   },
   {
     href: '/leads',
-    label: 'Leads',
+    label: 'CRM · Leads',
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN, UserRole.AGENT],
+  },
+  {
+    href: '/social',
+    label: 'Social studio',
+    roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN, UserRole.AGENT],
+  },
+  {
+    href: '/marketing',
+    label: 'Marketing',
+    roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN],
+  },
+  {
+    href: '/subscription',
+    label: 'Subscription',
+    roles: [UserRole.AGENCY_OWNER],
   },
   {
     href: '/agents',
