@@ -16,6 +16,8 @@ const STORE = 'toju_chat_v1';
 type Match = {
   price: number; title: string; bedrooms: number; trustScore: number;
   city: string; yieldPct?: number | null; whatToWatch?: string | null; why?: string | null;
+  listingType?: string;
+  room?: { totalRooms: number; housematesIn: number; genderPreference: string; ensuite: boolean; billsIncluded: boolean; vibe?: string | null } | null;
 };
 
 const VKEY = 'toju_visitor_v1';
@@ -78,6 +80,7 @@ export default function TojuPage() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[] | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const saved = useRef<Saved[]>([]);
@@ -115,6 +118,7 @@ export default function TojuPage() {
     saved.current = [{ role: 'assistant', content: GREETING }];
     persist();
     setEntries([...saved.current]);
+    setSuggestions(null);
   }
 
   async function send(text?: string) {
@@ -139,6 +143,7 @@ export default function TojuPage() {
         saved.current.push({ role: 'assistant', content: data.reply, matches });
         persist();
         setEntries([...saved.current]);
+        setSuggestions(Array.isArray(data.suggestions) && data.suggestions.length ? data.suggestions : null);
       }
     } catch {
       setEntries([...saved.current, { role: 'assistant', content: "I'm having a moment connecting — mind trying that again in a second?" }]);
@@ -228,6 +233,12 @@ export default function TojuPage() {
                             <div className="price">{naira(m.price)}</div>
                             <div className="ttl">{m.title}</div>
                             <div className="meta"><span className="trust">✦ Trust {Number(m.trustScore) || 0}</span> · {m.city}{m.yieldPct != null && m.yieldPct > 0 ? ` · ${m.yieldPct}% yield` : ''}</div>
+                            {m.room && (
+                              <div className="watch">
+                                {m.room.totalRooms - m.room.housematesIn} of {m.room.totalRooms} rooms free · {m.room.genderPreference === 'any' ? 'any gender' : `${m.room.genderPreference}-only`}
+                                {m.room.ensuite ? ' · ensuite' : ''}{m.room.billsIncluded ? ' · bills incl.' : ''}
+                              </div>
+                            )}
                             {m.why && <div className="watch"><b>Why:</b> {m.why}</div>}
                             {m.whatToWatch && m.whatToWatch !== 'No major synthetic flags' && (
                               <div className="watch"><b>Watch:</b> {m.whatToWatch}</div>
@@ -257,7 +268,9 @@ export default function TojuPage() {
             <button className="send" onClick={() => send()} disabled={!input.trim() || busy} aria-label="Send">↑</button>
           </div>
           <div className="suggest">
-            {STARTERS.map(([msg, label]) => (<button key={label} onClick={() => send(msg)} disabled={busy}>{label}</button>))}
+            {suggestions
+              ? suggestions.map((s) => (<button key={s} onClick={() => send(s)} disabled={busy}>{s}</button>))
+              : STARTERS.map(([msg, label]) => (<button key={label} onClick={() => send(msg)} disabled={busy}>{label}</button>))}
           </div>
         </div>
       </div>
