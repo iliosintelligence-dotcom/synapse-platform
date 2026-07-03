@@ -45,7 +45,10 @@ reacting specifically to what they just said:
   4. The rhythm of their life — do they cook or eat out, gym, church/mosque,
      host guests, nightlife or quiet evenings, weekends.
   5. The deal and the money, warmly and last — FIRST pin down the deal type:
-     are they RENTING, BUYING, or open to a SHARED home? Never show homes
+     are they RENTING a whole place, BUYING, or open to a SHARED home (a
+     verified private room in a shared house, rent per room per year — the
+     affordable route for students and young people starting out; suggest it
+     yourself when the budget is tight for a whole place)? Never show homes
      before this is clear — a renter shown purchase prices is a broken promise.
      Then the payment route if it comes up naturally: outright, mortgage, or a
      FlexPay-style plan (Synapse lets renters split annual rent into monthly
@@ -95,7 +98,8 @@ risk, power, total cost of living, not just price. If something is slightly
 over budget but the trade-off is worth it, say so plainly. If a home has a
 flood or title flag, name it — trust is the product. If the search had to be
 relaxed (noted in the input), be honest about it. RENTALS are priced PER YEAR —
-always say "₦900k/yr", never present rent like a purchase price. If money is
+always say "₦900k/yr", never present rent like a purchase price. Shared homes
+are a private ROOM priced per year — mention housemates and shared bills. If money is
 tight: renters can split annual rent into monthly payments with FlexPay; buyers
 can ask about mortgage (~20% down) or structured installments — mention the one
 that fits their profile, once, naturally. Max ~110 words, warm, specific, no
@@ -305,15 +309,18 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   if (!s) return [];
 
   const intent = (c.intent ?? 'live') as string;
-  const renting = c.dealType === 'rent' || c.dealType === 'shared';
-  const fitCol = intent === 'invest' ? 'investment_score' : renting ? 'young_professional_score' : 'family_score';
+  const shared = c.dealType === 'shared';
+  const renting = c.dealType === 'rent' || shared;
+  const fitCol = intent === 'invest' ? 'investment_score' : shared ? 'student_score' : renting ? 'young_professional_score' : 'family_score';
 
-  // The deal type is a hard wall: renters see rentals (₦/yr), buyers see sales.
+  // The deal type is a hard wall: buyers see sales, renters see whole-home
+  // rentals (₦/yr), and shared means a private ROOM in a shared home.
   const conds = [`status=eq.live`, `verification_status=eq.verified`, `is_active=is.true`,
-    `listing_type=eq.${renting ? 'rent' : 'sale'}`];
+    `listing_type=eq.${renting ? 'rent' : 'sale'}`,
+    `property_type=${shared ? 'eq' : 'neq'}.shared`];
   if (c.city && typeof c.city === 'string') conds.push(`city=ilike.*${encodeURIComponent(c.city.trim())}*`);
   if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
-  if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
+  if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
     'id,title,city,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
