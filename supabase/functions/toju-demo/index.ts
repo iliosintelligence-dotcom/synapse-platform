@@ -439,7 +439,10 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
 
   // The deal type is a hard wall: buyers see sales, renters see whole-home
   // rentals (₦/yr), and shared means a private ROOM in a shared home.
+  // No ghost listings: Toju only recommends VERIFIED homes reposted within 14 days.
+  const freshSince = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
   const conds = [`status=eq.live`, `verification_status=eq.verified`, `is_active=is.true`,
+    `listed_at=gte.${freshSince}`,
     `listing_type=eq.${renting ? 'rent' : 'sale'}`,
     `property_type=${shared ? 'eq' : 'neq'}.shared`];
   if (c.city && typeof c.city === 'string') conds.push(`city=ilike.*${encodeURIComponent(c.city.trim())}*`);

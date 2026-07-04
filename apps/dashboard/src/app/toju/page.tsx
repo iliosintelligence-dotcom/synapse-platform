@@ -154,11 +154,26 @@ export default function TojuPage() {
 
   function flash(msg: string) { setHint(msg); setTimeout(() => setHint(null), 5000); }
 
-  function toggleMic() {
+  async function toggleMic() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) return flash('Voice typing needs Chrome or Edge on this device.');
-    if (!window.isSecureContext) return flash('Voice needs a secure (https) page to access the mic.');
+    if (!window.isSecureContext) return flash('Voice needs a secure page — open the app on localhost or https, not a raw IP address.');
     if (listening) { try { recogRef.current?.stop(); } catch {} setListening(false); return; }
+    // Prompt for mic permission the reliable way before starting recognition.
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+      } catch (err: any) {
+        const inIframe = window.self !== window.top;
+        const n = err?.name;
+        if (n === 'NotAllowedError' || n === 'SecurityError')
+          return flash(inIframe ? 'Open this page in its own browser tab to use voice — the embedded preview blocks the mic.'
+                                : 'Mic access is blocked for this site. Click the 🔒 (or camera) icon in the address bar → set Microphone to Allow → then tap the mic again.');
+        if (n === 'NotFoundError') return flash('No microphone found on this device.');
+        return flash('Couldn’t reach the mic — check your browser’s microphone permissions and try again.');
+      }
+    }
     const recog = new SR();
     recogRef.current = recog;
     recog.lang = 'en-NG'; recog.interimResults = true; recog.continuous = true;
