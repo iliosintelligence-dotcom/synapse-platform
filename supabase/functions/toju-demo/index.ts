@@ -90,8 +90,10 @@ Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
     "work": <string|null>, "transport": <string|null>,
     "lifestyle": [<short tags like "cooks at home","gym","church","hosts guests","has car","remote work">]}
 
-ALWAYS also fill "suggestions": 2–4 short tap-to-answer options for the exact
-question you just asked, written in the USER's voice, each ≤ 5 words. Examples:
+CRITICAL — EVERY SINGLE TURN, with no exceptions, fill "suggestions": 2–4 short
+tap-to-answer options for the exact question you just asked, written in the
+USER's voice, each ≤ 5 words. Never return an empty suggestions array — not on
+turn 1, not on turn 10, not after showing matches. Examples:
 you asked about household → ["Married with kids","Married, no kids","Just me","With relatives"];
 you asked rent or buy → ["Renting","Buying","Open to a shared room"];
 you asked budget → ["Under ₦1M/yr","₦1–2M/yr","Not sure — advise me"].
@@ -228,10 +230,13 @@ Deno.serve(async (req: Request) => {
     let reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : first.text.trim();
     const showMatches = parsed.showMatches === true;
     const criteria = parsed.criteria ?? {};
-    const suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
+    let suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
       .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
       .map((s) => s.trim().slice(0, 42))
       .slice(0, 4);
+    // Guarantee suggestions never run dry — the model sometimes drops them a few
+    // turns in. Fall back to contextual chips based on what's still unknown.
+    if (suggestions.length === 0) suggestions = fallbackSuggestions(showMatches, criteria);
 
     // Ground in the digital twin + rewrite the reply lifestyle-cost style.
     let matches: Match[] = [];
@@ -517,6 +522,13 @@ function salvageWhys(raw: string): Record<string, string> | null {
     out[m[1]] = m[2].replace(/\\"/g, '"').trim();
   }
   return Object.keys(out).length ? out : null;
+}
+
+/** Neutral, always-safe chips for when the model omits its own — these read
+ * fine after ANY question, so they never contradict what was just asked. */
+function fallbackSuggestions(showMatches: boolean, _c: Criteria): string[] {
+  if (showMatches) return ['Show cheaper options', 'Tell me about the first', 'Why these areas?'];
+  return ['Not sure — you advise', 'Skip ahead to homes', 'Tell me more first'];
 }
 
 function parseLoose(raw: string): Record<string, unknown> {
