@@ -123,6 +123,29 @@ grounded ONLY in the provided data — never invent facts.
 
 Output STRICT JSON ONLY: {"reply": "<message>", "why": {"<matchId>": "<reason>", ...}}`;
 
+const NEGOTIATE_PROMPT = `You are Toju, Synapse's Nigerian real-estate consultant, acting as the buyer's
+negotiation assistant. You get one property (price, deal type, city, trust
+score, yield, what-to-watch flags, neighbourhood intelligence) and, when known,
+the buyer's profile. Ground everything in the data given — never invent comps.
+Anchoring: whole-year rentals typically close 5–10% below ask; sales 3–8% below,
+more when the listing carries flags (title pending, renovation, flood) — name
+the flag you're using as leverage. Nigerian market manners: firm but warmly
+respectful, never insulting, never begging.
+Output STRICT JSON ONLY:
+{"advice": "<2–3 sentences: the reasonable opening number and exactly why>",
+ "openingOffer": <number, whole naira>,
+ "draft": "<a ready-to-send negotiation message to the agent, <=80 words, polite Nigerian business tone, states the offer and one data-backed reason, ends open>"}`;
+
+const COMPARE_PROMPT = `You are Toju, Synapse's Nigerian real-estate consultant. The user selected up to
+four verified homes and asks: "which one is better FOR ME?" You get the homes
+(price, deal, trust, yield, neighbourhood safety/family/flood/power, flags) and
+their brief/lifestyle profile when known. Compare like an advisor, not a
+spreadsheet: total monthly cost, commute fit, appreciation/yield, space for the
+money, neighbourhood fit, long-term value — for THIS person's life. Be decisive.
+Output STRICT JSON ONLY:
+{"verdict": "<~120 words: name the winner and exactly why for this person; name the runner-up and who should pick it instead; flag anything to watch>",
+ "winnerId": "<id of the winning property>"}`;
+
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -151,9 +174,41 @@ Deno.serve(async (req: Request) => {
       return json({ messages: row?.messages ?? [], criteria: row?.criteria ?? null, matches: row?.matches ?? [] });
     }
 
-    // ── chat ──
+    // ── chat / negotiate / compare need the model ──
     const key = Deno.env.get('ANTHROPIC_API_KEY');
     if (!key) return json({ error: 'Server misconfigured: no Anthropic key' }, 500);
+
+    // ── negotiation assistant ──
+    if (body.action === 'negotiate') {
+      const prop = (body as { property?: Record<string, unknown> }).property;
+      if (!prop || typeof prop !== 'object') return json({ error: 'property required' }, 400);
+      const session = visitorId ? await loadSession(visitorId) : null;
+      const input = JSON.stringify({ property: prop, buyer_profile: (session?.criteria as Criteria | null)?.profile ?? null, brief: (session?.criteria as Criteria | null)?.brief ?? null });
+      const out = await claude(key, NEGOTIATE_PROMPT, [{ role: 'user', content: input.slice(0, 6000) }], 600);
+      if ('error' in out) return json({ error: out.error }, 502);
+      const p = parseLoose(out.text) as { advice?: string; openingOffer?: number; draft?: string };
+      return json({
+        advice: p.advice ?? salvageField(out.text, 'advice') ?? '',
+        openingOffer: typeof p.openingOffer === 'number' ? p.openingOffer : null,
+        draft: p.draft ?? salvageField(out.text, 'draft') ?? '',
+      });
+    }
+
+    // ── comparison verdict: "which one is better for me?" ──
+    if (body.action === 'compare') {
+      const items = (body as { items?: unknown[] }).items;
+      if (!Array.isArray(items) || items.length < 2) return json({ error: 'pick at least two' }, 400);
+      const session = visitorId ? await loadSession(visitorId) : null;
+      const input = JSON.stringify({
+        homes: items.slice(0, 4),
+        buyer_profile: (session?.criteria as Criteria | null)?.profile ?? null,
+        brief: (session?.criteria as Criteria | null)?.brief ?? null,
+      });
+      const out = await claude(key, COMPARE_PROMPT, [{ role: 'user', content: input.slice(0, 8000) }], 600);
+      if ('error' in out) return json({ error: out.error }, 502);
+      const p = parseLoose(out.text) as { verdict?: string; winnerId?: string };
+      return json({ verdict: p.verdict ?? salvageField(out.text, 'verdict') ?? '', winnerId: p.winnerId ?? null });
+    }
 
     const raw = Array.isArray(body.messages) ? body.messages : [];
     const messages = raw
@@ -444,12 +499,15 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   });
 }
 
-/** Pull "reply" out of truncated/broken advisor JSON. */
-function salvageReply(raw: string): string | null {
-  const m = raw.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+/** Pull a named string field out of truncated/broken JSON. */
+function salvageField(raw: string, field: string): string | null {
+  const m = raw.match(new RegExp('"' + field + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)'));
   if (!m) return null;
   const text = m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
   return text.length > 30 ? text : null;
+}
+function salvageReply(raw: string): string | null {
+  return salvageField(raw, 'reply');
 }
 
 /** Pull per-match "why" pairs out of truncated/broken advisor JSON. */
