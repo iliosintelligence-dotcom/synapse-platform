@@ -1,0 +1,134 @@
+/**
+ * Consumer design system — ported from the static prototype's app.css so the
+ * consumer experience (landing, browse, Toju, property, dream) can be rebuilt
+ * as React routes inside the same Next app. Everything is scoped under
+ * `.consumer` so it never touches the agency dashboard's Tailwind surfaces.
+ * Fonts: Fraunces (display) + Inter (body).
+ */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fraunces:opsz,wght@9..144,300;9..144,400&display=swap');
+
+.consumer {
+  --brand: #ff7b2c;
+  --brand-dim: #e86b1a;
+  --bg: #f7efe7;
+  --surface: #ffffff;
+  --ink: #15171a;
+  --ink-muted: rgba(21, 23, 26, 0.55);
+  --ink-dim: rgba(21, 23, 26, 0.35);
+  --border: rgba(15, 18, 24, 0.08);
+  --glass: rgba(255, 255, 255, 0.72);
+  --success: #2e7d4f;
+  --gold: #9c7a1e;
+  --radius: 22px;
+  --radius-sm: 14px;
+  --f-sans: 'Inter', system-ui, sans-serif;
+  --f-serif: 'Fraunces', Georgia, serif;
+
+  min-height: 100vh;
+  font-family: var(--f-sans);
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.consumer a { color: inherit; text-decoration: none; }
+
+/* App top bar */
+.consumer .appbar {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; gap: 22px;
+  padding: 14px 22px;
+  background: rgba(250, 245, 239, 0.78);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border-bottom: 1px solid var(--border);
+}
+.consumer .appbar .brand {
+  display: flex; align-items: center; gap: 9px; font-weight: 700;
+  letter-spacing: 0.22em; text-transform: uppercase; font-size: 12px;
+}
+.consumer .appbar .brand svg { width: 22px; height: 26px; }
+.consumer .appbar nav { display: flex; gap: 4px; margin-left: 8px; }
+.consumer .appbar nav a {
+  font-size: 13px; color: var(--ink-muted); padding: 7px 13px; border-radius: 100px;
+  transition: all 0.2s;
+}
+.consumer .appbar nav a:hover { color: var(--ink); background: rgba(0, 0, 0, 0.04); }
+.consumer .appbar nav a.active { color: var(--brand); background: rgba(255, 123, 44, 0.08); }
+.consumer .appbar .spacer { flex: 1; }
+.consumer .appbar .home { font-size: 12.5px; color: var(--ink-dim); }
+.consumer .appbar .home:hover { color: var(--ink); }
+
+.consumer .wrap { max-width: 920px; margin: 0 auto; padding: 28px 22px 80px; }
+
+/* Headings */
+.consumer .h1 { font-family: var(--f-serif); font-weight: 300; font-size: 34px; letter-spacing: -0.02em; }
+.consumer .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--brand); }
+.consumer .muted { color: var(--ink-muted); }
+.consumer .dim { color: var(--ink-dim); }
+
+/* Glass card */
+.consumer .card {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.55));
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(20, 26, 38, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* Buttons */
+.consumer .btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-family: var(--f-sans); font-weight: 600; font-size: 14px;
+  padding: 13px 22px; border-radius: 100px; border: none; cursor: pointer;
+  transition: all 0.25s;
+}
+.consumer .btn-primary { background: var(--brand); color: #fff; box-shadow: 0 0 30px rgba(255, 123, 44, 0.28); }
+.consumer .btn-primary:hover { background: var(--brand-dim); transform: translateY(-1px); }
+.consumer .btn-ghost { background: rgba(0, 0, 0, 0.04); color: var(--ink); }
+.consumer .btn-ghost:hover { background: rgba(0, 0, 0, 0.07); }
+.consumer .btn-block { width: 100%; }
+
+/* Trust chip */
+.consumer .chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 100px;
+}
+.consumer .chip-pass { background: rgba(46, 125, 79, 0.1); color: var(--success); border: 1px solid rgba(46, 125, 79, 0.2); }
+.consumer .chip-pending { background: rgba(176, 125, 43, 0.1); color: #a8742b; border: 1px solid rgba(176, 125, 43, 0.2); }
+.consumer .chip-gold { background: rgba(156, 122, 30, 0.1); color: var(--gold); border: 1px solid rgba(156, 122, 30, 0.3); }
+
+/* ── Dream Home page ── */
+.consumer .bg-scene {
+  position: fixed; inset: 0; z-index: 0;
+  background: url('https://images.unsplash.com/photo-1493809842364-78817add7ffb?auto=format&fit=crop&w=1600&q=80') center/cover no-repeat;
+}
+.consumer .bg-wash {
+  position: fixed; inset: 0; z-index: 0;
+  background: radial-gradient(120% 80% at 78% 0%, rgba(212, 110, 60, 0.14), transparent 58%),
+    linear-gradient(180deg, rgba(250, 242, 234, 0.32) 0%, rgba(248, 238, 228, 0.42) 55%, rgba(244, 230, 216, 0.58) 100%);
+}
+.consumer .dream-wrap { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 28px 22px 80px; }
+.consumer .dream { padding: 26px 24px; margin-top: 18px; }
+.consumer .dream .name { font-family: var(--f-serif); font-weight: 300; font-size: 30px; color: var(--ink); }
+.consumer .dream .edit { float: right; font: 600 12.5px var(--f-sans); color: #c2552b; background: none; border: none; cursor: pointer; }
+.consumer .feat { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.consumer .feat span { font-size: 12.5px; color: var(--ink-muted); background: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.85); border-radius: 100px; padding: 7px 14px; }
+.consumer .goal { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; }
+.consumer .goal .lbl { font-size: 12px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.1em; }
+.consumer .goal .val { font-family: var(--f-serif); font-size: 26px; color: var(--brand); }
+.consumer .track { margin-top: 18px; }
+.consumer .track .top { display: flex; justify-content: space-between; font-size: 13px; color: var(--ink-muted); margin-bottom: 8px; }
+.consumer .track .top b { color: var(--ink); }
+.consumer .bar { height: 12px; border-radius: 100px; background: rgba(0, 0, 0, 0.06); overflow: hidden; }
+.consumer .bar i { display: block; height: 100%; border-radius: 100px; background: linear-gradient(90deg, #c2552b, #ff7b2c); transition: width 1s cubic-bezier(0.22, 1, 0.36, 1); }
+.consumer .saved-so-far { display: flex; gap: 10px; margin-top: 16px; }
+.consumer .saved-so-far input { flex: 1; padding: 11px 14px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.6); font: 14px var(--f-sans); color: var(--ink); outline: none; }
+.consumer .plan { margin-top: 16px; font-size: 13px; line-height: 1.7; color: var(--ink-muted); padding-top: 16px; border-top: 1px solid rgba(0, 0, 0, 0.06); }
+.consumer .plan b { color: var(--ink); }
+.consumer .plan a { color: #c2552b; font-weight: 600; }
+.consumer .empty { text-align: center; padding: 40px 0; }
+.consumer .empty p { color: var(--ink-muted); font-size: 14.5px; margin: 12px 0 20px; }
+.consumer .field { margin-bottom: 14px; }
+.consumer .field label { display: block; font-size: 12px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+.consumer .field input { width: 100%; padding: 11px 14px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.65); font: 14px var(--f-sans); color: var(--ink); outline: none; }
