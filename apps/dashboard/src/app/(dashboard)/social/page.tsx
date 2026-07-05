@@ -13,7 +13,8 @@
 import { useMemo, useState } from 'react';
 import {
   CHANNELS, DEMO_POSTS, LISTINGS, CAPTION_ANGLES, fmt,
-  type Channel, type SocialPost,
+  STAGES, estimateReach, recommendAngle,
+  type Channel, type SocialPost, type ContentStage,
 } from '../../../lib/social';
 
 const DAY_LABELS = ['Today', 'Tomorrow', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -28,7 +29,7 @@ function ChannelDot({ c }: { c: Channel }) {
 }
 
 export default function SocialStudioPage() {
-  const [tab, setTab] = useState<'queue' | 'calendar' | 'analytics' | 'channels'>('queue');
+  const [tab, setTab] = useState<'kanban' | 'queue' | 'calendar' | 'analytics' | 'channels'>('kanban');
   const [posts, setPosts] = useState<SocialPost[]>(DEMO_POSTS);
   const [connected, setConnected] = useState<Record<Channel, boolean>>(
     Object.fromEntries(CHANNELS.map((c) => [c.id, c.connected])) as Record<Channel, boolean>,
@@ -57,8 +58,9 @@ export default function SocialStudioPage() {
     const l = LISTINGS[listingIdx]!;
     setPosts((ps) => [{
       id: 'p' + Date.now(), listing: l.title, price: l.price, image: l.image,
-      caption, channels: pickChannels, status: 'queued', when: slot,
+      caption, channels: pickChannels, status: 'queued', stage: 'scheduled', when: slot,
       day: slot.startsWith('Today') ? 0 : slot.startsWith('Tomorrow') ? 1 : 2 + DAY_LABELS.indexOf(slot.split(' ')[0] ?? ''),
+      reach: estimateReach(pickChannels, 'p' + Date.now()),
     }, ...ps]);
     setComposing(false);
   }
@@ -66,6 +68,53 @@ export default function SocialStudioPage() {
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p)));
   }
   function remove(id: string) { setPosts((ps) => ps.filter((p) => p.id !== id)); }
+
+  // ── content-pipeline moves (Kanban) ──
+  function moveStage(id: string, stage: ContentStage) {
+    setPosts((ps) => ps.map((p) => {
+      if (p.id !== id) return p;
+      const status: SocialPost['status'] =
+        stage === 'scheduled' ? 'queued'
+          : stage === 'published' || stage === 'underperforming' ? 'posted' : 'draft';
+      const when = stage === 'scheduled' && !/\d/.test(p.when) ? 'Today 5:00 PM' : p.when;
+      return { ...p, stage, status, when };
+    }));
+  }
+  /** Auto-publish pipeline: upload → GPT-4o generates → awaiting approval. */
+  function generateContent(id: string) {
+    moveStage(id, 'generating');
+    setTimeout(() => {
+      setPosts((ps) => ps.map((p) => {
+        if (p.id !== id) return p;
+        const chans = (p.channels.length ? p.channels : ['instagram', 'tiktok', 'facebook']) as Channel[];
+        return {
+          ...p, stage: 'approval', status: 'draft', channels: chans,
+          caption: CAPTION_ANGLES[recommendAngle(chans).angle]!.make(p.listing, p.price),
+          reach: estimateReach(chans, p.id),
+        };
+      }));
+    }, 1400);
+  }
+  function publishNow(id: string) {
+    setPosts((ps) => ps.map((p) => {
+      if (p.id !== id) return p;
+      const reach = p.reach ?? estimateReach(p.channels, p.id);
+      return {
+        ...p, stage: 'published', status: 'posted', when: 'Just now',
+        metrics: p.metrics ?? {
+          views: reach, likes: Math.round(reach * 0.06), saves: Math.round(reach * 0.018),
+          dms: Math.round(reach * 0.0022), leads: Math.round(reach * 0.0007),
+        },
+      };
+    }));
+  }
+  function reschedule(id: string, day: number) {
+    setPosts((ps) => ps.map((p) => {
+      if (p.id !== id) return p;
+      const time = p.when.split(' ').slice(-2).join(' ');
+      return { ...p, day, when: `${DAY_LABELS[day] ?? 'Today'} ${time}` };
+    }));
+  }
 
   return (
     <div className="max-w-[1100px]">
@@ -81,14 +130,98 @@ export default function SocialStudioPage() {
 
       {/* tabs */}
       <div className="mt-6 flex gap-1.5 border-b border-glass-border">
-        {(['queue', 'calendar', 'analytics', 'channels'] as const).map((t) => (
+        {(['kanban', 'queue', 'calendar', 'analytics', 'channels'] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-4 py-2.5 text-[13px] font-semibold capitalize transition-colors ${
               tab === t ? 'border-b-2 border-accent text-accent' : 'text-ink-muted hover:text-ink'}`}>
-            {t}{t === 'queue' ? ` (${queued.length})` : ''}
+            {t === 'kanban' ? 'Pipeline' : t}{t === 'queue' ? ` (${queued.length})` : ''}
           </button>
         ))}
       </div>
+
+      {/* ── PIPELINE (content Kanban) ── */}
+      {tab === 'kanban' && (
+        <div className="mt-5">
+          <p className="text-[12.5px] text-ink-muted">
+            Every verified listing&#39;s content flows left → right. Upload triggers GPT-4o captioning,
+            you approve once, and Synapse auto-publishes to the connected platforms.
+          </p>
+          <div className="mt-4 flex gap-3 overflow-x-auto pb-3">
+            {STAGES.map((s) => {
+              const col = posts.filter((p) => p.stage === s.id);
+              return (
+                <div key={s.id} className="min-w-[212px] flex-1 rounded-inner border border-glass-border bg-surface/40 p-2.5">
+                  <div className="flex items-start justify-between px-1 pb-2.5">
+                    <div>
+                      <p className="text-[12.5px] font-bold">{s.label}</p>
+                      <p className="text-[10.5px] text-ink-dim">{s.who}</p>
+                    </div>
+                    <span className="rounded-full bg-canvas px-2 py-0.5 text-[11px] font-bold text-ink-muted">{col.length}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {col.map((p) => (
+                      <div key={p.id} className={`rounded-lg border bg-surface p-2.5 shadow-depth-1 ${
+                        s.id === 'underperforming' ? 'border-gold/30' : 'border-glass-border'}`}>
+                        <div className="flex gap-2.5">
+                          <img src={p.image} alt="" className="h-10 w-10 rounded-lg object-cover" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[12px] font-semibold">{p.listing.split(',')[0]}</p>
+                            <p className="text-[11px] text-accent">{p.price}</p>
+                          </div>
+                        </div>
+                        {p.channels.length > 0 && (
+                          <div className="mt-2 flex items-center gap-1">
+                            {p.channels.map((c) => <ChannelDot key={c} c={c} />)}
+                            {p.reach ? <span className="ml-1 text-[10px] text-ink-dim">~{fmt(p.reach)} reach</span> : null}
+                          </div>
+                        )}
+                        {p.stage === 'uploaded' && (
+                          <button onClick={() => generateContent(p.id)}
+                            className="mt-2.5 w-full rounded-full bg-accent px-3 py-1.5 text-[11.5px] font-semibold text-white">⚡ Generate content</button>
+                        )}
+                        {p.stage === 'generating' && (
+                          <p className="mt-2.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
+                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/30 border-t-accent" /> GPT-4o writing…
+                          </p>
+                        )}
+                        {p.stage === 'approval' && (
+                          <>
+                            <p className="mt-2 line-clamp-2 text-[11px] leading-snug text-ink-muted">{p.caption}</p>
+                            <button onClick={() => moveStage(p.id, 'scheduled')}
+                              className="mt-2 w-full rounded-full bg-accent px-3 py-1.5 text-[11.5px] font-semibold text-white">Approve &amp; schedule</button>
+                          </>
+                        )}
+                        {p.stage === 'scheduled' && (
+                          <>
+                            <p className="mt-1.5 text-[10.5px] text-ink-dim">{p.when}{p.status === 'paused' ? ' · paused' : ''}</p>
+                            <button onClick={() => publishNow(p.id)}
+                              className="mt-2 w-full rounded-full border border-trust/30 bg-trust/10 px-3 py-1.5 text-[11.5px] font-semibold text-trust">Publish now</button>
+                          </>
+                        )}
+                        {p.stage === 'published' && p.metrics && (
+                          <div className="mt-2 flex gap-3 text-[10px] text-ink-dim">
+                            <span><b className="text-ink">{fmt(p.metrics.views)}</b> views</span>
+                            <span><b className="text-ink">{p.metrics.dms}</b> DMs</span>
+                            <span><b className="text-ink">{p.metrics.leads}</b> leads</span>
+                          </div>
+                        )}
+                        {p.stage === 'underperforming' && (
+                          <>
+                            <p className="mt-2 text-[10.5px] leading-snug text-gold">{p.underperfReason}</p>
+                            <button onClick={() => moveStage(p.id, 'approval')}
+                              className="mt-2 w-full rounded-full border border-glass-border px-3 py-1.5 text-[11px] font-semibold text-ink-muted hover:text-ink">Regenerate variation</button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {col.length === 0 && <p className="px-1 py-6 text-center text-[11px] text-ink-dim">—</p>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── QUEUE ── */}
       {tab === 'queue' && (
@@ -122,28 +255,42 @@ export default function SocialStudioPage() {
 
       {/* ── CALENDAR ── */}
       {tab === 'calendar' && (
-        <div className="mt-5 grid grid-cols-2 gap-2.5 md:grid-cols-7">
-          {DAY_LABELS.map((d, i) => {
-            const dayPosts = posts.filter((p) => p.day === i && p.status !== 'posted');
-            return (
-              <div key={d} className="min-h-[150px] rounded-inner border border-glass-border bg-surface/50 p-2.5">
-                <p className="pb-2 text-[11.5px] font-bold text-ink-muted">{d}</p>
-                <div className="space-y-1.5">
-                  {dayPosts.map((p) => (
-                    <div key={p.id} className="rounded-lg border border-glass-border bg-surface p-2 shadow-depth-1">
-                      <p className="truncate text-[11px] font-semibold">{p.listing.split(',')[0]}</p>
-                      <div className="mt-1 flex items-center gap-1">{p.channels.map((c) => <ChannelDot key={c} c={c} />)}</div>
-                      <p className="mt-1 text-[10px] text-ink-dim">{p.when.split(' ').slice(-2).join(' ')}</p>
-                    </div>
-                  ))}
-                  {dayPosts.length === 0 && (
-                    <button onClick={() => setComposing(true)} className="w-full rounded-lg border border-dashed border-glass-border py-3 text-[11px] text-ink-dim hover:text-accent hover:border-accent/40">+ slot</button>
-                  )}
+        <>
+          <p className="mt-5 text-[12px] text-ink-dim">Drag a post to another day to reschedule. Cards show the estimated reach for their channels.</p>
+          <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-7">
+            {DAY_LABELS.map((d, i) => {
+              const dayPosts = posts.filter((p) => p.day === i && p.status !== 'posted');
+              return (
+                <div key={d}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => { const id = e.dataTransfer.getData('text'); if (id) reschedule(id, i); }}
+                  className="min-h-[150px] rounded-inner border border-glass-border bg-surface/50 p-2.5">
+                  <p className="pb-2 text-[11.5px] font-bold text-ink-muted">{d}</p>
+                  <div className="space-y-1.5">
+                    {dayPosts.map((p) => {
+                      const bestTime = CHANNELS.find((c) => p.channels.includes(c.id) && p.when.includes(c.bestTime));
+                      return (
+                        <div key={p.id} draggable onDragStart={(e) => e.dataTransfer.setData('text', p.id)}
+                          className="cursor-grab rounded-lg border border-glass-border bg-surface p-2 shadow-depth-1 active:cursor-grabbing">
+                          <p className="truncate text-[11px] font-semibold">{p.listing.split(',')[0]}</p>
+                          <div className="mt-1 flex items-center gap-1">{p.channels.map((c) => <ChannelDot key={c} c={c} />)}</div>
+                          <div className="mt-1 flex items-center justify-between">
+                            <p className="text-[10px] text-ink-dim">{p.when.split(' ').slice(-2).join(' ')}</p>
+                            {bestTime && <span className="rounded-full bg-trust/10 px-1.5 text-[9px] font-bold text-trust">best</span>}
+                          </div>
+                          {p.reach ? <p className="mt-0.5 text-[10px] text-accent">~{fmt(p.reach)} reach</p> : null}
+                        </div>
+                      );
+                    })}
+                    {dayPosts.length === 0 && (
+                      <button onClick={() => setComposing(true)} className="w-full rounded-lg border border-dashed border-glass-border py-3 text-[11px] text-ink-dim hover:text-accent hover:border-accent/40">+ slot</button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {/* ── ANALYTICS ── */}
@@ -226,13 +373,30 @@ export default function SocialStudioPage() {
             </div>
 
             <p className="mt-5 text-[11px] font-bold uppercase tracking-widest text-ink-dim">2 · AI caption</p>
+            {(() => {
+              const reco = recommendAngle(pickChannels);
+              if (angleIdx === reco.angle) return null;
+              return (
+                <div className="mt-2 flex items-start gap-2 rounded-inner border border-accent/25 bg-accent-soft px-3 py-2">
+                  <span className="text-[13px]">✦</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11.5px] leading-snug text-ink-muted">{reco.reason}</p>
+                    <button onClick={() => { setAngleIdx(reco.angle); regenerate(listingIdx, reco.angle); }}
+                      className="mt-1 text-[11.5px] font-semibold text-accent">Use {CAPTION_ANGLES[reco.angle]!.label} →</button>
+                  </div>
+                </div>
+              );
+            })()}
             <div className="mt-2 flex flex-wrap gap-1.5">
-              {CAPTION_ANGLES.map((a, i) => (
-                <button key={a.label} onClick={() => { setAngleIdx(i); regenerate(listingIdx, i); }}
-                  className={`rounded-full border px-3 py-1.5 text-[12px] font-medium ${i === angleIdx ? 'border-accent/50 bg-accent-soft text-accent' : 'border-glass-border text-ink-muted'}`}>
-                  ✦ {a.label}
-                </button>
-              ))}
+              {CAPTION_ANGLES.map((a, i) => {
+                const reco = recommendAngle(pickChannels);
+                return (
+                  <button key={a.label} onClick={() => { setAngleIdx(i); regenerate(listingIdx, i); }}
+                    className={`rounded-full border px-3 py-1.5 text-[12px] font-medium ${i === angleIdx ? 'border-accent/50 bg-accent-soft text-accent' : 'border-glass-border text-ink-muted'}`}>
+                    ✦ {a.label}{i === reco.angle ? ' · best' : ''}
+                  </button>
+                );
+              })}
             </div>
             <textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={3}
               className="mt-2 w-full rounded-inner border border-glass-border bg-canvas p-3 text-[13px] leading-relaxed outline-none focus:border-accent/40" />
