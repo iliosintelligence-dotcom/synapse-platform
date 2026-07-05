@@ -38,7 +38,7 @@ export default function SocialStudioPage() {
   // composer state
   const [listingIdx, setListingIdx] = useState(0);
   const [angleIdx, setAngleIdx] = useState(0);
-  const [caption, setCaption] = useState(CAPTION_ANGLES[0].make(LISTINGS[0].title, LISTINGS[0].price));
+  const [caption, setCaption] = useState(CAPTION_ANGLES[0]!.make(LISTINGS[0]!.title, LISTINGS[0]!.price));
   const [pickChannels, setPickChannels] = useState<Channel[]>(['instagram']);
   const [slot, setSlot] = useState('Today 5:00 PM');
 
@@ -51,14 +51,14 @@ export default function SocialStudioPage() {
     }), { views: 0, saves: 0, dms: 0, leads: 0 }), [posted]);
 
   function regenerate(li = listingIdx, ai = angleIdx) {
-    setCaption(CAPTION_ANGLES[ai].make(LISTINGS[li].title, LISTINGS[li].price));
+    setCaption(CAPTION_ANGLES[ai]!.make(LISTINGS[li]!.title, LISTINGS[li]!.price));
   }
   function schedulePost() {
-    const l = LISTINGS[listingIdx];
+    const l = LISTINGS[listingIdx]!;
     setPosts((ps) => [{
       id: 'p' + Date.now(), listing: l.title, price: l.price, image: l.image,
       caption, channels: pickChannels, status: 'queued', when: slot,
-      day: slot.startsWith('Today') ? 0 : slot.startsWith('Tomorrow') ? 1 : 2 + DAY_LABELS.indexOf(slot.split(' ')[0]),
+      day: slot.startsWith('Today') ? 0 : slot.startsWith('Tomorrow') ? 1 : 2 + DAY_LABELS.indexOf(slot.split(' ')[0] ?? ''),
     }, ...ps]);
     setComposing(false);
   }
