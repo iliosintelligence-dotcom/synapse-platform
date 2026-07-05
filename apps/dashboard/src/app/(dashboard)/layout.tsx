@@ -39,11 +39,6 @@ const NAV: NavItem[] = [
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN],
   },
   {
-    href: '/subscription',
-    label: 'Subscription',
-    roles: [UserRole.AGENCY_OWNER],
-  },
-  {
     href: '/agents',
     label: 'Agents',
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN],
@@ -52,6 +47,12 @@ const NAV: NavItem[] = [
     href: '/verification',
     label: 'Verification',
     roles: [UserRole.AGENCY_OWNER, UserRole.AGENCY_ADMIN],
+  },
+  // Account settings live at the bottom of the list.
+  {
+    href: '/subscription',
+    label: 'Subscription',
+    roles: [UserRole.AGENCY_OWNER],
   },
   { href: '/settings', label: 'Settings', roles: [UserRole.AGENCY_OWNER] },
 ];

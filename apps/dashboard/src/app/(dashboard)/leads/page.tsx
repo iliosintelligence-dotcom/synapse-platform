@@ -12,7 +12,8 @@
 import { useMemo, useState } from 'react';
 import {
   DEMO_LEADS, STAGES, SOURCE_LABEL, ago, pipelineStats, waLink,
-  type Lead, type LeadStage, type LeadSource,
+  CHANNEL_META, channelBreakdown, attribChain, wonAttribution,
+  type Lead, type LeadStage, type LeadSource, type AttribChannel,
 } from '../../../lib/crm';
 
 const STAGE_TINT: Record<LeadStage, string> = {
@@ -42,6 +43,15 @@ function SourceChip({ source }: { source: LeadSource }) {
   return <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-semibold ${style}`}>{SOURCE_LABEL[source]}</span>;
 }
 
+function ChannelBadge({ channel, title }: { channel: AttribChannel; title?: string }) {
+  const m = CHANNEL_META[channel];
+  return (
+    <span title={title ?? `Attributed to ${m.label}`}
+      className="inline-flex h-5 w-5 items-center justify-center rounded text-[9px] font-bold text-white"
+      style={{ background: m.color }}>{m.short}</span>
+  );
+}
+
 export default function LeadsPage() {
   const [leads, setLeads] = useState<Lead[]>(DEMO_LEADS);
   const [view, setView] = useState<'board' | 'list'>('board');
@@ -58,6 +68,7 @@ export default function LeadsPage() {
     [leads, q, srcFilter],
   );
   const stats = pipelineStats(leads);
+  const breakdown = channelBreakdown(leads);
   const open = leads.find((l) => l.id === openId) ?? null;
 
   function setStage(id: string, stage: LeadStage) {
@@ -96,6 +107,29 @@ export default function LeadsPage() {
             <p className="text-ink-dim text-[11px] mt-0.5">{l}</p>
           </div>
         ))}
+      </div>
+
+      {/* attribution breakdown (Phase B) — which marketing actually made leads */}
+      <div className="mt-3 rounded-inner border border-glass-border bg-surface/70 px-4 py-3 shadow-depth-1">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-ink-dim">Where your leads come from</p>
+          <span className="text-[11px] text-ink-dim">{leads.length} leads attributed</span>
+        </div>
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          {breakdown.map(({ channel, count }) => (
+            <div key={channel} className="flex items-center gap-2 rounded-full border border-glass-border bg-canvas px-3 py-1.5">
+              <ChannelBadge channel={channel} />
+              <span className="text-[12px] font-semibold">{CHANNEL_META[channel].label}</span>
+              <span className="text-[12px] font-bold text-accent">{count}</span>
+            </div>
+          ))}
+        </div>
+        <div className="mt-2.5 flex h-2 overflow-hidden rounded-full bg-canvas">
+          {breakdown.map(({ channel, count }) => (
+            <span key={channel} title={`${CHANNEL_META[channel].label}: ${count}`}
+              style={{ background: CHANNEL_META[channel].color, width: `${(count / leads.length) * 100}%` }} />
+          ))}
+        </div>
       </div>
 
       {/* toolbar */}
@@ -144,7 +178,10 @@ export default function LeadsPage() {
                       </div>
                       <p className="mt-1 truncate text-[11.5px] text-ink-muted">{l.property}</p>
                       <div className="mt-2 flex items-center justify-between">
-                        <SourceChip source={l.source} />
+                        <div className="flex items-center gap-1.5">
+                          <SourceChip source={l.source} />
+                          {l.attribution && <ChannelBadge channel={l.attribution.channel} />}
+                        </div>
                         <span className="text-[10.5px] text-ink-dim">{ago(l.minsAgo)}</span>
                       </div>
                       {l.failed && <p className="mt-1.5 text-[10.5px] font-semibold text-gold">⚠ delivery failed</p>}
@@ -169,6 +206,7 @@ export default function LeadsPage() {
                 <div className="flex items-center gap-2">
                   <p className="text-[13.5px] font-semibold">{l.name}</p>
                   <SourceChip source={l.source} />
+                  {l.attribution && <ChannelBadge channel={l.attribution.channel} />}
                   <span className="rounded-full border border-glass-border px-2 py-0.5 text-[10.5px] font-semibold capitalize text-ink-muted">{l.stage}</span>
                   {l.failed && <span className="text-[10.5px] font-semibold text-gold">⚠ delivery failed</span>}
                 </div>
@@ -214,6 +252,40 @@ export default function LeadsPage() {
               <p className="mt-1 text-[14px] font-semibold">{open.property}</p>
               <p className="text-[12px] text-ink-muted">List {open.propertyPrice} · their budget {open.budget}</p>
             </section>
+
+            {/* attribution chain (Phase B) */}
+            {open.attribution && (
+              <section className="mt-4 rounded-inner border border-glass-border bg-canvas p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10.5px] font-bold uppercase tracking-widest text-ink-dim">How this lead reached you</p>
+                  <ChannelBadge channel={open.attribution.channel} />
+                </div>
+                <div className="mt-2.5 flex flex-wrap items-center gap-x-1 gap-y-1.5">
+                  {attribChain(open.attribution).map((step, i, arr) => (
+                    <span key={i} className="flex items-center gap-1">
+                      <span className="rounded-full border border-glass-border bg-surface px-2 py-1 text-[11px] font-medium">
+                        {step.label}{step.sub ? <span className="text-ink-dim"> · {step.sub}</span> : null}
+                      </span>
+                      {i < arr.length - 1 && <span className="text-ink-dim">→</span>}
+                    </span>
+                  ))}
+                </div>
+                {(open.attribution.campaign || open.attribution.shortLink) && (
+                  <p className="mt-2.5 text-[11px] text-ink-dim">
+                    {open.attribution.shortLink && <>Tracked link <span className="font-semibold text-ink-muted">{open.attribution.shortLink}</span></>}
+                    {open.attribution.campaign && <> · campaign <span className="font-semibold text-ink-muted">{open.attribution.campaign}</span></>}
+                  </p>
+                )}
+              </section>
+            )}
+
+            {/* revenue attribution for a closed deal */}
+            {wonAttribution(open) && (
+              <section className="mt-4 rounded-inner border border-trust/30 bg-trust/10 p-4">
+                <p className="text-[10.5px] font-bold uppercase tracking-widest text-trust">Revenue attributed</p>
+                <p className="mt-1.5 text-[13px] font-semibold leading-relaxed">{wonAttribution(open)}</p>
+              </section>
+            )}
 
             <section className="mt-4 rounded-inner border border-accent/20 bg-accent-soft p-4">
               <p className="text-[10.5px] font-bold uppercase tracking-widest text-accent">✦ Brief from Toju</p>

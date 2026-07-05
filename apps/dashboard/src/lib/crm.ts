@@ -15,6 +15,35 @@ export type Activity = {
 
 export type LeadTask = { id: string; text: string; due: string; done: boolean };
 
+/**
+ * Attribution (plan Feature 4 — the key differentiator). Every lead carries a
+ * full chain: which social post → which tracked-link tap → how long with Toju
+ * → this lead → (for won deals) the revenue it produced. In production the
+ * channel/postId/campaign come from the tracked link's UTM + Synapse short link
+ * captured on the app session that opened the Toju conversation.
+ */
+export type AttribChannel = 'instagram' | 'tiktok' | 'facebook' | 'whatsapp' | 'proximity' | 'direct';
+
+export const CHANNEL_META: Record<AttribChannel, { label: string; color: string; short: string }> = {
+  instagram: { label: 'Instagram', color: '#DD2A7B', short: 'IG' },
+  tiktok: { label: 'TikTok', color: '#161616', short: 'TT' },
+  facebook: { label: 'Facebook', color: '#1877F2', short: 'f' },
+  whatsapp: { label: 'WhatsApp', color: '#25D366', short: 'WA' },
+  proximity: { label: 'Proximity', color: '#C2552B', short: '◎' },
+  direct: { label: 'Direct app', color: '#8a8f98', short: '·' },
+};
+
+export type Attribution = {
+  channel: AttribChannel;
+  postLabel?: string;   // e.g. 'Reel · 3-Bed Lekki Phase 1'
+  postedAt?: string;    // when the post went out
+  campaign?: string;    // utm_campaign
+  shortLink?: string;   // Synapse tracked short link
+  firstSeen?: string;   // first saw the post / entered the geofence
+  tappedAt?: string;    // tapped the tracked link
+  tojuMinutes?: number;  // minutes spent with Toju before the lead formed
+};
+
 export type Lead = {
   id: string;
   name: string;
@@ -28,6 +57,7 @@ export type Lead = {
   score: number; // AI lead score 0-100
   minsAgo: number;
   brief: string; // what they told Toju / asked for
+  attribution?: Attribution;
   activity: Activity[];
   tasks: LeadTask[];
   notes: string[];
@@ -59,6 +89,11 @@ export const DEMO_LEADS: Lead[] = [
     property: '3-Bed Apartment, Lekki Phase 1', propertyPrice: '₦165M', budget: '₦150–180M',
     source: 'toju', stage: 'new', score: 92, minsAgo: 2,
     brief: 'Family of four relocating from Abuja. Needs good schools within 15 min, works on the Island, wants to move within 3 months.',
+    attribution: {
+      channel: 'instagram', postLabel: 'Reel · 3-Bed Lekki Phase 1', postedAt: 'Today 5:00 PM',
+      campaign: 'lekki-family', shortLink: 'syn.ps/lk3b', firstSeen: 'Today 5:12 PM',
+      tappedAt: 'Today 5:12 PM', tojuMinutes: 9,
+    },
     activity: [
       { at: '2m ago', kind: 'system', text: 'Lead created from Toju conversation — brief attached' },
     ],
@@ -70,6 +105,11 @@ export const DEMO_LEADS: Lead[] = [
     property: '4-Bed Duplex, Osapa London', propertyPrice: '₦178M', budget: '₦170–200M',
     source: 'contact', stage: 'contacted', score: 78, minsAgo: 24,
     brief: 'Asked for the title report and service charge history before committing to a viewing.',
+    attribution: {
+      channel: 'facebook', postLabel: 'Photo · 4-Bed Osapa Duplex', postedAt: '2 days ago',
+      campaign: 'osapa-luxury', shortLink: 'syn.ps/os4d', firstSeen: '2 days ago',
+      tappedAt: '25m ago', tojuMinutes: 0,
+    },
     activity: [
       { at: '10m ago', kind: 'whatsapp', text: 'You: sent verification report PDF' },
       { at: '24m ago', kind: 'system', text: 'Lead created from listing contact form' },
@@ -82,6 +122,11 @@ export const DEMO_LEADS: Lead[] = [
     property: '3-Bed Terrace, Ikate', propertyPrice: '₦148M', budget: '₦140–170M',
     source: 'toju', stage: 'viewing', score: 85, minsAgo: 60 * 26,
     brief: 'First-time buyer, pre-approved mortgage with Stanbic. Toju matched on school access + commute.',
+    attribution: {
+      channel: 'tiktok', postLabel: 'Video · 3-Bed Ikate Terrace', postedAt: 'Mon 7:30 PM',
+      campaign: 'ikate-firsthome', shortLink: 'syn.ps/ik3t', firstSeen: '2 days ago',
+      tappedAt: '2 days ago', tojuMinutes: 15,
+    },
     activity: [
       { at: '2h ago', kind: 'viewing', text: 'Viewing confirmed — Saturday 11:00 AM, agent Funke' },
       { at: '1d ago', kind: 'whatsapp', text: 'Amina: "Saturday works, thank you!"' },
@@ -98,6 +143,10 @@ export const DEMO_LEADS: Lead[] = [
     property: '2-Bed Flat, Victoria Island', propertyPrice: '₦142M', budget: '₦130–160M',
     source: 'toju', stage: 'new', score: 64, minsAgo: 60 * 5, failed: true,
     brief: 'Investor — asked about short-let regulations and gross yield on VI 2-beds.',
+    attribution: {
+      channel: 'proximity', postLabel: 'Walked within 300m of the VI 2-Bed',
+      firstSeen: '5h ago', tappedAt: '5h ago', tojuMinutes: 6,
+    },
     activity: [
       { at: '5h ago', kind: 'system', text: 'WhatsApp delivery failed — number may be unreachable' },
       { at: '5h ago', kind: 'system', text: 'Lead created from Toju conversation' },
@@ -110,6 +159,10 @@ export const DEMO_LEADS: Lead[] = [
     property: '4-Bed Duplex, Osapa London', propertyPrice: '₦178M', budget: '₦175M cash',
     source: 'browse', stage: 'negotiation', score: 96, minsAgo: 60 * 24 * 3,
     brief: 'Cash buyer. Offered ₦170M, countered at ₦175M. Lawyer reviewing draft contract.',
+    attribution: {
+      channel: 'direct', postLabel: 'Browsed verified listings in-app',
+      firstSeen: '4 days ago', tappedAt: '4 days ago', tojuMinutes: 22,
+    },
     activity: [
       { at: '3h ago', kind: 'note', text: 'Her lawyer requested survey plan — sent' },
       { at: '1d ago', kind: 'stage', text: 'Moved to Negotiation — offer ₦170M received' },
@@ -123,6 +176,11 @@ export const DEMO_LEADS: Lead[] = [
     property: '3-Bed Apartment, Lekki Phase 1', propertyPrice: '₦165M', budget: '₦160M',
     source: 'instagram', stage: 'won', score: 88, minsAgo: 60 * 24 * 9,
     brief: 'Came from the Instagram syndicated post. Closed at ₦161M.',
+    attribution: {
+      channel: 'instagram', postLabel: 'Reel · 3-Bed Lekki Phase 1', postedAt: '11 days ago',
+      campaign: 'lekki-luxury', shortLink: 'syn.ps/lk3b', firstSeen: '11 days ago',
+      tappedAt: '10 days ago', tojuMinutes: 11,
+    },
     activity: [
       { at: '2d ago', kind: 'stage', text: 'WON — ₦161M · escrow initiated' },
       { at: '6d ago', kind: 'stage', text: 'Negotiation — offer ₦158M' },
@@ -135,6 +193,10 @@ export const DEMO_LEADS: Lead[] = [
     property: '3-Bed Terrace, Ikate', propertyPrice: '₦148M', budget: '₦120M max',
     source: 'browse', stage: 'lost', score: 41, minsAgo: 60 * 24 * 6,
     brief: 'Budget ceiling ₦120M — 20% below list. Referred to Toju for better-fit areas.',
+    attribution: {
+      channel: 'direct', postLabel: 'Browsed verified listings in-app',
+      firstSeen: '6 days ago', tappedAt: '6 days ago', tojuMinutes: 8,
+    },
     activity: [{ at: '6d ago', kind: 'stage', text: 'Lost — budget mismatch. Toju re-matching in Sangotedo.' }],
     tasks: [],
     notes: [],
@@ -158,4 +220,43 @@ export function waLink(phone: string, property: string) {
   return `https://wa.me/${phone.replace(/[^\d]/g, '')}?text=${encodeURIComponent(
     `Hello, thank you for your interest in ${property} via Synapse.`,
   )}`;
+}
+
+// ── attribution (Phase B) ───────────────────────────────────────────────────
+/** Channel mix across a set of leads, busiest first, zero-channels dropped. */
+export function channelBreakdown(leads: Lead[]): { channel: AttribChannel; count: number }[] {
+  const counts = {} as Record<AttribChannel, number>;
+  for (const l of leads) {
+    const c = l.attribution?.channel ?? 'direct';
+    counts[c] = (counts[c] ?? 0) + 1;
+  }
+  return (Object.keys(CHANNEL_META) as AttribChannel[])
+    .map((channel) => ({ channel, count: counts[channel] ?? 0 }))
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count);
+}
+
+/** The ordered chain we render as pills: source → tap → Toju → lead. */
+export function attribChain(a: Attribution): { label: string; sub?: string }[] {
+  const m = CHANNEL_META[a.channel];
+  const steps: { label: string; sub?: string }[] = [
+    { label: a.postLabel ? `${m.label}: ${a.postLabel}` : m.label, sub: a.postedAt },
+  ];
+  if (a.channel !== 'direct' && a.channel !== 'proximity') {
+    steps.push({ label: a.shortLink ? `Tapped ${a.shortLink}` : 'Tapped link', sub: a.tappedAt });
+  }
+  if (a.tojuMinutes && a.tojuMinutes > 0) steps.push({ label: `Toju · ${a.tojuMinutes} min` });
+  steps.push({ label: 'Lead created' });
+  return steps;
+}
+
+/** Revenue attribution for a closed deal (plan: "This ₦45M sale originated…"). */
+export function wonAttribution(lead: Lead): string | null {
+  if (lead.stage !== 'won' || !lead.attribution) return null;
+  const a = lead.attribution;
+  const m = CHANNEL_META[a.channel];
+  const src = a.postLabel ? `${m.label} post (${a.postLabel})` : `${m.label}`;
+  const article = /^[aeiou]/i.test(m.label) ? 'an' : 'a';
+  const when = a.postedAt ? (/ago$/.test(a.postedAt) ? ` — posted ${a.postedAt}` : ` on ${a.postedAt}`) : '';
+  return `This ${lead.propertyPrice} sale originated from ${article} ${src}${when}.`;
 }
