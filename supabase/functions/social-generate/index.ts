@@ -2,14 +2,14 @@
  * social-generate — AI caption generation for Synapse social syndication.
  *
  * Given a verified listing + the channels an agency wants to post to, Claude
- * writes a platform-tailored caption for each (Instagram, TikTok, Facebook,
- * WhatsApp Status), plus hashtags and a recommended lead channel. This powers
- * the "Guided Post Creation" step of the Agency OS social studio — one upload,
- * captions everywhere, reach maximised.
+ * writes a platform-tailored caption for each (Instagram, TikTok, YouTube,
+ * Facebook, WhatsApp Status), plus hashtags and a recommended lead channel.
+ * This powers the "Guided Post Creation" step of the Agency OS social studio
+ * — one upload, captions everywhere, reach maximised.
  *
  * POST { property: {title, price, city, bedrooms, listingType, propertyType,
  *        trustScore, area?, angle?}, channels?: string[] }
- *   -> { captions: {instagram?,tiktok?,facebook?,whatsapp?}, hashtags: string[],
+ *   -> { captions: {instagram?,tiktok?,youtube?,facebook?,whatsapp?}, hashtags: string[],
  *        recommendedChannel: string, note: string }
  *
  * Deployed with verify_jwt = false so the static prototype can call it.
@@ -28,7 +28,7 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
-const CHANNELS = ['instagram', 'tiktok', 'facebook', 'whatsapp'] as const;
+const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp'] as const;
 type Channel = typeof CHANNELS[number];
 
 const SYSTEM = `You are the social copywriter for Synapse, a verified Nigerian real-estate platform.
@@ -36,6 +36,7 @@ Write scroll-stopping, authentic captions for one specific verified property, ta
 
 - instagram: aspirational + lifestyle. 1-2 short lines, a line break, then a soft CTA. 2-4 tasteful emojis. Warm, editorial.
 - tiktok: punchy, trend-aware, spoken-word energy. A strong hook first line. Casual, young Lagos voice. Emojis ok.
+- youtube: written for a video description under a walkthrough. Open with the one-line hook a viewer sees before "more", then 2-3 sentences of real detail (layout, area, price), then a clear next step. Minimal emoji, no hashtag stuffing.
 - facebook: informative + trust-forward. Slightly longer, plain, decision-maker tone (older, higher buy-intent). Minimal emoji.
 - whatsapp: a WhatsApp Status blurb. Very short, urgent, personal. One emoji max.
 
@@ -47,8 +48,8 @@ RULES:
 - Nigerian English, Lagos market savvy. Avoid clichE9s like "dream home come true".
 
 Return ONLY a JSON object, no prose:
-{"captions":{"instagram":"...","tiktok":"...","facebook":"...","whatsapp":"..."},
- "hashtags":["#..."],"recommendedChannel":"instagram|tiktok|facebook|whatsapp",
+{"captions":{"instagram":"...","tiktok":"...","youtube":"...","facebook":"...","whatsapp":"..."},
+ "hashtags":["#..."],"recommendedChannel":"instagram|tiktok|youtube|facebook|whatsapp",
  "note":"one sentence on why that channel is best for THIS listing"}
 Only include the channels requested.`;
 
