@@ -499,7 +499,14 @@ Deno.serve(async (req: Request) => {
       reply?: string; showMatches?: boolean; suggestions?: unknown;
       criteria?: Criteria & { brief?: string | null };
     };
-    let reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : first.text.trim();
+    /* When parseLoose fails (a truncated or malformed envelope) this used to
+       fall straight back to first.text — the raw model output — so the user
+       got {"reply": …, "criteria": {…}} rendered into the transcript. Reproduced
+       live. Salvage the reply string the way the advisor pass already does, and
+       if even that fails, never hand JSON to a human. */
+    let reply = typeof parsed.reply === 'string' && parsed.reply.trim()
+      ? parsed.reply.trim()
+      : (salvageReply(first.text) ?? safeFallbackReply(first.text));
     const showMatches = parsed.showMatches === true;
     const criteria = parsed.criteria ?? {};
     let suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
@@ -867,6 +874,17 @@ function salvageField(raw: string, field: string): string | null {
 }
 function salvageReply(raw: string): string | null {
   return salvageField(raw, 'reply');
+}
+
+/** Last line of defence. If the model's output could not be parsed OR salvaged
+ *  and it still looks like JSON, a human must never be shown it — say something
+ *  honest instead. Plain prose (the model answering without the envelope) is
+ *  passed through untouched. */
+function safeFallbackReply(raw: string): string {
+  const t = raw.trim();
+  const looksLikeJson = t.startsWith('{') || t.startsWith('```') || /"reply"\s*:/.test(t);
+  if (!looksLikeJson) return t;
+  return "Sorry — I garbled that one. Say it again and I'll pick it up properly.";
 }
 
 /** Pull per-match "why" pairs out of truncated/broken advisor JSON. */
