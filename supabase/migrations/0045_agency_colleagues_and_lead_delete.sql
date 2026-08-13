@@ -110,6 +110,12 @@ $$;
 revoke all on function public.delete_lead(uuid) from public, anon;
 grant execute on function public.delete_lead(uuid) to authenticated;
 
+-- SUPERSEDED BY 0046. The version below is SECURITY DEFINER and tests
+-- current_user, which is a contradiction: inside a SECURITY DEFINER function
+-- current_user is the function's OWNER, never the caller, so this guard never
+-- fired for anybody. 0046 redefines it as SECURITY INVOKER. Left here as the
+-- historical record -- do not copy this pattern.
+--
 -- Defence in depth: if deleted_at is ever granted to clients again, this keeps
 -- the admin/owner rule in force. The service role bypasses RLS but still fires
 -- triggers, so it is exempted explicitly -- create-lead and any future backfill
