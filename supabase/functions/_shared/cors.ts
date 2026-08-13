@@ -4,7 +4,10 @@ export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers':
     'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  // GET is here for social-connect's ?action=start, which the agency portal
+  // fetches to obtain an authorization URL. Widening the list is safe: it says
+  // which methods a browser may attempt, not which any function accepts.
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 
 /** Standard JSON response with CORS applied. */

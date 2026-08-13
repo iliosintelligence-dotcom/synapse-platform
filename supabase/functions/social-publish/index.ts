@@ -31,7 +31,7 @@
  * Later, per adapter: META_PAGE_TOKEN / TIKTOK_ACCESS_TOKEN.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { corsHeaders, json } from './cors.ts';
+import { corsHeaders, json } from '../_shared/cors.ts';
 
 interface QueuedPost {
   id: string;
