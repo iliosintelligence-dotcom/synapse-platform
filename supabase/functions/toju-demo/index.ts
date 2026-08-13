@@ -3,7 +3,7 @@
  *
  * Conversational endpoint grounded in the digital twin: Claude drives the
  * conversation; once it has a picture it emits criteria; we query verified
- * listings + enrichment + neighbourhood intelligence, then a second Claude
+ * listings + enrichment (area name only -- see fetchMatches), then a second Claude
  * pass writes the recommendation the lifestyle-cost way ("slightly over
  * budget, but the school run and yield justify it") with a per-match "why".
  *
@@ -671,10 +671,10 @@ interface Match {
   agency: string;
   tier: string;
   why?: string | null;
-  neighbourhood?: {
-    name: string | null; safety: number | null; family: number | null;
-    flood: number | null; power: number | null; note: string | null;
-  } | null;
+  /** Area NAME only. The score and summary fields this once carried were
+   *  seed_rand output, so they were removed from both the query and this type
+   *  -- leaving them here would invite the mapping to fill them again. */
+  neighbourhood?: { name: string | null } | null;
   room?: {
     totalRooms: number; housematesIn: number; genderPreference: string;
     furnished: boolean; ensuite: boolean; billsIncluded: boolean; vibe: string | null;
