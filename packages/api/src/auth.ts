@@ -14,11 +14,22 @@ import {
 /** Send a one-time passcode. Creates the user on first sign-in. */
 export async function signInWithOtp(
   email: string,
-  meta?: { role: UserRole; full_name: string },
+  meta?: { role: UserRole; full_name: string; agency_name?: string; city?: string },
 ): Promise<void> {
   const { error } = await getDb().auth.signInWithOtp({
     email,
-    options: meta ? { data: { role: meta.role, full_name: meta.full_name } } : undefined,
+    options: meta
+      ? {
+          data: {
+            role: meta.role,
+            full_name: meta.full_name,
+            // Read by the handle_new_user trigger (migration 0039) to name
+            // the agency it provisions for agency_owner signups.
+            ...(meta.agency_name ? { agency_name: meta.agency_name } : {}),
+            ...(meta.city ? { city: meta.city } : {}),
+          },
+        }
+      : undefined,
   });
   if (error) throw error;
 }
@@ -33,11 +44,21 @@ export async function signUpConsumer(input: SignUpConsumerInput): Promise<void> 
 }
 
 /**
- * Agency signup: OTP with owner role metadata. The agency record itself is
- * created post-verification via agencies.createAgency (needs auth.uid()).
+ * Agency signup: OTP with owner role + agency metadata. The agencies row and
+ * the owner's agency_members row are provisioned by the handle_new_user
+ * trigger (migration 0039) in the same transaction as the profile — the
+ * client must NOT create them itself. RLS makes client-side membership
+ * creation impossible anyway (a new owner has no membership, so it can never
+ * pass agency_members_manage_admin), and any client-sequenced step can be
+ * abandoned mid-flow, stranding a half-provisioned account.
  */
 export async function signUpAgency(input: SignUpAgencyInput): Promise<void> {
-  await signInWithOtp(input.email, { role: UserRole.AGENCY_OWNER, full_name: input.full_name });
+  await signInWithOtp(input.email, {
+    role: UserRole.AGENCY_OWNER,
+    full_name: input.full_name,
+    agency_name: input.agency_name,
+    city: input.city,
+  });
 }
 
 export async function signInWithGoogle(redirectTo?: string): Promise<void> {

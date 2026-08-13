@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { View, StyleSheet } from 'react-native';
 import { Title, Body, Button, Input, color, space } from '@synapse/ui';
 import { useAuth } from '@synapse/auth';
-import { agencies } from '@synapse/api';
 
 export default function SignUpAgency() {
   const { signUpAgency, verifyOtp } = useAuth();
@@ -38,8 +37,9 @@ export default function SignUpAgency() {
     setError(null);
     try {
       await verifyOtp(email.trim(), code.trim());
-      // Agency setup: the agency record is created right after first auth.
-      await agencies.createAgency({ name: agencyName.trim(), city: city.trim() });
+      // The agency + owner membership are provisioned by the DB trigger
+      // (migration 0039) in the same transaction that created the user —
+      // calling agencies.createAgency here would mint a duplicate agency.
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Invalid code');
     } finally {
