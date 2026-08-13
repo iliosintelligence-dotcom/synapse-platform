@@ -664,7 +664,6 @@ interface Match {
   verificationStatus: string;   // unverified | in_progress | verified
   verified: boolean;
   verifiedAt: string | null;
-  fitScore: number;
   yieldPct: number | null;
   whoThisSuits: string | null;
   whatToWatch: string | null;
@@ -702,10 +701,10 @@ async function fetchMatchesRelaxed(c: Criteria): Promise<{ matches: Match[]; not
         return { matches: r2.matches, note: `"${c.city}" is an area in ${realCity}${r2.note ? '; ' + r2.note : ''}` };
       }
     }
-    const r3 = await relaxWithinCity({ ...c, city: null });
-    if (r3.matches.length > 0) {
-      return { matches: r3.matches, note: `NOTHING in ${c.city} for this deal type — these are the closest fits in OTHER cities. Open by saying so and offer to alert them when ${c.city} inventory lands.` };
-    }
+    // No cross-city stage. Dropping the city filter used to return homes from
+    // anywhere, so someone who asked for Lagos got Ibadan with an apology --
+    // and the honest zero-state below could never be reached. If their city
+    // has nothing, saying so is the answer.
   }
   return { matches: [], note: null };
 }
@@ -851,7 +850,6 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       verificationStatus: String(r.verification_status ?? 'unverified'),
       verified: r.verification_status === 'verified',
       verifiedAt: (r.verified_at as string) ?? null,
-      fitScore: Number(e[fitCol] ?? 0),
       yieldPct: e.rental_yield_estimate_pct == null ? null : Number(e.rental_yield_estimate_pct),
       whoThisSuits: (e.who_this_suits as string) ?? null,
       whatToWatch: (e.what_to_watch as string) ?? null,
