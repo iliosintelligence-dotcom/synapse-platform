@@ -1,10 +1,10 @@
 /**
- * toju-chat — Toju, the AI property consultant. Deno / Supabase Edge Function.
+ * toju-chat — Tayo, the AI property consultant. Deno / Supabase Edge Function.
  *
  * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
  * Property OS" without an architecture rewrite). The LLM backend is swappable
  * behind an `LLMProvider` adapter, the system prompt comes from a versioned
- * registry, and tools come from a registry the gateway iterates. Toju's
+ * registry, and tools come from a registry the gateway iterates. Tayo's
  * behaviour is unchanged — same prompt text, same single `search_properties`
  * tool, same mandatory-city rule, same 30-message trim, same no-listings line.
  *
@@ -14,7 +14,7 @@
  * verified+active+live rows to consumers).
  *
  * Hard constraints:
- *  - city is MANDATORY on every search. Toju never shows listings from a
+ *  - city is MANDATORY on every search. Tayo never shows listings from a
  *    city the user did not ask about.
  *  - Recommendation, not catalogue: search is constrained to listings from the
  *    last 14 days (build-plan v2.0), so consumers see fresh inventory only.
@@ -37,7 +37,7 @@ const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_MAX_TOKENS = 1024;
 
 /* ───────── prompt registry ─────────
- * Versioned source for Toju's system prompt. The active version is recorded on
+ * Versioned source for Tayo's system prompt. The active version is recorded on
  * every assistant turn so prompt changes are traceable (and A/B-able later). */
 
 interface PromptVersion {
@@ -49,7 +49,7 @@ interface PromptVersion {
 const TOJU_SYSTEM_V1: PromptVersion = {
   id: 'toju-system',
   version: '2026-06-25.1',
-  text: `You are Toju, an AI real estate consultant for Synapse in Nigeria.
+  text: `You are Tayo, an AI real estate consultant for Synapse in Nigeria.
 You ADVISE and RECOMMEND — you are not a search box. You reason out loud and
 explain WHY a property fits before showing it.
 
@@ -137,7 +137,7 @@ interface SearchArgs {
 }
 
 /**
- * A discrete next step Toju surfaces, kept structurally separate from the
+ * A discrete next step Tayo surfaces, kept structurally separate from the
  * recommendation prose. Layer 9's "half-open door" (docs/layer9.md, instruction
  * 2) requires the observation/recommendation and the action-to-take to be
  * distinct labeled fields so the future 9.4 advisory agent extends this contract
@@ -164,7 +164,7 @@ interface ChatMessage {
  * Derive the next-step action from the structured tool outcome — NOT by parsing
  * the answer text. When the search returned listings, the user's natural next
  * step is to reach out about the top-ranked one; otherwise there is no action
- * (Toju is asking a question or has no listings to act on).
+ * (Tayo is asking a question or has no listings to act on).
  */
 function deriveSuggestedAction(ids: string[]): SuggestedAction | null {
   if (ids.length === 0) return null;
@@ -537,7 +537,7 @@ interface SearchRow {
   trust_score: number | null;
 }
 
-/** Recency window for recommendations (build-plan v2.0): Toju only recommends
+/** Recency window for recommendations (build-plan v2.0): Tayo only recommends
  *  properties listed within the last 14 days, so consumers see fresh, relevant
  *  inventory rather than a stale catalogue. */
 const RECOMMENDATION_WINDOW_DAYS = 14;

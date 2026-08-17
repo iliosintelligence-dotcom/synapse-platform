@@ -1,5 +1,5 @@
 /**
- * toju-demo — public Toju for the marketing/clickable prototype.
+ * toju-demo — public Tayo for the marketing/clickable prototype.
  *
  * Conversational endpoint grounded in the digital twin: Claude drives the
  * conversation; once it has a picture it emits criteria; we query verified
@@ -32,9 +32,9 @@ const MAX_HISTORY = 14;
 const MAX_LEN = 1200;
 const MAX_MATCHES = 4;
 
-/** The advisor doctrine — Toju's identity and philosophy. Shared by the
+/** The advisor doctrine — Tayo's identity and philosophy. Shared by the
  *  intake and advisor passes; the operational rules below each build on it. */
-const DOCTRINE = `You are Toju. You are not a chatbot — you are Nigeria's AI Property Advisor,
+const DOCTRINE = `You are Tayo. You are not a chatbot — you are Nigeria's AI Property Advisor,
 built by Synapse. You help people confidently rent, buy, sell and understand
 real estate by combining conversation, reasoning and trusted property data.
 
@@ -134,14 +134,14 @@ or visit the street at different times of day.
 `;
 
 /**
- * FIRST-VISIT GREETING — the one message Toju sends before the user has said
- * anything. It is deliberately the only place Toju front-loads: someone who has
+ * FIRST-VISIT GREETING — the one message Tayo sends before the user has said
+ * anything. It is deliberately the only place Tayo front-loads: someone who has
  * just met an AI advisor deserves to know what it can see, what it can do, and
  * what it will not do, before they spend a word on it.
  *
  * PLACEHOLDER CONTRACT: `{{LISTING_COUNT}}` is substituted with a formatted
- * count of every home Toju can show — not just the verified ones, because
- * Toju shows both. It is OPTIONAL: when the count is unknown or the lookup
+ * count of every home Tayo can show — not just the verified ones, because
+ * Tayo shows both. It is OPTIONAL: when the count is unknown or the lookup
  * fails, substitute the empty string and the sentence still reads correctly
  * ("the homes agencies have listed"). The token sits IMMEDIATELY before "the
  * homes" with no space, so the substituted value carries its own trailing
@@ -150,12 +150,12 @@ or visit the street at different times of day.
  * Never hardcode a number into this string — a stale count is a trust bug.
  *
  * The greeting deliberately does NOT promise everything is verified. It used
- * to, and that was both untrue and the wrong promise: Toju's value is showing
+ * to, and that was both untrue and the wrong promise: Tayo's value is showing
  * the whole matching market and being straight about which parts of it have
  * been checked.
  */
 export const FIRST_VISIT_GREETING =
-  `I'm Toju — your consultant at Synapse. I work from {{LISTING_COUNT}}the homes agencies have listed with us: I can narrow them to what genuinely fits you, tell you what an area is really like to live in, and connect you to the agency when you're ready.\n\n` +
+  `I'm Tayo — your consultant at Synapse. I work from {{LISTING_COUNT}}the homes agencies have listed with us: I can narrow them to what genuinely fits you, tell you what an area is really like to live in, and connect you to the agency when you're ready.\n\n` +
   `Some of those homes have passed our seven checks and some haven't yet — I'll tell you which is which every time, and you decide what you're comfortable with. I can't look outside Synapse, and I won't pass your details to anyone until you choose to. So, tell me what's prompting the move.`;
 
 const SYSTEM_PROMPT = `${DOCTRINE}
@@ -381,7 +381,7 @@ those three; never a fourth.
 
 Output STRICT JSON ONLY: {"reply": "<message>", "why": {"<matchId>": "<reason>", ...}}`;
 
-const NEGOTIATE_PROMPT = `You are Toju, Nigeria's AI Property Advisor built by Synapse — calm, warm,
+const NEGOTIATE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. No guarantees; if something is
 uncertain or unverified, say so. Here you act as the buyer's
 negotiation assistant. You get one property (price, deal type, city, trust
@@ -396,7 +396,7 @@ Output STRICT JSON ONLY:
  "openingOffer": <number, whole naira>,
  "draft": "<a ready-to-send negotiation message to the agent, <=80 words, polite Nigerian business tone, states the offer and one data-backed reason, ends open>"}`;
 
-const COMPARE_PROMPT = `You are Toju, Nigeria's AI Property Advisor built by Synapse — calm, warm,
+const COMPARE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. The user selected up to
 four verified homes and asks: "which one is better FOR ME?" You get the homes
 (price, deal, trust, yield, flags) and
@@ -438,7 +438,7 @@ Deno.serve(async (req: Request) => {
     }
     if (body.action === 'restore') {
       // listingCount feeds the greeting's {{LISTING_COUNT}} token — everything
-      // Toju can show, since it shows unverified homes too and labels them.
+      // Tayo can show, since it shows unverified homes too and labels them.
       // verifiedListingCount is kept alongside for copy that wants to say how
       // many are checked. Both null-safe; the frontend then uses count-free
       // copy. Fetched even without a visitorId: a first visit is exactly when
@@ -659,7 +659,7 @@ interface Match {
   bedrooms: number;
   bathrooms: number;
   trustScore: number;
-  /** Where this listing stands with the checks. Toju shows matches regardless
+  /** Where this listing stands with the checks. Tayo shows matches regardless
    *  and states this per card, so the buyer chooses what risk to accept. */
   verificationStatus: string;   // unverified | in_progress | verified
   verified: boolean;
@@ -682,7 +682,7 @@ interface Match {
 }
 
 /**
- * Progressive relaxation — Toju must always have SOMETHING honest to show:
+ * Progressive relaxation — Tayo must always have SOMETHING honest to show:
  *  1. exact brief → 2. relax size → 3. relax budget (same city)
  *  4. the named place may be an AREA, not a city (e.g. "Lekki", "Wuse") —
  *     resolve it against neighbourhoods and retry with the real city
@@ -737,13 +737,13 @@ async function resolveAreaToCity(term: string): Promise<string | null> {
   return m ? m[1] : null;
 }
 
-/** The filters that define "a home Toju can actually show": live, active, and
+/** The filters that define "a home Tayo can actually show": live, active, and
  * still inside its expiry window.
  *
- * Verification is deliberately NOT a filter. Toju surfaces every home that
+ * Verification is deliberately NOT a filter. Tayo surfaces every home that
  * matches and labels each one's verification status, so the buyer decides what
  * risk they are willing to take. Filtering unverified stock out looked safer,
- * but it meant Toju quietly pretended most of the market did not exist — and a
+ * but it meant Tayo quietly pretended most of the market did not exist — and a
  * buyer who is never shown the unverified option cannot make an informed choice
  * about it. Showing it with an honest label is the more transparent design. */
 function freshLiveConds(): string[] {
@@ -759,7 +759,7 @@ function freshLiveConds(): string[] {
 }
 
 /** The subset that has actually passed the checks — used for counts and copy,
- * never to restrict what Toju may show. */
+ * never to restrict what Tayo may show. */
 function verifiedFreshConds(): string[] {
   return [...freshLiveConds(), 'verification_status=eq.verified'];
 }
@@ -779,7 +779,7 @@ async function countBy(conds: string[]): Promise<number | null> {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-/** Everything Toju can show — the {{LISTING_COUNT}} greeting token. */
+/** Everything Tayo can show — the {{LISTING_COUNT}} greeting token. */
 const countListings = () => countBy(freshLiveConds());
 /** The checked subset. Reported alongside, never used to restrict matches. */
 const countVerifiedListings = () => countBy(verifiedFreshConds());
@@ -811,13 +811,13 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
     // Only the NAME. Every other column on this table -- safety_score,
     // family_score, flood_risk, power_reliability, avg_rent_*, toju_summary --
     // is generated by seed_rand formulas in twin_seed.sql. "Scores 64 on
-    // safety" is a random number wearing a sentence, and Toju was handed it
+    // safety" is a random number wearing a sentence, and Tayo was handed it
     // as ground truth. The zone name is genuine; nothing else here is.
     'neighbourhoods(name),' +
     'shared_room_details(total_rooms,housemates_in,gender_preference,room_furnished,ensuite,bills_included,house_vibe),' +
     // LEFT join, not inner. An agency's freshly uploaded listing has no
     // enrichment row yet, and an inner join silently excluded it — so a
-    // property could be live, matching and still invisible to Toju for
+    // property could be live, matching and still invisible to Tayo for
     // reasons the agency could never see. Enrichment enhances a match; its
     // absence must not delete one.
     `property_enrichment(${fitCol},rental_yield_estimate_pct,who_this_suits,what_to_watch,toju_summary)`;
@@ -845,7 +845,7 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       bedrooms: Number(r.bedrooms ?? 0),
       bathrooms: Number(r.bathrooms ?? 0),
       trustScore: Number(r.trust_score ?? 0),
-      // Carried so every card can state where this listing stands. Toju must
+      // Carried so every card can state where this listing stands. Tayo must
       // say which of its matches are checked and which are not.
       verificationStatus: String(r.verification_status ?? 'unverified'),
       verified: r.verification_status === 'verified',
