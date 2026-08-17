@@ -1,7 +1,7 @@
 /**
  * create-lead — THE LEAD BRIDGE. The most important function in the product.
  *
- * Triggered by "Contact Agency" or by Tayo when a user expresses clear
+ * Triggered by "Contact Agency" or by Toju when a user expresses clear
  * interest. It:
  *   1. identifies the consumer from their JWT,
  *   2. snapshots their name/phone and attaches extracted preferences,
@@ -75,7 +75,7 @@ Deno.serve(async (req: Request) => {
       .eq('id', prop.agency_id)
       .single();
 
-    // ── extracted preferences from the consumer's latest Tayo session ──
+    // ── extracted preferences from the consumer's latest Toju session ──
     let preferences: LeadPreferences | null = null;
     const { data: session } = await admin
       .from('chat_sessions')
@@ -214,7 +214,7 @@ function formatWhatsApp(p: {
   }
 
   const sourceLabel =
-    p.source === 'toju_chat' ? 'Tayo recommendation' : p.source === 'browse' ? 'Browse' : 'Contact button';
+    p.source === 'toju_chat' ? 'Toju recommendation' : p.source === 'browse' ? 'Browse' : 'Contact button';
   lines.push('', `*Source:* ${sourceLabel}`, `*Lead ID:* ${p.leadId}`);
   return lines.join('\n');
 }
