@@ -26,7 +26,10 @@
  * POST { property_id: uuid, refresh?: boolean }
  *   or { city: string, limit?: number }   — backfill every live listing in a city
  *
- * Requires GOOGLE_MAPS_API_KEY (Places API + Distance Matrix API enabled).
+ * Requires GOOGLE_MAPS_API_KEY with **Places API (New)** and **Routes API**
+ * enabled. Not the legacy Places/Distance Matrix APIs, which Google no longer
+ * activates for new projects -- the first real key returned REQUEST_DENIED
+ * against both.
  * Without it this returns 503 and writes nothing: an empty section is honest,
  * a guessed one is not.
  */
@@ -76,69 +79,132 @@ function haversineM(aLat: number, aLon: number, bLat: number, bLon: number): num
 }
 
 async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGORIES[number]): Promise<Place[]> {
-  const url = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json'
-    + `?location=${lat},${lon}&radius=${spec.radius}&type=${spec.type}&key=${encodeURIComponent(key)}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`places ${spec.type} http ${r.status}`);
-  const d = await r.json();
+  /* Places API (NEW), not the legacy Nearby Search.
+     Google no longer enables the legacy endpoints on new projects -- the first
+     real call with a working key came back REQUEST_DENIED, "You're calling a
+     legacy API". The new API is a POST with a JSON body, and it requires an
+     explicit field mask: it returns nothing at all unless you name the fields,
+     which fails loudly rather than silently, and is a good deal better than the
+     old behaviour of quietly charging for fields nobody asked for. */
+  const r = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': 'places.id,places.displayName,places.location,places.rating,places.userRatingCount',
+    },
+    body: JSON.stringify({
+      includedTypes: [spec.type],
+      maxResultCount: 20,
+      locationRestriction: {
+        circle: { center: { latitude: lat, longitude: lon }, radius: spec.radius },
+      },
+    }),
+  });
 
-  // Google reports its own errors in the body with HTTP 200. REQUEST_DENIED
-  // almost always means the key is missing an API or a billing account, and it
-  // must surface rather than look like "no places here".
-  if (d.status && !['OK', 'ZERO_RESULTS'].includes(d.status)) {
-    throw new Error(`places ${spec.type}: ${d.status}${d.error_message ? ' — ' + d.error_message : ''}`);
+  if (!r.ok) {
+    /* The new API reports its faults as real HTTP errors with a message worth
+       surfacing -- a disabled API, a restricted key, no billing account. The
+       legacy one buried these in a 200, which is why the old code had to
+       inspect the body. */
+    const detail = await r.text().catch(() => '');
+    let msg = detail.slice(0, 300);
+    try { msg = JSON.parse(detail)?.error?.message ?? msg; } catch { /* keep raw */ }
+    throw new Error(`places ${spec.type}: HTTP ${r.status} — ${msg}`);
   }
 
-  return (d.results ?? [])
-    .filter((p: Record<string, never>) => p.place_id && p.name && p.geometry?.location)
+  const d = await r.json();
+  // No places nearby is an empty object, not an error.
+  return (d.places ?? [])
+    .filter((p: Record<string, never>) => p.id && p.displayName?.text && p.location)
     .map((p: Record<string, never>) => {
-      const g = p.geometry.location;
+      const g = p.location;
       return {
-        provider_place_id: String(p.place_id),
-        name: String(p.name),
+        provider_place_id: String(p.id),
+        name: String(p.displayName.text),
         category: spec.category,
-        lat: Number(g.lat),
-        lon: Number(g.lng),
-        distance_m: haversineM(lat, lon, Number(g.lat), Number(g.lng)),
+        lat: Number(g.latitude),
+        lon: Number(g.longitude),
+        distance_m: haversineM(lat, lon, Number(g.latitude), Number(g.longitude)),
         rating: p.rating != null ? Number(p.rating) : null,
-        ratings_count: p.user_ratings_total != null ? Number(p.user_ratings_total) : null,
+        ratings_count: p.userRatingCount != null ? Number(p.userRatingCount) : null,
         drive_seconds: null,
         drive_text: null,
       } as Place;
     })
     /* Nearest first, but a landmark slightly further out beats a nameless
-       shopfront next door -- ratings_count is the honest proxy for "is this
+       shopfront next door -- userRatingCount is the honest proxy for "is this
        somewhere people actually go". */
     .sort((a: Place, b: Place) =>
       (a.distance_m - b.distance_m) - Math.min(400, ((b.ratings_count ?? 0) - (a.ratings_count ?? 0)) * 2))
     .slice(0, spec.keep);
 }
 
-/** Real driving times, in one call for up to 25 destinations. */
-async function addDriveTimes(key: string, lat: number, lon: number, places: Place[]): Promise<void> {
-  for (let i = 0; i < places.length; i += 25) {
-    const batch = places.slice(i, i + 25);
-    const dests = batch.map((p) => `${p.lat},${p.lon}`).join('|');
-    const url = 'https://maps.googleapis.com/maps/api/distancematrix/json'
-      + `?origins=${lat},${lon}&destinations=${encodeURIComponent(dests)}`
-      + `&mode=driving&key=${encodeURIComponent(key)}`;
+/* Real driving times, from the Routes API.
+   Distance Matrix is the other legacy endpoint Google no longer enables, so
+   this is computeRouteMatrix: one origin, many destinations, one call.
+
+   Two things worth knowing about its shape. It answers with a STREAM of
+   elements rather than a matrix, each carrying its own destinationIndex, so
+   results must be matched by that index and not by arrival order. And an
+   unreachable destination comes back as an element with no duration rather
+   than as an error -- which is correct, and is why each is checked
+   individually instead of trusting the call as a whole. */
+async function addDriveTimes(key: string, lat: number, lon: number, places: Place[]): Promise<string | null> {
+  /* Returns why routing produced nothing, rather than failing silently. Every
+     listing came back "routed: 0" and the cause was invisible, which is its own
+     small version of the problem this whole function exists to fix. */
+  let note: string | null = null;
+  const CHUNK = 24;
+  for (let i = 0; i < places.length; i += CHUNK) {
+    const batch = places.slice(i, i + CHUNK);
     try {
-      const r = await fetch(url);
-      const d = await r.json();
-      const row = d?.rows?.[0]?.elements ?? [];
-      batch.forEach((p, k) => {
-        const el = row[k];
-        if (el?.status === 'OK' && el.duration) {
-          p.drive_seconds = Number(el.duration.value);
-          p.drive_text = String(el.duration.text);
-        }
-        // else: left NULL. Distance is still true; a time we did not measure
-        // would be exactly the fabrication this replaces.
+      const r = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,distanceMeters,condition',
+        },
+        body: JSON.stringify({
+          origins: [{ waypoint: { location: { latLng: { latitude: lat, longitude: lon } } } }],
+          destinations: batch.map((p) => ({
+            waypoint: { location: { latLng: { latitude: p.lat, longitude: p.lon } } },
+          })),
+          travelMode: 'DRIVE',
+        }),
       });
-    } catch {
-      /* leave the batch unrouted; distances stand on their own */
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        try { note = JSON.parse(detail)?.error?.message ?? detail.slice(0, 200); }
+        catch { note = 'HTTP ' + r.status + ' ' + detail.slice(0, 160); }
+        continue;                               // distances still stand on their own
+      }
+      const rows = await r.json();
+      if (!Array.isArray(rows)) continue;
+
+      for (const el of rows) {
+        const k = Number(el?.destinationIndex);
+        if (!Number.isInteger(k) || !batch[k]) continue;
+        if (el.condition && el.condition !== 'ROUTE_EXISTS') continue;
+        // duration arrives as a protobuf string: "1234s".
+        const secs = typeof el.duration === 'string'
+          ? Number(el.duration.replace(/s$/, ''))
+          : null;
+        if (secs == null || !isFinite(secs)) continue;
+        batch[k].drive_seconds = Math.round(secs);
+        const m = Math.round(secs / 60);
+        batch[k].drive_text = m >= 60
+          ? Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '')
+          : m + ' min';
+      }
+    } catch (e) {
+      /* Leave the batch unrouted. A distance we measured is still true; a
+         duration we did not measure would be the fabrication this replaces. */
+      note = note ?? (e instanceof Error ? e.message : 'routing call failed');
     }
   }
+  return note;
 }
 
 Deno.serve(async (req: Request) => {
@@ -216,19 +282,33 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      await addDriveTimes(key, t.latitude, t.longitude, found);
+      /* One place can satisfy two categories -- a pharmacy that is also a
+         supermarket comes back under both, with the same Google place id. An
+         upsert whose batch contains that id twice is rejected outright:
+         "ON CONFLICT DO UPDATE command cannot affect row a second time", which
+         threw away all fourteen places for the Ring Road listing rather than
+         the one duplicate. Keep the nearest sighting of each id; the category
+         it was first found under is the one it is filed as. */
+      const seenIds = new Set<string>();
+      const unique = found
+        .slice()
+        .sort((a, b) => a.distance_m - b.distance_m)
+        .filter((p) => (seenIds.has(p.provider_place_id) ? false : (seenIds.add(p.provider_place_id), true)));
+
+      const routeError = await addDriveTimes(key, t.latitude, t.longitude, unique);
 
       const { error: upErr } = await admin.from('property_places').upsert(
-        found.map((p) => ({ ...p, property_id: t.id, source: 'google_places', fetched_at: new Date().toISOString() })),
+        unique.map((p) => ({ ...p, property_id: t.id, source: 'google_places', fetched_at: new Date().toISOString() })),
         { onConflict: 'property_id,provider_place_id' },
       );
       if (upErr) { results.push({ id: t.id, title: t.title, error: upErr.message }); continue; }
 
       results.push({
         id: t.id, title: t.title, city: t.city,
-        places: found.length,
-        routed: found.filter((p) => p.drive_seconds != null).length,
-        nearest: found.slice().sort((a, b) => a.distance_m - b.distance_m)[0]?.name ?? null,
+        places: unique.length,
+        routed: unique.filter((p) => p.drive_seconds != null).length,
+        routingNote: routeError,
+        nearest: unique[0]?.name ?? null,
       });
     }
 
