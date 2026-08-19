@@ -69,6 +69,9 @@ interface Place {
   ratings_count: number | null;
   drive_seconds: number | null;
   drive_text: string | null;
+  drive_seconds_morning: number | null;
+  drive_seconds_midday: number | null;
+  drive_seconds_evening: number | null;
 }
 
 function haversineM(aLat: number, aLon: number, bLat: number, bLon: number): number {
@@ -130,6 +133,9 @@ async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGO
         ratings_count: p.userRatingCount != null ? Number(p.userRatingCount) : null,
         drive_seconds: null,
         drive_text: null,
+        drive_seconds_morning: null,
+        drive_seconds_midday: null,
+        drive_seconds_evening: null,
       } as Place;
     })
     /* Nearest first, but a landmark slightly further out beats a nameless
@@ -140,68 +146,110 @@ async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGO
     .slice(0, spec.keep);
 }
 
-/* Real driving times, from the Routes API.
-   Distance Matrix is the other legacy endpoint Google no longer enables, so
-   this is computeRouteMatrix: one origin, many destinations, one call.
+/* Driving times at the hours people actually travel.
+   The page carries morning / midday / evening buttons. They used to multiply an
+   invented number by another invented number; Google will answer the real
+   question instead. computeRouteMatrix takes a departureTime and
+   routingPreference TRAFFIC_AWARE, so 7:30am and 6pm are two measurements, not
+   one measurement and two guesses.
 
-   Two things worth knowing about its shape. It answers with a STREAM of
-   elements rather than a matrix, each carrying its own destinationIndex, so
-   results must be matched by that index and not by arrival order. And an
-   unreachable destination comes back as an element with no duration rather
-   than as an error -- which is correct, and is why each is checked
-   individually instead of trusting the call as a whole. */
+   Four passes: free-flow, then the three departures. Each is a separate call
+   because departureTime is per-request. A pass that fails leaves its column
+   NULL -- never a multiple of another column, which is the whole point.
+
+   Two shape notes. computeRouteMatrix answers with a STREAM of elements each
+   carrying its own destinationIndex, so results are matched by that index and
+   not by arrival order. And departureTime must be in the FUTURE, so each slot
+   resolves to the next occurrence of that hour, not today's. */
+const SLOTS: Array<{ key: 'morning' | 'midday' | 'evening'; hour: number }> = [
+  { key: 'morning', hour: 7 },
+  { key: 'midday', hour: 13 },
+  { key: 'evening', hour: 18 },
+];
+
+/** Next occurrence of `hour` in West Africa Time (UTC+1), as RFC3339. */
+function nextDeparture(hour: number): string {
+  const now = new Date();
+  const d = new Date(now);
+  d.setUTCHours(hour - 1, 30, 0, 0);              // WAT is UTC+1, no DST
+  if (d.getTime() <= now.getTime() + 60_000) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString();
+}
+
+async function routeMatrix(
+  key: string, lat: number, lon: number, batch: Place[], departure: string | null,
+): Promise<{ secs: Array<number | null>; error: string | null }> {
+  const body: Record<string, unknown> = {
+    origins: [{ waypoint: { location: { latLng: { latitude: lat, longitude: lon } } } }],
+    destinations: batch.map((p) => ({
+      waypoint: { location: { latLng: { latitude: p.lat, longitude: p.lon } } },
+    })),
+    travelMode: 'DRIVE',
+  };
+  if (departure) {
+    body.departureTime = departure;
+    body.routingPreference = 'TRAFFIC_AWARE';
+  }
+
+  const out: Array<number | null> = batch.map(() => null);
+  try {
+    const r = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,distanceMeters,condition',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => '');
+      let msg = detail.slice(0, 200);
+      try { msg = JSON.parse(detail)?.error?.message ?? msg; } catch { /* keep raw */ }
+      return { secs: out, error: msg };
+    }
+    const rows = await r.json();
+    if (!Array.isArray(rows)) return { secs: out, error: 'unexpected Routes API shape' };
+    for (const el of rows) {
+      const k = Number(el?.destinationIndex);
+      if (!Number.isInteger(k) || k < 0 || k >= out.length) continue;
+      if (el.condition && el.condition !== 'ROUTE_EXISTS') continue;
+      const secs = typeof el.duration === 'string' ? Number(el.duration.replace(/s$/, '')) : null;
+      if (secs == null || !isFinite(secs)) continue;
+      out[k] = Math.round(secs);
+    }
+    return { secs: out, error: null };
+  } catch (e) {
+    return { secs: out, error: e instanceof Error ? e.message : 'routing call failed' };
+  }
+}
+
 async function addDriveTimes(key: string, lat: number, lon: number, places: Place[]): Promise<string | null> {
-  /* Returns why routing produced nothing, rather than failing silently. Every
-     listing came back "routed: 0" and the cause was invisible, which is its own
-     small version of the problem this whole function exists to fix. */
   let note: string | null = null;
   const CHUNK = 24;
   for (let i = 0; i < places.length; i += CHUNK) {
     const batch = places.slice(i, i + CHUNK);
-    try {
-      const r = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': key,
-          'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,distanceMeters,condition',
-        },
-        body: JSON.stringify({
-          origins: [{ waypoint: { location: { latLng: { latitude: lat, longitude: lon } } } }],
-          destinations: batch.map((p) => ({
-            waypoint: { location: { latLng: { latitude: p.lat, longitude: p.lon } } },
-          })),
-          travelMode: 'DRIVE',
-        }),
-      });
-      if (!r.ok) {
-        const detail = await r.text().catch(() => '');
-        try { note = JSON.parse(detail)?.error?.message ?? detail.slice(0, 200); }
-        catch { note = 'HTTP ' + r.status + ' ' + detail.slice(0, 160); }
-        continue;                               // distances still stand on their own
-      }
-      const rows = await r.json();
-      if (!Array.isArray(rows)) continue;
 
-      for (const el of rows) {
-        const k = Number(el?.destinationIndex);
-        if (!Number.isInteger(k) || !batch[k]) continue;
-        if (el.condition && el.condition !== 'ROUTE_EXISTS') continue;
-        // duration arrives as a protobuf string: "1234s".
-        const secs = typeof el.duration === 'string'
-          ? Number(el.duration.replace(/s$/, ''))
-          : null;
-        if (secs == null || !isFinite(secs)) continue;
-        batch[k].drive_seconds = Math.round(secs);
-        const m = Math.round(secs / 60);
-        batch[k].drive_text = m >= 60
-          ? Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '')
-          : m + ' min';
-      }
-    } catch (e) {
-      /* Leave the batch unrouted. A distance we measured is still true; a
-         duration we did not measure would be the fabrication this replaces. */
-      note = note ?? (e instanceof Error ? e.message : 'routing call failed');
+    const base = await routeMatrix(key, lat, lon, batch, null);
+    if (base.error) note = note ?? base.error;
+    base.secs.forEach((sv, k) => {
+      if (sv == null) return;
+      batch[k].drive_seconds = sv;
+      const m = Math.round(sv / 60);
+      batch[k].drive_text = m >= 60
+        ? Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '')
+        : m + ' min';
+    });
+
+    for (const slot of SLOTS) {
+      const res = await routeMatrix(key, lat, lon, batch, nextDeparture(slot.hour));
+      if (res.error) { note = note ?? res.error; continue; }
+      res.secs.forEach((sv, k) => {
+        if (sv == null) return;
+        if (slot.key === 'morning') batch[k].drive_seconds_morning = sv;
+        else if (slot.key === 'midday') batch[k].drive_seconds_midday = sv;
+        else batch[k].drive_seconds_evening = sv;
+      });
     }
   }
   return note;
@@ -307,6 +355,7 @@ Deno.serve(async (req: Request) => {
         id: t.id, title: t.title, city: t.city,
         places: unique.length,
         routed: unique.filter((p) => p.drive_seconds != null).length,
+        routedByHour: unique.filter((p) => p.drive_seconds_morning != null).length,
         routingNote: routeError,
         nearest: unique[0]?.name ?? null,
       });
