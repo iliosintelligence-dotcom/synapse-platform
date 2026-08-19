@@ -35,32 +35,37 @@ repo has 61. The gap is not cosmetic — it includes security fixes that exist
 written back by hand, because it was authored in this repo and could be
 reproduced exactly.
 
-## How to recover the rest
+## Status: recovered
 
-Do **not** transcribe them by hand. Every one of these is stored intact in
-`supabase_migrations.schema_migrations.statements`, and the CLI will write them
-out exactly:
+All 18 were written back on 19 August 2026 into `supabase/migrations/recovered/`,
+and **every one is verified byte-identical in substance to the copy Postgres
+holds** in `supabase_migrations.schema_migrations.statements`.
 
-```bash
-supabase link --project-ref bhrhejpekmhbhwryjhgk
-supabase db pull
+The verification is the point. These were transcribed rather than pulled with
+the CLI (no `SUPABASE_ACCESS_TOKEN` on this machine), and hand-copying REVOKE
+statements and RLS policy expressions is exactly where a silent error would do
+the most damage — a wrong `revoke` reads identically to a right one. So each
+file was hashed on whitespace-normalised content and compared against a hash
+computed inside the database:
+
+```sql
+select md5(lower(regexp_replace(array_to_string(statements, ';'), '\s+', '', 'g')))
+from supabase_migrations.schema_migrations where version = '...';
 ```
 
-`db pull` reads the applied migration history and writes any missing file into
-`supabase/migrations/`, with the original timestamp as its name. Retyping
-privilege-escalation and RLS fixes through a chat window risks a silent
-transcription error in exactly the code where one would do the most damage.
+18 of 18 matched. Re-run that comparison any time; the hashes are reproducible.
 
-### Note on ordering after the pull
+### Ordering
 
-Existing files use a `0001_`–`0061_` numeric scheme; `db pull` writes
-timestamped names like `20260729143226_*.sql`. The CLI orders by filename
-string sort, so timestamped files sort *after* `0061_`, which is chronologically
-wrong for the July and August ones.
+The recovered files keep their applied timestamps as names, and live in a
+subdirectory, so they do **not** join the `0001_`–`0061_` sequence the CLI reads.
+That is deliberate: they are already applied to production, and re-running them
+against it would be a no-op at best. They exist so the history is recoverable and
+auditable, not so the CLI replays them.
 
-That only matters for rebuilding from empty. If you ever need that, rename the
-recovered files into the numeric scheme in applied order — the table above is in
-that order.
+If you ever rebuild from empty, apply in this order: everything up to `0034_`,
+then the `recovered/` files in filename order, then `0036_` onward. The table
+above is already in that order.
 
 ## Also drifted
 
@@ -71,7 +76,8 @@ project were lost, these are gone:
 - `push-subscribe`
 - `proximity-report`
 
-Recover with `supabase functions download <name>`.
+Recover with `supabase functions download <name>` once the CLI is installed and
+authenticated.
 
 **One function is in the repo but was never deployed:** `admin-actions`. Nothing
 in the client calls it, so this is dead code rather than a broken feature —
