@@ -1,7 +1,7 @@
 /**
  * create-lead — THE LEAD BRIDGE. The most important function in the product.
  *
- * Triggered by "Contact Agency" or by Toju when a user expresses clear
+ * Triggered by "Contact agent" or by Toju when a user expresses clear
  * interest. It:
  *   1. identifies the consumer from their JWT,
  *   2. snapshots their name/phone and attaches extracted preferences,
@@ -12,6 +12,13 @@
  *
  * The lead row is persisted BEFORE delivery is attempted — a Twilio outage
  * can never lose a lead. The dashboard surfaces delivery_failed leads.
+ *
+ * DELIVERY IS OPTIONAL BY DESIGN. Twilio may be unconfigured (it currently
+ * is). That must never stop a lead being captured: the agency can still work
+ * the lead from the CRM, and a lead sitting in the CRM with no WhatsApp is
+ * incomparably better than a buyer who was told "request sent" while nothing
+ * was written. Missing credentials therefore produce a saved, flagged lead
+ * and a 207 — not a failure.
  *
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
  * (auto-injected), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM.
@@ -26,6 +33,31 @@ interface LeadPreferences {
   property_type: string | null;
   listing_type: string | null;
   timeline: string | null;
+  /* What Toju already worked out with this buyer, when they ran the negotiator
+     before making contact. It rides along so the agency opens the lead knowing
+     what was proposed and why — previously Toju wrote an opening offer and a
+     message, and the only route to the agency was the buyer copying it to a
+     clipboard and finding them somewhere else. */
+  negotiation?: LeadNegotiation | null;
+}
+
+interface LeadNegotiation {
+  offer: number | null;
+  advice: string;
+  draft: string;
+}
+
+/* Client-supplied, so it is clamped rather than trusted: a number that is
+   actually a number, strings bounded so a malformed post cannot write an essay
+   into the lead. */
+function cleanNegotiation(raw: unknown): LeadNegotiation | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const n = raw as Record<string, unknown>;
+  const offer = typeof n.offer === 'number' && isFinite(n.offer) && n.offer > 0 ? n.offer : null;
+  const advice = typeof n.advice === 'string' ? n.advice.slice(0, 1200) : '';
+  const draft = typeof n.draft === 'string' ? n.draft.slice(0, 1200) : '';
+  if (offer == null && !advice && !draft) return null;
+  return { offer, advice, draft };
 }
 
 Deno.serve(async (req: Request) => {
@@ -51,32 +83,40 @@ Deno.serve(async (req: Request) => {
     const user = userData.user;
     if (!user) return json({ error: 'Not authenticated' }, 401);
 
-    const body = (await req.json()) as { property_id?: string; source?: string };
+    const body = (await req.json().catch(() => ({}))) as {
+      property_id?: string; source?: string; negotiation?: unknown;
+    };
     if (!body.property_id) return json({ error: 'property_id is required' }, 400);
-    const source = body.source ?? 'contact_button';
+    // `source` is a Postgres enum; anything unrecognised would fail the insert,
+    // so it is validated here rather than passed through from the client.
+    const ALLOWED = ['toju_chat', 'contact_button', 'browse', 'direct', 'search', 'referral'];
+    const source = ALLOWED.includes(body.source ?? '') ? body.source! : 'contact_button';
 
     // ── gather the data the agency needs to act on the lead ──
     const { data: profile } = await admin
       .from('profiles')
       .select('full_name, phone')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
     const { data: prop, error: pErr } = await admin
       .from('properties')
       .select('id, title, price, city, agency_id')
       .eq('id', body.property_id)
-      .single();
+      .maybeSingle();
     if (pErr || !prop) return json({ error: 'Property not found' }, 404);
 
     const { data: agency } = await admin
       .from('agencies')
       .select('name, whatsapp_number')
       .eq('id', prop.agency_id)
-      .single();
+      .maybeSingle();
 
     // ── extracted preferences from the consumer's latest Toju session ──
+    // Optional: the table may not exist on every environment, and a buyer may
+    // never have spoken to Toju. Either way the lead still stands on its own.
     let preferences: LeadPreferences | null = null;
+    try {
     const { data: session } = await admin
       .from('chat_sessions')
       .select('pref_city, pref_budget_min, pref_budget_max, pref_property_type, pref_listing_type')
@@ -93,6 +133,21 @@ Deno.serve(async (req: Request) => {
         property_type: session.pref_property_type ?? null,
         listing_type: session.pref_listing_type ?? null,
         timeline: null,
+      };
+    }
+    } catch { /* preferences are a bonus, never a blocker */ }
+
+    /* A buyer who negotiated but has no chat session still has a negotiation
+       worth keeping, so this builds the object rather than only decorating one
+       that already exists. */
+    const negotiation = cleanNegotiation(body.negotiation);
+    if (negotiation) {
+      preferences = {
+        ...(preferences ?? {
+          city: null, budget_min: null, budget_max: null,
+          property_type: null, listing_type: null, timeline: null,
+        }),
+        negotiation,
       };
     }
 
@@ -144,6 +199,7 @@ Deno.serve(async (req: Request) => {
           messageSid = result.sid;
         } else {
           lastError = result.error;
+          if (result.error === 'Twilio not configured') break;   // retrying cannot help
         }
       }
     }
@@ -165,7 +221,8 @@ Deno.serve(async (req: Request) => {
       .from('leads')
       .update({ delivery_status: 'delivery_failed', delivery_error: lastError })
       .eq('id', leadId);
-    // Lead is saved and flagged. Report the failure honestly (the lead exists).
+    // Lead is saved and flagged. Report honestly: the lead EXISTS, and the
+    // caller should tell the buyer it was received, because it was.
     console.error(`Lead ${leadId} delivery failed: ${lastError}`);
     return json(
       { lead_id: leadId, delivery_status: 'delivery_failed', error: lastError },
@@ -181,7 +238,7 @@ Deno.serve(async (req: Request) => {
 /* ───────── helpers ───────── */
 
 function naira(n: number): string {
-  return `₦${n.toLocaleString('en-NG')}`;
+  return `₦${Number(n).toLocaleString('en-NG')}`;
 }
 
 function formatWhatsApp(p: {
@@ -211,6 +268,15 @@ function formatWhatsApp(p: {
       const hi = budget_max != null ? naira(budget_max) : '—';
       lines.push(`*Buyer budget:* ${lo} – ${hi}`);
     }
+  }
+
+  /* Above the source line on purpose: an agent skimming this on a phone should
+     see the number before the provenance. */
+  if (p.preferences?.negotiation) {
+    const n = p.preferences.negotiation;
+    lines.push('');
+    if (n.offer != null) lines.push(`*Toju's opening offer:* ${naira(n.offer)}`);
+    if (n.advice) lines.push(`_${n.advice}_`);
   }
 
   const sourceLabel =

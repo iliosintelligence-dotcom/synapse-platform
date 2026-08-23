@@ -155,8 +155,8 @@ or visit the street at different times of day.
  * been checked.
  */
 export const FIRST_VISIT_GREETING =
-  `I'm Toju — your consultant at Synapse. I work from {{LISTING_COUNT}}the homes agencies have listed with us: I can narrow them to what genuinely fits you, tell you what an area is really like to live in, and connect you to the agency when you're ready.\n\n` +
-  `Some of those homes have passed our seven checks and some haven't yet — I'll tell you which is which every time, and you decide what you're comfortable with. I can't look outside Synapse, and I won't pass your details to anyone until you choose to. So, tell me what's prompting the move.`;
+  `I'm Toju. I'll find you a home from {{LISTING_COUNT}}the homes agencies have listed with us, and tell you straight which ones we've actually checked.\n\n` +
+  `What's prompting the move?`;
 
 const SYSTEM_PROMPT = `${DOCTRINE}
 
@@ -686,8 +686,7 @@ interface Match {
  *  1. exact brief → 2. relax size → 3. relax budget (same city)
  *  4. the named place may be an AREA, not a city (e.g. "Lekki", "Wuse") —
  *     resolve it against neighbourhoods and retry with the real city
- *  5. last resort: closest fits in other cities, flagged loudly.
- * The DEAL TYPE never relaxes; a compromise is only ever silent-free.
+ * The DEAL TYPE never relaxes, and neither does the CITY.
  */
 async function fetchMatchesRelaxed(c: Criteria): Promise<{ matches: Match[]; note: string | null }> {
   const r = await relaxWithinCity(c);
@@ -784,7 +783,7 @@ const countListings = () => countBy(freshLiveConds());
 /** The checked subset. Reported alongside, never used to restrict matches. */
 const countVerifiedListings = () => countBy(verifiedFreshConds());
 
-/** Verified/live listings + enrichment + neighbourhood intelligence. */
+/** Live listings + enrichment + the neighbourhood NAME. */
 async function fetchMatches(c: Criteria): Promise<Match[]> {
   const s = sb();
   if (!s) return [];
