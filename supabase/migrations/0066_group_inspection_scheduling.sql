@@ -338,3 +338,12 @@ grant  execute on function public.open_inspection_slots(uuid, int) to anon, auth
 
 revoke execute on function public.book_inspection(uuid, timestamptz) from public;
 grant  execute on function public.book_inspection(uuid, timestamptz) to authenticated;
+
+-- ── amendment, same day ────────────────────────────────────────────────────
+-- inspection_readiness originally read the NEWEST lead for a buyer+property.
+-- Tapping "Contact agent" a second time creates a fresh `new` lead, which then
+-- shadowed the qualified one they already had — so getting in touch again could
+-- take a primed buyer backwards and refuse them a tour they had already earned.
+-- It now reads the most ADVANCED lead: qualification is a high-water mark, not
+-- a property of the latest row. Closed and lost are excluded so a dead lead
+-- cannot qualify anyone either. See the ORDER BY in the live definition.
