@@ -347,3 +347,19 @@ grant  execute on function public.book_inspection(uuid, timestamptz) to authenti
 -- It now reads the most ADVANCED lead: qualification is a high-water mark, not
 -- a property of the latest row. Closed and lost are excluded so a dead lead
 -- cannot qualify anyone either. See the ORDER BY in the live definition.
+
+-- ── amendment: cancelling a tour ───────────────────────────────────────────
+-- cancel_inspection_slot(uuid). Cancelling was three client requests that could
+-- half-succeed, and it left every attendee's lead at `viewing_scheduled` for a
+-- viewing that was no longer happening — the pipeline claimed a visit was
+-- booked when nothing was. One call now: the slot, its attendance rows and the
+-- affected leads move together, and any buyer whose ONLY tour this was goes
+-- back to `qualified` so they can be offered a new time. A buyer still booked
+-- onto another visit correctly stays viewing_scheduled.
+--
+-- SECURITY DEFINER bypasses the caller's RLS, so agency membership is checked
+-- explicitly rather than assumed from the policy.
+--
+-- Nothing is deleted. The slot and the attendance rows are marked cancelled and
+-- stay put: who had booked a tour that was called off is exactly the record an
+-- agency needs afterwards. See the live definition for the full body.
