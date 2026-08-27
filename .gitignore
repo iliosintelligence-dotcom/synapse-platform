@@ -9,3 +9,6 @@ dist/
 .env.*.local
 .DS_Store
 coverage/
+
+# Supabase CLI scratch (holds a cached CLI version string, not project state)
+supabase/.temp/
