@@ -68,6 +68,19 @@ const STATE_TTL_MS = 15 * 60 * 1000;
    the older `business_*` names were deprecated in January 2025. */
 const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publish'];
 
+/* Facebook Pages. A Page token is what actually posts, and `pages_show_list`
+   is what lets us discover which Pages this person administers in order to get
+   one. `pages_read_engagement` is required alongside `pages_manage_posts` --
+   Meta refuses the publish call without it, which is not obvious from the
+   error it returns. `business_management` is deliberately NOT requested: it is
+   heavily scrutinised in review and nothing here needs it. */
+const FB_SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement'];
+
+const PLATFORMS = ['instagram', 'facebook'] as const;
+type Platform = typeof PLATFORMS[number];
+
+const scopesFor = (p: Platform): string[] => (p === 'facebook' ? FB_SCOPES : IG_SCOPES);
+
 /* ── signed state ─────────────────────────────────────────────────────────── */
 
 function b64url(bytes: Uint8Array): string {
@@ -115,6 +128,94 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
   }
 }
 
+/**
+ * Facebook Pages. Three exchanges, and the third is the one that matters:
+ * posting to a Page is done with a PAGE token, not the user's own. A Page
+ * token derived from a long-lived user token does not expire on a timer, which
+ * is why no expiry is stored for it -- inventing a 60-day one would make the
+ * portal show "session expired" on a credential that still works.
+ */
+async function finishFacebook(
+  code: string,
+  claims: Record<string, unknown>,
+  appId: string,
+  appSecret: string,
+  redirectUri: string,
+): Promise<Response> {
+  const G = 'https://graph.facebook.com/v21.0';
+
+  const tokRes = await fetch(
+    `${G}/oauth/access_token?client_id=${encodeURIComponent(appId)}`
+      + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+      + `&client_secret=${encodeURIComponent(appSecret)}`
+      + `&code=${encodeURIComponent(code)}`,
+  );
+  const tok = await tokRes.json().catch(() => ({}));
+  if (!tokRes.ok || !tok.access_token) {
+    return backToPortal('error', tok?.error?.message ?? 'Facebook would not issue a token.');
+  }
+
+  /* The short-lived user token lasts about an hour. Exchanging it is what
+     makes the Page tokens derived from it long-lived too; skip this and every
+     Page token quietly dies within the hour. */
+  let userToken: string = tok.access_token;
+  const longRes = await fetch(
+    `${G}/oauth/access_token?grant_type=fb_exchange_token`
+      + `&client_id=${encodeURIComponent(appId)}`
+      + `&client_secret=${encodeURIComponent(appSecret)}`
+      + `&fb_exchange_token=${encodeURIComponent(userToken)}`,
+  );
+  const long = await longRes.json().catch(() => ({}));
+  if (longRes.ok && long.access_token) userToken = long.access_token;
+
+  /* Which Pages this person administers, and the token for each. */
+  const pagesRes = await fetch(
+    `${G}/me/accounts?fields=id,name,access_token&limit=50`
+      + `&access_token=${encodeURIComponent(userToken)}`,
+  );
+  const pages = await pagesRes.json().catch(() => ({}));
+  if (!pagesRes.ok) {
+    return backToPortal('error', pages?.error?.message ?? 'Could not read your Facebook Pages.');
+  }
+
+  const list = (pages.data ?? []) as Array<{ id: string; name: string; access_token: string }>;
+  const usable = list.filter((pg) => pg.access_token);
+  if (!usable.length) {
+    /* Granting the permission without ticking a Page is the single most common
+       way this flow ends with nothing connected, and Meta reports it as an
+       empty list rather than an error. Say what to do about it. */
+    return backToPortal('error',
+      'No Facebook Page came back. Connect again and tick the Page you post from '
+      + '-- you need to be an admin of it.');
+  }
+
+  /* One Page per agency, which is what social_accounts models (unique on
+     agency + platform). The first is chosen deliberately rather than silently:
+     when there are several, the portal is told so it can say which one. */
+  const page = usable[0];
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { error: connErr } = await admin.rpc('connect_social_account', {
+    p_agency_id: claims.agency_id as string,
+    p_platform: 'facebook',
+    p_account_id: page.id,
+    p_username: page.name ?? '',
+    p_access_token: page.access_token,
+    p_refresh_token: null,
+    // Deliberately null: a Page token from a long-lived user token has no
+    // expiry, and a fabricated one would show as an expired session.
+    p_expires_at: null,
+    p_scopes: FB_SCOPES,
+    p_connected_by: claims.profile_id as string,
+  });
+  if (connErr) return backToPortal('error', connErr.message);
+
+  return backToPortal('facebook',
+    usable.length > 1
+      ? `${page.name} (chosen from ${usable.length} Pages)`
+      : page.name);
+}
+
 /* ── the flow ─────────────────────────────────────────────────────────────── */
 
 /** Sends the operator back to the portal with a plain-language outcome rather
@@ -139,8 +240,18 @@ Deno.serve(async (req: Request) => {
   try {
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
     if (url.searchParams.get('action') === 'start') {
+      /* Which product. Both live on one Meta app and one redirect URI, so the
+         platform has to travel through the signed state -- the callback is a
+         bare browser redirect and Meta tells us nothing about which dialog the
+         person just came out of. */
+      const requested = url.searchParams.get('platform') ?? 'instagram';
+      if (!PLATFORMS.includes(requested as Platform)) {
+        return json({ error: `Unsupported platform: ${requested}` }, 400);
+      }
+      const platform = requested as Platform;
+
       if (!appId || !redirectUri) {
-        return json({ error: 'Instagram is not configured on this project yet — META_APP_ID and META_REDIRECT_URI are unset.' }, 503);
+        return json({ error: 'Meta is not configured on this project yet — META_APP_ID and META_REDIRECT_URI are unset.' }, 503);
       }
 
       const authHeader = req.headers.get('Authorization');
@@ -175,19 +286,27 @@ Deno.serve(async (req: Request) => {
       const state = await signState({
         agency_id: membership.agency_id,
         profile_id: user.id,
-        platform: 'instagram',
+        platform,
         nonce: crypto.randomUUID(),
         exp: Date.now() + STATE_TTL_MS,
       });
 
-      const auth = new URL('https://www.instagram.com/oauth/authorize');
+      /* Two different dialogs. Instagram Login lives on instagram.com and
+         issues a token for graph.instagram.com; Facebook Login lives on
+         facebook.com and issues one for graph.facebook.com. They are not
+         interchangeable, and a token from one is simply rejected by the
+         other's host. */
+      const scopes = scopesFor(platform);
+      const auth = new URL(platform === 'facebook'
+        ? 'https://www.facebook.com/v21.0/dialog/oauth'
+        : 'https://www.instagram.com/oauth/authorize');
       auth.searchParams.set('client_id', appId);
       auth.searchParams.set('redirect_uri', redirectUri);
       auth.searchParams.set('response_type', 'code');
-      auth.searchParams.set('scope', IG_SCOPES.join(','));
+      auth.searchParams.set('scope', scopes.join(','));
       auth.searchParams.set('state', state);
 
-      return json({ url: auth.toString(), scopes: IG_SCOPES, expiresInMinutes: STATE_TTL_MS / 60000 });
+      return json({ url: auth.toString(), platform, scopes, expiresInMinutes: STATE_TTL_MS / 60000 });
     }
 
     /* ── step 2: the callback ─────────────────────────────────────────────── */
@@ -198,11 +317,18 @@ Deno.serve(async (req: Request) => {
     const denied = url.searchParams.get('error');
     if (denied) return backToPortal('cancelled', url.searchParams.get('error_description') ?? denied);
 
-    if (!code || !state) return json({ error: 'This endpoint expects an OAuth redirect from Instagram.' }, 400);
-    if (!appId || !appSecret || !redirectUri) return backToPortal('error', 'Instagram is not configured on this project.');
+    if (!code || !state) return json({ error: 'This endpoint expects an OAuth redirect from Meta.' }, 400);
+    if (!appId || !appSecret || !redirectUri) return backToPortal('error', 'Meta is not configured on this project.');
 
     const claims = await readState(state);
     if (!claims) return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+
+    /* The platform is read from the state we signed, never from the query --
+       the callback's parameters are attacker-reachable and this one decides
+       which token exchange runs and which account gets written. */
+    if (claims.platform === 'facebook') {
+      return await finishFacebook(code, claims, appId, appSecret, redirectUri);
+    }
 
     /* short-lived token */
     const form = new FormData();
