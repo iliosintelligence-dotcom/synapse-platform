@@ -1,5 +1,5 @@
 /**
- * social-connect — the OAuth flow that puts a real Instagram token in Vault.
+ * social-connect -- the OAuth flow that puts a real Meta token in Vault.
  *
  * WHY THIS EXISTS
  * 0053 built `connect_social_account` and gave it to service_role only, with a
@@ -7,34 +7,32 @@
  * role". That callback was never written, so the whole token path had no
  * entrance: a correct, tested, unreachable function.
  *
- * It also blocks Meta App Review, which is not a form -- it is a screencast of
- * a reviewer granting the permission and seeing the feature work. You cannot
- * record a permission dialog that nothing opens. This is that dialog.
- *
  * WHAT IS NOT BLOCKED BY APPROVAL
  * In Development Mode, Meta grants an app's own admins, developers and testers
  * every permission the app requests WITHOUT App Review. So the owner of this
- * app can connect their own Instagram professional account and publish for real
- * today. App Review is what lets OTHER agencies do it. The distinction matters:
- * it means this flow can be built and proven now rather than rehearsed.
+ * app can connect their own Instagram professional account or Facebook Page and
+ * publish for real today. App Review is what lets OTHER agencies do it.
  *
  * ROUTES
- *   GET  ?action=start   (Authorization: user JWT)  -> { url } to send them to
- *   GET  ?code=..&state=..                          -> callback; 302 back to the portal
+ *   GET  ?action=start&platform=instagram|facebook  (Authorization: user JWT)
+ *        -> { url } to send them to
+ *   GET  ?code=..&state=..  -> callback; 302 back to the portal
  *
  * THE STATE PARAMETER IS THE SECURITY BOUNDARY.
- * The callback arrives from Instagram with no session and no JWT -- it is a
- * browser redirect. Whatever it says about which agency to connect is the only
- * claim available, so it has to be one we made. `state` is HMAC-signed with a
- * key derived from the service role secret and carries an expiry, so a
- * connect-for-someone-else URL cannot be forged or replayed later.
+ * The callback arrives from Meta with no session and no JWT -- it is a browser
+ * redirect. Whatever it says about which agency to connect is the only claim
+ * available, so it has to be one we made. `state` is HMAC-signed with a key
+ * derived from the service role secret and carries an expiry, so a
+ * connect-for-someone-else URL cannot be forged or replayed later. It also
+ * carries WHICH platform, because both products share one app and one redirect
+ * URI and Meta says nothing about which dialog the person came out of.
  *
  * MUST BE DEPLOYED WITH verify_jwt = false.
- * The callback is a browser redirect from Instagram and carries no JWT, so the
- * gateway would reject it before this code ran. That does not make the function
- * open: `?action=start` checks the Authorization header and resolves the user
- * itself, and the callback trusts nothing except the HMAC-signed state it
- * issued. Authentication moved into the function; it was not removed.
+ * The callback is a browser redirect and carries no JWT, so the gateway would
+ * reject it before this code ran. That does not make the function open:
+ * `?action=start` checks the Authorization header and resolves the user itself,
+ * and the callback trusts nothing except the HMAC-signed state it issued.
+ * Authentication moved into the function; it was not removed.
  *
  * Secrets required (set in Supabase, never in this file):
  *   META_APP_ID, META_APP_SECRET, META_REDIRECT_URI, PORTAL_URL (optional)

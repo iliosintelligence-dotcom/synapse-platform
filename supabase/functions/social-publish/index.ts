@@ -1,16 +1,11 @@
 /**
- * social-publish — drains the social queue through a provider adapter.
+ * social-publish -- drains the social queue through a provider adapter.
  *
  * WHY THIS EXISTS IN THIS SHAPE
- * Meta approval is pending, and TikTok is a separate review after it. Waiting
- * for either before building the pipeline would mean discovering the whole
- * thing for the first time under time pressure, on the day the token lands.
- *
- * So the pipeline is complete and the provider is one swappable function. The
+ * The pipeline is complete and the provider is one swappable function. The
  * mock adapter records exactly what WOULD be sent and returns a synthetic id;
- * the real adapters slot in beside it without anything else changing. On the
- * day approval arrives the work is: add an adapter, connect an account, flip
- * dry_run off for one post.
+ * the real adapters sit beside it. Connecting an account and clearing dry_run
+ * on a row is all that stands between a rehearsal and a real post.
  *
  * THE RULE THAT MATTERS
  * A dry run must never be mistakable for a real post. `dry_run` is stamped on
@@ -23,15 +18,30 @@
  * agency scoping. That pattern is already proven here.
  *
  * POST { limit?: number, live?: boolean }
- *   live:true is refused unless a real adapter is configured AND the row was
- *   queued with dry_run = false. Two independent switches, because publishing
- *   is public and irreversible.
+ *   live:true still only sends rows that were queued with dry_run = false.
+ *   Two independent switches, because publishing is public and irreversible.
  *
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY (auto-injected).
- * Later, per adapter: META_PAGE_TOKEN / TIKTOK_ACCESS_TOKEN.
+ * Tokens come from social_account_token, never from the environment.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { corsHeaders, json } from '../_shared/cors.ts';
+/* Inlined rather than imported from ../_shared. The import escapes the
+   function's own directory, which the deploy flattens away -- the file simply
+   is not there at runtime, and the failure is a cold-start module error rather
+   than anything visible in the code. social-connect already inlines these for
+   the same reason. Keep in step with _shared/cors.ts. */
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
 
 interface QueuedPost {
   id: string;
