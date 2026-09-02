@@ -2,7 +2,7 @@
  * agency-advisor -- the business advisor an agency can actually talk to.
  *
  * WHY THIS EXISTS
- * The Ask-Toju panel offered three fixed questions -- "Why are sales down this
+ * The Ask-Tayo panel offered three fixed questions -- "Why are sales down this
  * month?", "Where should I focus today?", "Which listings are
  * underperforming?" -- to every agency in every state. An agency that signed
  * up four minutes ago has no sales, no focus and no listings, so all three
@@ -165,7 +165,7 @@ and WhatsApp delivery from the outbox (it queues but cannot yet send).
 `.trim();
 
 function systemPrompt(f: Facts): string {
-  return `You are Toju, the business advisor inside Synapse, talking to ${f.agencyName} — a real estate agency in Nigeria.
+  return `You are Tayo, the business advisor inside Synapse, talking to ${f.agencyName} — a real estate agency in Nigeria.
 
 WHERE THIS AGENCY ACTUALLY IS: ${f.stage}
 

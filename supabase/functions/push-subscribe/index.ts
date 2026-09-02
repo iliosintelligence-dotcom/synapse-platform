@@ -7,12 +7,12 @@
  * anonymous visitor was refused outright — "new row violates row-level
  * security policy" — and proximity alerts could never be switched on without
  * an account. Proximity is deliberately offered before sign-up, the same way
- * Toju is, so the fix is not to loosen RLS for anonymous writers. It is to
+ * Tayo is, so the fix is not to loosen RLS for anonymous writers. It is to
  * keep both tables closed to browsers entirely and let one reviewed endpoint
  * do the writing, which is how create-lead already works here.
  *
  * IDENTITY. A bearer token wins and binds the row to user_id. Otherwise the
- * row is bound to the caller's visitor_id — the same id Toju already uses.
+ * row is bound to the caller's visitor_id — the same id Tayo already uses.
  * A caller can therefore only ever write its own row: every statement below
  * is scoped by one or the other, never by anything taken from the body.
  *

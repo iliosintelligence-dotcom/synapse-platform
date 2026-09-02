@@ -21,7 +21,7 @@
  * agency only ever learns that someone nearby saw a listing.
  *
  * verify_jwt = false: proximity is offered to anonymous visitors, who are
- * identified by the same visitor_id Toju already uses. A signed-in user is
+ * identified by the same visitor_id Tayo already uses. A signed-in user is
  * matched by user_id when a bearer token is present.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';

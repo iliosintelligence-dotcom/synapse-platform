@@ -1,7 +1,7 @@
 /**
  * create-lead — THE LEAD BRIDGE. The most important function in the product.
  *
- * Triggered by "Contact agent" or by Toju when a user expresses clear
+ * Triggered by "Contact agent" or by Tayo when a user expresses clear
  * interest. It:
  *   1. identifies the consumer from their JWT,
  *   2. snapshots their name/phone and attaches extracted preferences,
@@ -33,9 +33,9 @@ interface LeadPreferences {
   property_type: string | null;
   listing_type: string | null;
   timeline: string | null;
-  /* What Toju already worked out with this buyer, when they ran the negotiator
+  /* What Tayo already worked out with this buyer, when they ran the negotiator
      before making contact. It rides along so the agency opens the lead knowing
-     what was proposed and why — previously Toju wrote an opening offer and a
+     what was proposed and why — previously Tayo wrote an opening offer and a
      message, and the only route to the agency was the buyer copying it to a
      clipboard and finding them somewhere else. */
   negotiation?: LeadNegotiation | null;
@@ -112,9 +112,9 @@ Deno.serve(async (req: Request) => {
       .eq('id', prop.agency_id)
       .maybeSingle();
 
-    // ── extracted preferences from the consumer's latest Toju session ──
+    // ── extracted preferences from the consumer's latest Tayo session ──
     // Optional: the table may not exist on every environment, and a buyer may
-    // never have spoken to Toju. Either way the lead still stands on its own.
+    // never have spoken to Tayo. Either way the lead still stands on its own.
     let preferences: LeadPreferences | null = null;
     try {
     const { data: session } = await admin
@@ -275,12 +275,12 @@ function formatWhatsApp(p: {
   if (p.preferences?.negotiation) {
     const n = p.preferences.negotiation;
     lines.push('');
-    if (n.offer != null) lines.push(`*Toju's opening offer:* ${naira(n.offer)}`);
+    if (n.offer != null) lines.push(`*Tayo's opening offer:* ${naira(n.offer)}`);
     if (n.advice) lines.push(`_${n.advice}_`);
   }
 
   const sourceLabel =
-    p.source === 'toju_chat' ? 'Toju recommendation' : p.source === 'browse' ? 'Browse' : 'Contact button';
+    p.source === 'toju_chat' ? 'Tayo recommendation' : p.source === 'browse' ? 'Browse' : 'Contact button';
   lines.push('', `*Source:* ${sourceLabel}`, `*Lead ID:* ${p.leadId}`);
   return lines.join('\n');
 }
