@@ -45,17 +45,53 @@ const json = (b: unknown, s = 200) =>
 
 /* What a buyer actually asks about a home, in the order they ask it. Each maps
    to a Google Places type and a radius that suits it: you will walk to a
-   pharmacy and drive to a university, so searching both at 1km is wrong twice. */
+   pharmacy and drive to a university, so searching both at 1km is wrong twice.
+
+   ON `keep`, AND WHY THE MAPS LOOKED EMPTY
+   These numbers used to read 3,2,1,2,2,1,1,1,1 -- and they sum to 14, which
+   was EXACTLY the number of places stored against every property in the
+   database, on every listing, without exception. That was the ceiling: a map
+   offering tabs for Schools, Health, Shops and Transport, backed by one bank,
+   one pharmacy, one park and a single transit point. It did not look like a
+   map of a neighbourhood because it was not one.
+
+   Nothing was being saved by it. nearby() already asks Google for
+   maxResultCount: 20 per category and pays for that call in full, then threw
+   away everything past `keep`. Raising these costs nothing extra -- same
+   request, same price, we simply stop discarding the answer.
+
+   Restaurants, cafes, petrol, police and places of worship had no entry at
+   all, so POI_FILTERS' Shops tab was asking for restaurants and cafes that
+   were never fetched. Those DO each add one call per property, charged once
+   and then cached in property_places, so the cost is per listing rather than
+   per view -- worth knowing before a large backfill.
+
+   Transport is split: transit_station is what Google labels a general stop,
+   bus_station is what it labels a park or terminus, and in Nigeria the second
+   is the one people mean. Neither gives ROUTES -- Google has no transit
+   routing for Ibadan, and OSM has no route relations there either, so nothing
+   in this product can draw a bus line honestly. Stops and parks are what
+   exists, so stops and parks are what we show. */
 const CATEGORIES: Array<{ category: string; type: string; radius: number; keep: number }> = [
-  { category: 'school',      type: 'school',           radius: 3000,  keep: 3 },
-  { category: 'hospital',    type: 'hospital',         radius: 6000,  keep: 2 },
-  { category: 'pharmacy',    type: 'pharmacy',         radius: 2500,  keep: 1 },
-  { category: 'supermarket', type: 'supermarket',      radius: 3000,  keep: 2 },
-  { category: 'market',      type: 'shopping_mall',    radius: 8000,  keep: 2 },
-  { category: 'bank',        type: 'bank',             radius: 3000,  keep: 1 },
-  { category: 'university',  type: 'university',       radius: 15000, keep: 1 },
-  { category: 'transit',     type: 'transit_station',  radius: 5000,  keep: 1 },
-  { category: 'park',        type: 'park',             radius: 4000,  keep: 1 },
+  { category: 'school',      type: 'school',              radius: 3000,  keep: 5 },
+  { category: 'university',  type: 'university',          radius: 15000, keep: 2 },
+  { category: 'hospital',    type: 'hospital',            radius: 6000,  keep: 4 },
+  { category: 'hospital',    type: 'doctor',              radius: 3000,  keep: 2 },
+  { category: 'pharmacy',    type: 'pharmacy',            radius: 2500,  keep: 3 },
+  { category: 'supermarket', type: 'supermarket',         radius: 3000,  keep: 4 },
+  { category: 'market',      type: 'shopping_mall',       radius: 8000,  keep: 3 },
+  { category: 'market',      type: 'market',              radius: 5000,  keep: 2 },
+  { category: 'bank',        type: 'bank',                radius: 3000,  keep: 3 },
+  { category: 'restaurant',  type: 'restaurant',          radius: 2500,  keep: 4 },
+  { category: 'cafe',        type: 'cafe',                radius: 2500,  keep: 2 },
+  { category: 'gym',         type: 'gym',                 radius: 3000,  keep: 2 },
+  { category: 'transit',     type: 'bus_station',         radius: 6000,  keep: 4 },
+  { category: 'transit',     type: 'transit_station',     radius: 5000,  keep: 3 },
+  { category: 'park',        type: 'park',                radius: 4000,  keep: 2 },
+  { category: 'fuel',        type: 'gas_station',         radius: 3000,  keep: 3 },
+  { category: 'police',      type: 'police',              radius: 5000,  keep: 2 },
+  { category: 'church',      type: 'church',              radius: 2500,  keep: 2 },
+  { category: 'mosque',      type: 'mosque',              radius: 2500,  keep: 2 },
 ];
 
 interface Place {
