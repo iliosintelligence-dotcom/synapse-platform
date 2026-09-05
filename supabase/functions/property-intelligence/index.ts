@@ -43,55 +43,81 @@ const corsHeaders = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
-/* What a buyer actually asks about a home, in the order they ask it. Each maps
-   to a Google Places type and a radius that suits it: you will walk to a
-   pharmacy and drive to a university, so searching both at 1km is wrong twice.
+/* EVERYTHING GOOGLE WILL GIVE US, NOT A CURATED HANDFUL.
 
-   ON `keep`, AND WHY THE MAPS LOOKED EMPTY
-   These numbers used to read 3,2,1,2,2,1,1,1,1 -- and they sum to 14, which
-   was EXACTLY the number of places stored against every property in the
-   database, on every listing, without exception. That was the ceiling: a map
-   offering tabs for Schools, Health, Shops and Transport, backed by one bank,
-   one pharmacy, one park and a single transit point. It did not look like a
-   map of a neighbourhood because it was not one.
+   This list used to carry a `keep` per row -- 3 schools, 2 hospitals, 1 bank
+   -- and they summed to 14, which was exactly the number of places stored
+   against every property in the database. The map was not thin because the
+   neighbourhood was thin. It was thin because the code threw the rest away
+   after paying for it.
 
-   Nothing was being saved by it. nearby() already asks Google for
-   maxResultCount: 20 per category and pays for that call in full, then threw
-   away everything past `keep`. Raising these costs nothing extra -- same
-   request, same price, we simply stop discarding the answer.
+   `keep` is gone. A map is a description of what is physically there; you
+   filter it for display, you do not delete it at the source. Everything that
+   comes back is stored, and the front end decides what to draw for the tab
+   you are on.
 
-   Restaurants, cafes, petrol, police and places of worship had no entry at
-   all, so POI_FILTERS' Shops tab was asking for restaurants and cafes that
-   were never fetched. Those DO each add one call per property, charged once
-   and then cached in property_places, so the cost is per listing rather than
-   per view -- worth knowing before a large backfill.
+   THE ONE LIMIT LEFT IS GOOGLE'S, NOT OURS. Nearby Search (New) returns at
+   most 20 results per request -- maxResultCount is capped at 20 by the API,
+   so asking for 100 returns 20. The way to get more coverage is therefore
+   more TYPES, not a bigger number, which is why this list is now long and
+   granular: primary_school and secondary_school find schools that plain
+   `school` misses, grocery_store finds shops that `supermarket` does not.
 
-   Transport is split: transit_station is what Google labels a general stop,
-   bus_station is what it labels a park or terminus, and in Nigeria the second
-   is the one people mean. Neither gives ROUTES -- Google has no transit
-   routing for Ibadan, and OSM has no route relations there either, so nothing
-   in this product can draw a bus line honestly. Stops and parks are what
-   exists, so stops and parks are what we show. */
-const CATEGORIES: Array<{ category: string; type: string; radius: number; keep: number }> = [
-  { category: 'school',      type: 'school',              radius: 3000,  keep: 5 },
-  { category: 'university',  type: 'university',          radius: 15000, keep: 2 },
-  { category: 'hospital',    type: 'hospital',            radius: 6000,  keep: 4 },
-  { category: 'hospital',    type: 'doctor',              radius: 3000,  keep: 2 },
-  { category: 'pharmacy',    type: 'pharmacy',            radius: 2500,  keep: 3 },
-  { category: 'supermarket', type: 'supermarket',         radius: 3000,  keep: 4 },
-  { category: 'market',      type: 'shopping_mall',       radius: 8000,  keep: 3 },
-  { category: 'market',      type: 'market',              radius: 5000,  keep: 2 },
-  { category: 'bank',        type: 'bank',                radius: 3000,  keep: 3 },
-  { category: 'restaurant',  type: 'restaurant',          radius: 2500,  keep: 4 },
-  { category: 'cafe',        type: 'cafe',                radius: 2500,  keep: 2 },
-  { category: 'gym',         type: 'gym',                 radius: 3000,  keep: 2 },
-  { category: 'transit',     type: 'bus_station',         radius: 6000,  keep: 4 },
-  { category: 'transit',     type: 'transit_station',     radius: 5000,  keep: 3 },
-  { category: 'park',        type: 'park',                radius: 4000,  keep: 2 },
-  { category: 'fuel',        type: 'gas_station',         radius: 3000,  keep: 3 },
-  { category: 'police',      type: 'police',              radius: 5000,  keep: 2 },
-  { category: 'church',      type: 'church',              radius: 2500,  keep: 2 },
-  { category: 'mosque',      type: 'mosque',              radius: 2500,  keep: 2 },
+   Each row is one request, charged once per property and then cached, so the
+   cost is per listing rather than per visitor. At roughly 30 rows that is
+   ~30 Places calls to survey a home, once, for its lifetime.
+
+   Categories repeat on purpose: several types feed one category, because the
+   front end's legend, filters and pin colours are keyed on the category, not
+   on Google's type. A category outside that vocabulary would pin correctly
+   and then be missing from every tab. */
+const CATEGORIES: Array<{ category: string; type: string; radius: number }> = [
+  // learning
+  { category: 'school',      type: 'school',            radius: 4000 },
+  { category: 'school',      type: 'primary_school',    radius: 4000 },
+  { category: 'school',      type: 'secondary_school',  radius: 4000 },
+  { category: 'university',  type: 'university',        radius: 15000 },
+  { category: 'other',       type: 'library',           radius: 5000 },
+
+  // health
+  { category: 'hospital',    type: 'hospital',          radius: 8000 },
+  { category: 'hospital',    type: 'doctor',            radius: 4000 },
+  { category: 'hospital',    type: 'dental_clinic',     radius: 4000 },
+  { category: 'pharmacy',    type: 'pharmacy',          radius: 4000 },
+  { category: 'pharmacy',    type: 'drugstore',         radius: 4000 },
+
+  // shopping and money
+  { category: 'supermarket', type: 'supermarket',       radius: 4000 },
+  { category: 'supermarket', type: 'grocery_store',     radius: 4000 },
+  { category: 'supermarket', type: 'convenience_store', radius: 3000 },
+  { category: 'market',      type: 'shopping_mall',     radius: 10000 },
+  { category: 'market',      type: 'market',            radius: 6000 },
+  { category: 'market',      type: 'department_store',  radius: 8000 },
+  { category: 'bank',        type: 'bank',              radius: 4000 },
+  { category: 'bank',        type: 'atm',               radius: 3000 },
+
+  // eating and living
+  { category: 'restaurant',  type: 'restaurant',        radius: 3000 },
+  { category: 'restaurant',  type: 'meal_takeaway',     radius: 3000 },
+  { category: 'restaurant',  type: 'bakery',            radius: 3000 },
+  { category: 'cafe',        type: 'cafe',              radius: 3000 },
+  { category: 'gym',         type: 'gym',               radius: 4000 },
+  { category: 'gym',         type: 'fitness_center',    radius: 4000 },
+  { category: 'park',        type: 'park',              radius: 5000 },
+  { category: 'other',       type: 'hotel',             radius: 5000 },
+
+  // getting about
+  { category: 'transit',     type: 'bus_station',       radius: 8000 },
+  { category: 'transit',     type: 'transit_station',   radius: 6000 },
+  { category: 'transit',     type: 'train_station',     radius: 15000 },
+  { category: 'transit',     type: 'taxi_stand',        radius: 5000 },
+  { category: 'fuel',        type: 'gas_station',       radius: 4000 },
+
+  // safety and worship
+  { category: 'police',      type: 'police',            radius: 6000 },
+  { category: 'police',      type: 'fire_station',      radius: 8000 },
+  { category: 'church',      type: 'church',            radius: 3000 },
+  { category: 'mosque',      type: 'mosque',            radius: 3000 },
 ];
 
 interface Place {
@@ -149,7 +175,14 @@ async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGO
     const detail = await r.text().catch(() => '');
     let msg = detail.slice(0, 300);
     try { msg = JSON.parse(detail)?.error?.message ?? msg; } catch { /* keep raw */ }
-    throw new Error(`places ${spec.type}: HTTP ${r.status} — ${msg}`);
+    /* The status travels with the error because the caller has to tell two
+       very different failures apart: a type this API does not recognise (400,
+       this one row is unusable) versus a key, billing or quota fault (401,
+       403, 429, every row is unusable). Before, both aborted the whole
+       property. With a type list this long that would mean one unrecognised
+       name costing a listing its entire survey. */
+    throw Object.assign(new Error(`places ${spec.type}: HTTP ${r.status} — ${msg}`),
+      { status: r.status });
   }
 
   const d = await r.json();
@@ -178,8 +211,9 @@ async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGO
        shopfront next door -- userRatingCount is the honest proxy for "is this
        somewhere people actually go". */
     .sort((a: Place, b: Place) =>
-      (a.distance_m - b.distance_m) - Math.min(400, ((b.ratings_count ?? 0) - (a.ratings_count ?? 0)) * 2))
-    .slice(0, spec.keep);
+      (a.distance_m - b.distance_m) - Math.min(400, ((b.ratings_count ?? 0) - (a.ratings_count ?? 0)) * 2));
+  /* No slice. Everything Google returned is kept and stored -- the ordering
+     above decides what the page shows FIRST, not what survives. */
 }
 
 /* Driving times at the hours people actually travel.
@@ -260,8 +294,20 @@ async function routeMatrix(
   }
 }
 
-async function addDriveTimes(key: string, lat: number, lon: number, places: Place[]): Promise<string | null> {
+/* Drive times are the expensive half and the slow half: four Routes calls per
+   24 places -- free-flow plus three departure hours. That was fine against 14
+   places. Against a full survey of several hundred it would be dozens of calls
+   and a function that runs out of wall clock before it writes anything.
+
+   So the survey is complete and the ROUTING is bounded. The nearest 40 get
+   measured drive times; everything beyond that is still stored, still pinned,
+   still searchable, and simply has no drive time attached -- which is the
+   honest state for a place nobody has asked how long it takes to reach. */
+const ROUTE_LIMIT = 40;
+
+async function addDriveTimes(key: string, lat: number, lon: number, all: Place[]): Promise<string | null> {
   let note: string | null = null;
+  const places = all.slice(0, ROUTE_LIMIT);
   const CHUNK = 24;
   for (let i = 0; i < places.length; i += CHUNK) {
     const batch = places.slice(i, i + CHUNK);
@@ -351,12 +397,21 @@ Deno.serve(async (req: Request) => {
 
       const found: Place[] = [];
       let failed: string | null = null;
+      const skippedTypes: string[] = [];
       for (const spec of CATEGORIES) {
         try {
           found.push(...await nearby(key, t.latitude, t.longitude, spec));
         } catch (e) {
-          failed = e instanceof Error ? e.message : 'places lookup failed';
-          break;   // a key/billing fault will fail every category; stop asking
+          const status = (e as { status?: number }).status ?? 0;
+          const msg = e instanceof Error ? e.message : 'places lookup failed';
+          /* 400 means Google does not recognise THIS type -- its Table A
+             changes, and a long list will eventually name something it has
+             retired. That is one row's problem. Anything else (401, 403, 429,
+             a network fault) will fail every remaining row too, so stop and
+             say so rather than making thirty doomed calls. */
+          if (status === 400) { skippedTypes.push(spec.type); continue; }
+          failed = msg;
+          break;
         }
       }
       if (failed) { results.push({ id: t.id, title: t.title, error: failed }); continue; }
@@ -390,6 +445,9 @@ Deno.serve(async (req: Request) => {
       results.push({
         id: t.id, title: t.title, city: t.city,
         places: unique.length,
+        // Named so a retired Google type shows up as a line in the response
+        // rather than as places quietly going missing.
+        skippedTypes: skippedTypes.length ? skippedTypes : undefined,
         routed: unique.filter((p) => p.drive_seconds != null).length,
         routedByHour: unique.filter((p) => p.drive_seconds_morning != null).length,
         routingNote: routeError,
