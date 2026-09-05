@@ -1,12 +1,17 @@
+-- ── A tier is a claim, and these agencies have not earned one ─────────────
+-- The seeded agencies shipped as 'gold', 'verified' and 'basic'. Same problem
+-- as the listings: agency_verifications is empty, so nothing supports any of
+-- it, and verification_tier is what a buyer sees on an agency's public page.
+-- They seed as 'unverified' now. The tier is the verification desk's to give.
 insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
 values ('00000000-0000-0000-0000-000000000000','d0000000-0000-4000-8000-000000000001','authenticated','authenticated','seed-owner@synapse.test',crypt('Synapse!Seed1', gen_salt('bf')),now(),'{"provider":"email","providers":["email"]}','{"role":"agency_owner","full_name":"Synapse Seed Holdings"}',now(),now())
 on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000001','d0000000-0000-4000-8000-000000000001','Lagos Prime Realty','Lagos','gold','+2348030000101','Lagos, Nigeria') on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000002','d0000000-0000-4000-8000-000000000001','Abuja Property Hub','Abuja','verified','+2348030000102','Abuja, Nigeria') on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000003','d0000000-0000-4000-8000-000000000001','Coastal Homes PH','Port Harcourt','verified','+2348030000103','Port Harcourt, Nigeria') on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000004','d0000000-0000-4000-8000-000000000001','Heartland Estates','Enugu','basic','+2348030000104','Enugu, Nigeria') on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000005','d0000000-0000-4000-8000-000000000001','Sahel Realty','Kaduna','verified','+2348030000105','Kaduna, Nigeria') on conflict (id) do nothing;
-insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000006','d0000000-0000-4000-8000-000000000001','Southwest Homes','Ibadan','verified','+2348030000106','Ibadan, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000001','d0000000-0000-4000-8000-000000000001','Lagos Prime Realty','Lagos','unverified','+2348030000101','Lagos, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000002','d0000000-0000-4000-8000-000000000001','Abuja Property Hub','Abuja','unverified','+2348030000102','Abuja, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000003','d0000000-0000-4000-8000-000000000001','Coastal Homes PH','Port Harcourt','unverified','+2348030000103','Port Harcourt, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000004','d0000000-0000-4000-8000-000000000001','Heartland Estates','Enugu','unverified','+2348030000104','Enugu, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000005','d0000000-0000-4000-8000-000000000001','Sahel Realty','Kaduna','unverified','+2348030000105','Kaduna, Nigeria') on conflict (id) do nothing;
+insert into agencies (id, owner_id, name, city, verification_tier, whatsapp_number, address) values ('a6e10000-0000-4000-8000-000000000006','d0000000-0000-4000-8000-000000000001','Southwest Homes','Ibadan','unverified','+2348030000106','Ibadan, Nigeria') on conflict (id) do nothing;
 insert into neighbourhoods (id, name, area_zone, lat, lon) values
 ('a4b160bb-2ad3-5426-ab57-1f4d2b0294f4','Peter Odili Road (Port Harcourt)','Rivers',4.83132,7.03508),
 ('c4c919b1-fa4e-5893-a2b6-fe3f3dbce054','Barnawa (Kaduna)','Kaduna',10.52732,7.44758),
