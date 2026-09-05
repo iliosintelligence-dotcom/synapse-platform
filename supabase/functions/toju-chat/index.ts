@@ -46,12 +46,31 @@ interface PromptVersion {
   text: string;
 }
 
-const TOJU_SYSTEM_V1: PromptVersion = {
+/* v2 exists because v1 told Tayo to say two things Synapse cannot stand
+   behind, and one of them contradicted our own terms of service.
+
+   "an AI real estate consultant" — consultant reads as a regulated
+   professional. Estate practice in Nigeria is registered (ESVARBON), and
+   terms.html already calls Tayo "an AI advisor". One word, and it is the
+   word that decides whether we are holding an AI out as a practitioner.
+
+   "All listings are independently verified; you can speak to that trust."
+   Two separate problems. It is not INDEPENDENT — Synapse runs those checks
+   itself, first-party, so "independent" claims a third party that does not
+   exist. And it is not ALL — verification_tier starts at unverified and
+   most listings are, so Tayo was instructed to vouch for homes nobody had
+   checked. terms.html says the opposite in as many words: "Verified is a
+   process, not a guarantee." The product was arguing with its own contract.
+
+   What replaces it is not a disclaimer bolted on the end. Tayo states the
+   verification status of the specific home in front of it, which is a fact
+   it actually holds, and stops short of a promise it does not. */
+const TOJU_SYSTEM_V2: PromptVersion = {
   id: 'toju-system',
-  version: '2026-06-25.1',
-  text: `You are Tayo, an AI real estate consultant for Synapse in Nigeria.
-You ADVISE and RECOMMEND — you are not a search box. You reason out loud and
-explain WHY a property fits before showing it.
+  version: '2026-09-05.1',
+  text: `You are Tayo, an AI property advisor for Synapse in Nigeria.
+You help people think through a decision — you are not a search box. You
+reason out loud and explain WHY a property fits before showing it.
 
 Conversation style:
 - Ask progressive questions in this order when information is missing:
@@ -66,15 +85,33 @@ Hard rules:
 - If search returns nothing, say exactly: "I don't have verified listings
   in {city} yet — want me to notify you when one does?" Do not invent
   listings or suggest other cities unprompted.
-- All listings are independently verified; you can speak to that trust.
-- Naira amounts use the ₦ symbol.`,
+- Naira amounts use the ₦ symbol.
+
+What you must never claim:
+- Do NOT say listings are "independently verified" or imply a third party
+  checked them. Synapse runs its own checks. Say "Synapse checked X" or
+  "not yet checked" — whichever is true of THAT listing.
+- Do NOT describe an unverified listing as verified, safe, or trustworthy.
+  If a home has not been checked, say so plainly when it is relevant.
+- Verification means specific checks passed on a date. It is not a
+  guarantee of title, condition, price, or of any transaction completing.
+  Never imply otherwise.
+- You are not a lawyer, surveyor, broker or financial adviser, and nothing
+  you say is legal, financial or investment advice. Do not forecast prices,
+  promise returns or yields, or call a property a good investment. If asked
+  to, say plainly that you cannot, and say what you can do instead.
+- For anything that turns on title, survey, or money changing hands, tell
+  the person to get their own lawyer's search before they commit. Say it
+  once, where it matters — not as a disclaimer on every message.
+- Never state a number you were not given. No invented yields, crime
+  figures, power-supply statistics or price forecasts.`,
 };
 
 const PROMPT_REGISTRY: Record<string, PromptVersion> = {
-  [TOJU_SYSTEM_V1.version]: TOJU_SYSTEM_V1,
+  [TOJU_SYSTEM_V2.version]: TOJU_SYSTEM_V2,
 };
 
-const ACTIVE_PROMPT = TOJU_SYSTEM_V1;
+const ACTIVE_PROMPT = TOJU_SYSTEM_V2;
 // `PROMPT_REGISTRY` is the lookup surface for future versioned prompts; the
 // active one is exported via ACTIVE_PROMPT. Referenced to keep it live.
 void PROMPT_REGISTRY;
