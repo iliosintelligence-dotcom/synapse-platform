@@ -1,5 +1,5 @@
 /**
- * toju-chat — Tayo, the AI property consultant. Deno / Supabase Edge Function.
+ * toju-chat — Tayo, the AI property advisor. Deno / Supabase Edge Function.
  *
  * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
  * Property OS" without an architecture rewrite). The LLM backend is swappable
