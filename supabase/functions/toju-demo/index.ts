@@ -681,6 +681,12 @@ interface Match {
   bedrooms: number;
   bathrooms: number;
   trustScore: number;
+  /** Decimal degrees, or null for a listing nobody has geocoded. Null is
+   *  carried rather than defaulted: the map can then decline to place a home
+   *  it cannot place, which is honest, where a default would put it somewhere
+   *  specific and wrong. */
+  latitude: number | null;
+  longitude: number | null;
   /** Where this listing stands with the checks. Tayo shows matches regardless
    *  and states this per card, so the buyer chooses what risk to accept. */
   verificationStatus: string;   // unverified | in_progress | verified
@@ -858,6 +864,12 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   const select =
     'id,title,city,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
     'verification_status,verified_at,' +
+    /* Where the home actually is. Without these two the matches map had
+       nothing to plot and fell back to a hardcoded city-centre table, so every
+       pin sat near a city centre rather than at the house -- and for an area
+       name that table did not know, at Lagos, four hundred miles from the
+       listing. Reported as "the locations are not correct". */
+    'latitude,longitude,' +
     'agencies(name,verification_tier),' +
     // Only the NAME. Every other column on this table -- safety_score,
     // family_score, flood_risk, power_reliability, avg_rent_*, toju_summary --
@@ -896,6 +908,8 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       bedrooms: Number(r.bedrooms ?? 0),
       bathrooms: Number(r.bathrooms ?? 0),
       trustScore: Number(r.trust_score ?? 0),
+      latitude: r.latitude == null ? null : Number(r.latitude),
+      longitude: r.longitude == null ? null : Number(r.longitude),
       // Carried so every card can state where this listing stands. Tayo must
       // say which of its matches are checked and which are not.
       verificationStatus: String(r.verification_status ?? 'unverified'),
