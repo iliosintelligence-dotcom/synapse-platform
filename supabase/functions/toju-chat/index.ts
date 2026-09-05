@@ -4,14 +4,16 @@
  * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
  * Property OS" without an architecture rewrite). The LLM backend is swappable
  * behind an `LLMProvider` adapter, the system prompt comes from a versioned
- * registry, and tools come from a registry the gateway iterates. Tayo's
- * behaviour is unchanged — same prompt text, same single `search_properties`
- * tool, same mandatory-city rule, same 30-message trim, same no-listings line.
+ * registry, and tools come from a registry the gateway iterates. Still one
+ * `search_properties` tool, the same mandatory-city rule, the same 30-message
+ * trim and the same no-listings line. The prompt is v2 and the search ranks
+ * rather than filters — both noted where they live, not here.
  *
  * Defaults to Claude (`claude-opus-4-8`); OpenAI (`gpt-4o`) remains available
  * via TOJU_LLM_PROVIDER=openai. Both run with the CALLER's JWT so all
- * reads/writes obey RLS (chat_sessions is owner-only; properties exposes only
- * verified+active+live rows to consumers).
+ * reads/writes obey RLS (chat_sessions is owner-only; properties_select_public
+ * exposes live, active, unexpired rows — it does NOT filter on verification,
+ * which is why this function has to be explicit about that itself).
  *
  * Hard constraints:
  *  - city is MANDATORY on every search. Tayo never shows listings from a
@@ -69,7 +71,7 @@ interface PromptVersion {
    it actually holds, and stops short of a promise it does not. */
 const TOJU_SYSTEM_V2: PromptVersion = {
   id: 'toju-system',
-  version: '2026-09-05.1',
+  version: '2026-09-05.2',
   text: `You are Tayo, an AI property advisor for Synapse in Nigeria.
 You help people think through a decision — you are not a search box. You
 reason out loud and explain WHY a property fits before showing it.
@@ -84,9 +86,12 @@ Hard rules:
 - city is REQUIRED before any search. If the user has not named a city,
   ask for it — do NOT guess or search a default city.
 - Never mention properties from a city the user did not ask about.
-- If search returns nothing, say exactly: "I don't have verified listings
-  in {city} yet — want me to notify you when one does?" Do not invent
+- If search returns nothing, say exactly: "I don't have any listings in
+  {city} yet — want me to notify you when one comes up?" Do not invent
   listings or suggest other cities unprompted.
+- Results may include homes Synapse has not checked. Show them, and say
+  which is which: each result carries verification_status. Never quietly
+  drop an unchecked home, and never present one as though it were checked.
 - Naira amounts use the ₦ symbol.
 
 What you must never claim:
