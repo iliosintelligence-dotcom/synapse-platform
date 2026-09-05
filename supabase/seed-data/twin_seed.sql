@@ -91,9 +91,17 @@ select '00000000-0000-0000-0000-000000000000', uid, 'authenticated', 'authentica
        jsonb_build_object('role','agent','full_name',full_name), now(), now()
 from _agents on conflict (id) do nothing;
 
+-- handle_new_user() fires on the auth.users insert above and has already
+-- created this row, so `on conflict (id) do nothing` silently threw the phone
+-- away -- every seeded profile had a null number. The trigger owns id/role/
+-- full_name; this statement owns the columns the trigger knows nothing about.
 insert into profiles (id, role, full_name, phone)
 select uid, 'agent', full_name, '+234810'||lpad(seed_rand(full_name||'ph',9999999)::text,7,'0')
-from _agents on conflict (id) do nothing;
+from _agents
+on conflict (id) do update
+  set role = excluded.role,
+      full_name = excluded.full_name,
+      phone = coalesce(profiles.phone, excluded.phone);
 
 insert into agency_members (agency_id, profile_id, role)
 select agency_id, uid, 'agent' from _agents

@@ -40,9 +40,17 @@ select '00000000-0000-0000-0000-000000000000', uid, 'authenticated', 'authentica
        '{"provider":"email","providers":["email"]}', jsonb_build_object('role','consumer','full_name',nm), now(), now()
 from _personas on conflict (id) do nothing;
 
+-- handle_new_user() fires on the auth.users insert above and has already
+-- created this row, so `on conflict (id) do nothing` silently threw the phone
+-- away -- every seeded profile had a null number. The trigger owns id/role/
+-- full_name; this statement owns the columns the trigger knows nothing about.
 insert into profiles (id, role, full_name, phone)
 select uid, 'consumer', nm, '+234901'||lpad(seed_rand(nm||'ph',9999999)::text,7,'0')
-from _personas on conflict (id) do nothing;
+from _personas
+on conflict (id) do update
+  set role = excluded.role,
+      full_name = excluded.full_name,
+      phone = coalesce(profiles.phone, excluded.phone);
 
 insert into consumer_profiles (consumer_id, archetype, age, occupation, monthly_income, marital_status,
   children_count, future_children, elderly_dependents, pets, looking_for, budget_min, budget_max,
