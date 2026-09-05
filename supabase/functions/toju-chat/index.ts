@@ -16,8 +16,10 @@
  * Hard constraints:
  *  - city is MANDATORY on every search. Tayo never shows listings from a
  *    city the user did not ask about.
- *  - Recommendation, not catalogue: search is constrained to listings from the
- *    last 14 days (build-plan v2.0), so consumers see fresh inventory only.
+ *  - Recommendation, not catalogue: freshness and verification RANK results
+ *    (build-plan v2.0's intent) rather than filtering them away. As hard
+ *    filters they guaranteed an empty answer at low inventory -- see the note
+ *    on runSearch.
  *  - No embeddings / vectors / memory service. History lives in
  *    chat_sessions.messages (jsonb), trimmed to the last 30 messages. Each
  *    assistant turn records the prompt version + model that produced it.
@@ -133,7 +135,9 @@ const TOOLS: GatewayTool[] = [
   {
     name: 'search_properties',
     description:
-      'Search verified, active Synapse listings from the last 14 days. city is mandatory. Returns matching properties to recommend.',
+      'Search live Synapse listings in a city. city is mandatory. Returns up to 5 properties, '
+      + 'best first, each carrying verification_status and whether it was listed recently. '
+      + 'Some results may be unverified -- say so rather than omitting them.',
     parameters: {
       type: 'object',
       properties: {
@@ -572,30 +576,67 @@ interface SearchRow {
   property_type: string;
   bedrooms: number | null;
   trust_score: number | null;
+  /* The prompt instructs Tayo to state whether THIS home was checked. Until
+     these two were selected it had no way to know, so it was being asked to
+     report a fact it had never been given. */
+  verification_status: 'unverified' | 'in_progress' | 'verified';
+  listed_at: string | null;
+  /** Derived, so the model does not have to do date arithmetic. */
+  recently_listed?: boolean;
 }
 
-/** Recency window for recommendations (build-plan v2.0): Tayo only recommends
- *  properties listed within the last 14 days, so consumers see fresh, relevant
- *  inventory rather than a stale catalogue. */
+/** Recency window (build-plan v2.0). It marks a listing as recent; it no
+ *  longer excludes anything. See runSearch. */
 const RECOMMENDATION_WINDOW_DAYS = 14;
 
+/* This returned nothing. To anyone. In any city.
+
+   Two hard filters -- verification_status = 'verified' AND listed in the last
+   14 days -- and at real inventory they had no overlap: the two verified
+   listings were 27 days old and the only recent one was unverified. Every
+   conversation ended on the no-listings line while seven live homes sat in
+   the table. Measured against production, not inferred.
+
+   Both filters were defensible alone and wrong together. Freshness and
+   verification are how you RANK a shortlist, not how you decide a home does
+   not exist. So they order the results now, and nothing is filtered on either:
+
+     verified first          trust is the strongest signal a buyer has
+     then most recently listed   build-plan v2.0's "recommendation, not catalogue"
+     then trust_score        the original tie-break, kept
+
+   Five results, best first. If a city genuinely has nothing live, the tool
+   still returns empty and the no-listings line still fires -- which is now
+   true when it is said, rather than true of almost every query.
+
+   Unverified homes reaching a buyer is the intended design, not a slip:
+   app/toju.html says so where it draws the cards ("Tayo shows checked and
+   unchecked homes alike, so the label is what keeps that honest"), and the
+   prompt requires Tayo to state which is which. The backend was the only
+   part that disagreed.
+
+   Note the old comment here claimed RLS already restricted this to verified.
+   It does not -- properties_select_public is live + active + not expired, and
+   says nothing about verification. */
 async function runSearch(
   // deno-lint-ignore no-explicit-any
   supabase: any,
   args: SearchArgs,
 ): Promise<{ results: SearchRow[]; ids: string[] }> {
-  // city is mandatory and case-insensitive; RLS already restricts to
-  // verified + active + live, but we assert it explicitly for clarity.
-  const since = new Date(Date.now() - RECOMMENDATION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  // city is mandatory and case-insensitive. RLS (properties_select_public)
+  // already limits this to live, active, unexpired rows; asserted here too so
+  // the query reads as what it means.
+  const since = Date.now() - RECOMMENDATION_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   let query = supabase
     .from('properties')
-    .select('id, title, city, price, listing_type, property_type, bedrooms, trust_score')
+    .select('id, title, city, price, listing_type, property_type, bedrooms, trust_score, verification_status, listed_at')
     .ilike('city', args.city)
-    .eq('verification_status', 'verified')
     .eq('is_active', true)
     .eq('status', 'live')
-    // Recommendation, not catalogue: only listings from the last 14 days.
-    .gte('listed_at', since)
+    // The enum sorts unverified < in_progress < verified, so descending puts
+    // checked homes at the top without a computed column.
+    .order('verification_status', { ascending: false })
+    .order('listed_at', { ascending: false, nullsFirst: false })
     .order('trust_score', { ascending: false, nullsFirst: false })
     .limit(5);
 
@@ -607,6 +648,13 @@ async function runSearch(
 
   const { data, error } = await query;
   if (error) throw new Error(`Search failed: ${error.message}`);
-  const results = (data ?? []) as SearchRow[];
+  /* recently_listed is computed here rather than left to the model: asking an
+     LLM to compare an ISO timestamp against today is a reliable way to get a
+     confident wrong answer, and the prompt forbids stating numbers it was not
+     given. */
+  const results = ((data ?? []) as SearchRow[]).map((r) => ({
+    ...r,
+    recently_listed: !!r.listed_at && new Date(r.listed_at).getTime() >= since,
+  }));
   return { results, ids: results.map((r) => r.id) };
 }
