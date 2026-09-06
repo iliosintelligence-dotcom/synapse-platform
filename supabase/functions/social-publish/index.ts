@@ -422,6 +422,25 @@ Deno.serve(async (req: Request) => {
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
 
+    /* SCHEDULED DRAIN.
+       "Scheduled" used to be a label on a row and nothing else. This function
+       only ever ran for the agency of a signed-in user, so a post scheduled
+       for 9am published when a human opened the portal and pressed a button --
+       which is not scheduling, it is a reminder. Nothing in cron touched the
+       queue, so a row could sit at status='scheduled' indefinitely.
+
+       pg_cron now posts here with the service role key (drain_social_queue,
+       migration 0081). That caller has no user and belongs to no agency, so it
+       is recognised by its bearer token and drains what is DUE across every
+       agency instead.
+
+       This does not widen what can go out. dry_run is stamped on the row at
+       queue time, defaults to true, and still decides mock versus real for
+       every row individually -- a scheduled drain publishes for real only what
+       somebody deliberately queued as real. */
+    const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+    const scheduled = serviceKey.length > 0 && bearer === serviceKey;
+
     const admin = createClient(url, serviceKey);
     const userClient = createClient(url, anonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -429,45 +448,67 @@ Deno.serve(async (req: Request) => {
 
     /* Who is asking, and for whom. The drain runs as the service role, so
        without this any signed-in account could push another agency's queue
-       out in public. */
-    const { data: userData } = await userClient.auth.getUser();
-    const user = userData.user;
-    if (!user) return json({ error: 'Not authenticated' }, 401);
+       out in public. Skipped only for the scheduled caller, which proved
+       itself with the service role key above. */
+    let agencyId: string | null = null;
+    if (!scheduled) {
+      const { data: userData } = await userClient.auth.getUser();
+      const user = userData.user;
+      if (!user) return json({ error: 'Not authenticated' }, 401);
 
-    const { data: membership } = await admin
-      .from('agency_members')
-      .select('agency_id, role')
-      .eq('profile_id', user.id)
-      .is('deleted_at', null)
-      .limit(1)
-      .maybeSingle();
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
 
-    if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
-    if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
-      return json({ error: 'You cannot publish for this agency' }, 403);
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'You cannot publish for this agency' }, 403);
+      }
+      agencyId = membership.agency_id as string;
     }
 
     const body = (await req.json().catch(() => ({}))) as { limit?: number; live?: boolean };
     const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 50);
-    const live = body.live === true;
+    /* A human has to ask for a live run explicitly, because the portal's
+       ordinary button is a rehearsal. The scheduler cannot ask, so it always
+       runs live and lets each row's own dry_run decide -- otherwise every
+       scheduled post would rehearse forever and never go out. */
+    const live = scheduled ? true : body.live === true;
 
-    const { data: claimed, error: claimErr } = await admin.rpc('claim_social_batch', {
-      p_agency_id: membership.agency_id,
-      p_limit: limit,
-    });
+    const { data: claimed, error: claimErr } = scheduled
+      ? await admin.rpc('claim_social_due_any', { p_limit: limit })
+      : await admin.rpc('claim_social_batch', { p_agency_id: agencyId, p_limit: limit });
     if (claimErr) return json({ error: `Could not claim work: ${claimErr.message}` }, 500);
 
     const rows = (claimed ?? []) as QueuedPost[];
     if (!rows.length) {
-      return json({ claimed: 0, published: 0, failed: 0, dryRun: 0, results: [] });
+      return json({ claimed: 0, mode: scheduled ? 'scheduled' : 'manual',
+        published: 0, failed: 0, dryRun: 0, results: [] });
     }
 
-    /* Tokens are fetched once for the whole batch, and only for a live run --
-       a rehearsal decrypts nothing, because it sends nothing. */
-    const connections = live
-      ? await loadConnections(admin, membership.agency_id as string,
-          [...new Set(rows.filter((r) => !r.dry_run).map((r) => r.platform))])
-      : {};
+    /* Tokens are fetched once per agency, and only for a live run -- a
+       rehearsal decrypts nothing, because it sends nothing.
+
+       Keyed by agency because a scheduled batch spans them. Reading one
+       agency's connections and applying them to every row would have posted
+       one agency's listing to another agency's Instagram, which is the worst
+       thing this file could do. */
+    const connByAgency: Record<string, Record<string, Connection>> = {};
+    if (live) {
+      const wanted = new Map<string, Set<string>>();
+      for (const r of rows) {
+        if (r.dry_run) continue;
+        if (!wanted.has(r.agency_id)) wanted.set(r.agency_id, new Set<string>());
+        (wanted.get(r.agency_id) as Set<string>).add(r.platform);
+      }
+      for (const [aid, plats] of wanted) {
+        connByAgency[aid] = await loadConnections(admin, aid, [...plats]);
+      }
+    }
 
     let published = 0;
     let failed = 0;
@@ -476,7 +517,7 @@ Deno.serve(async (req: Request) => {
 
     for (const post of rows) {
       const rehearsal = post.dry_run || !live;
-      const conn = rehearsal ? NO_CONNECTION : connections[post.platform];
+      const conn = rehearsal ? NO_CONNECTION : (connByAgency[post.agency_id] ?? {})[post.platform];
 
       /* No connected account is a different failure from a platform we cannot
          publish to at all, and it is the one the agency can fix themselves. It
@@ -539,6 +580,9 @@ Deno.serve(async (req: Request) => {
 
     return json({
       claimed: rows.length,
+      // Named so a cron log can be read at a glance, and so a scheduled run
+      // is never mistaken for somebody pressing the button.
+      mode: scheduled ? 'scheduled' : 'manual',
       published,
       failed,
       dryRun,
