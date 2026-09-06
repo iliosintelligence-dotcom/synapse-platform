@@ -79,8 +79,46 @@ Deno.serve(async (req: Request) => {
       return json({ error: 'You cannot send messages for this agency' }, 403);
     }
 
-    const body = (await req.json().catch(() => ({}))) as { limit?: number };
+    const body = (await req.json().catch(() => ({}))) as { limit?: number; check?: boolean };
     const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 100);
+
+    /* IS THERE ANYTHING TO SEND WITH?
+       Names only, never values. A variable name is not a secret, and the
+       portal needs to be able to say "WhatsApp is not connected yet" before
+       somebody presses Send rather than after.
+
+       The bigger reason this is here rather than left to sendWhatsApp: a
+       missing credential used to cost real messages. Pressing Send CLAIMED
+       the batch, and the claim increments attempts. Every press burned an
+       attempt on every queued row, failing each one with "Twilio not
+       configured" -- and after three presses max_attempts was spent and the
+       rows were marked failed permanently. A message to a buyer was destroyed
+       by a configuration mistake that had nothing to do with the message.
+
+       So the check happens BEFORE the claim, and an unconfigured project
+       claims nothing at all. */
+    const twilio = {
+      TWILIO_ACCOUNT_SID: Boolean(Deno.env.get('TWILIO_ACCOUNT_SID')),
+      TWILIO_AUTH_TOKEN: Boolean(Deno.env.get('TWILIO_AUTH_TOKEN')),
+      TWILIO_WHATSAPP_FROM: Boolean(Deno.env.get('TWILIO_WHATSAPP_FROM')),
+    };
+    const missing = Object.keys(twilio).filter((k) => !twilio[k as keyof typeof twilio]);
+    const twilioReady = missing.length === 0;
+
+    // A probe: tells the portal what it can offer, sends nothing, claims nothing.
+    if (body.check === true) {
+      return json({ check: true, twilioReady, missing });
+    }
+
+    if (!twilioReady) {
+      return json({
+        claimed: 0, sent: 0, failed: 0, results: [],
+        twilioReady: false,
+        missing,
+        error: 'WhatsApp is not connected on this project yet, so nothing was sent '
+          + 'and nothing was claimed. Your messages are still queued and unharmed.',
+      }, 503);
+    }
 
     const { data: claimed, error: claimErr } = await admin.rpc('claim_outbox_batch', {
       p_agency_id: membership.agency_id,
@@ -89,7 +127,7 @@ Deno.serve(async (req: Request) => {
     if (claimErr) return json({ error: `Could not claim work: ${claimErr.message}` }, 500);
 
     const rows = (claimed ?? []) as OutboxRow[];
-    if (!rows.length) return json({ claimed: 0, sent: 0, failed: 0, results: [] });
+    if (!rows.length) return json({ claimed: 0, sent: 0, failed: 0, twilioReady: true, results: [] });
 
     let sent = 0;
     let failed = 0;
@@ -138,7 +176,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    return json({ claimed: rows.length, sent, failed, results });
+    return json({ claimed: rows.length, sent, failed, twilioReady: true, results });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error(`send-outbox fatal: ${message}`);
