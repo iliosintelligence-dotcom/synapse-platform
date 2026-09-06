@@ -83,13 +83,24 @@ A lead has been assigned to you. {{1}} enquired about {{2}} and is yours to work
 
 ### `handoff_negotiation_limit`
 
-**Not wired yet, and deliberately so.** It needs an offer to compare against a
-floor the agency authorised, and no such column exists — `floor_level`,
-`total_floors` and `floor_size_sqm` are all about buildings. When the
-negotiator stores a floor, the call is
-`queue_agent_handoff_template(lead, 'handoff_negotiation_limit', vars)`. A
-trigger over data that does not exist would either never fire or fire on the
-wrong thing.
+**Sent automatically** when a buyer offers below the floor the agency set — the
+`negotiation_offers_notify` trigger (migrations `0089`, `0090`).
+
+The floor lives in `listing_negotiation_authority`, one row per listing, set by
+an owner or admin from the Negotiation section of the listing drawer. It is not
+on `properties`, which is world-readable: a floor there would be one select
+away from the buyer it is meant to be hidden from. This table has **no policy a
+consumer can satisfy** — proven with a real buyer's JWT returning zero rows,
+and an agency owner's returning theirs.
+
+Tayo asks `offer_within_authority(property, amount)`, which answers **yes or
+no** and never returns the figure, so a negotiator talked into repeating its own
+context has nothing to repeat. No floor set means **no authority**, not
+unlimited: the safe reading of "nobody said" is "not allowed".
+
+Fires once per lead. A buyer working up from 2.5 to 2.6 to 2.65 is one
+negotiation, not three, and an agent already told is already in the
+conversation. A counter from the agency's own side notifies nobody.
 
 - **Category:** UTILITY  
 - **Language:** en  
