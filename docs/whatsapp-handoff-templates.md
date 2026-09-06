@@ -83,8 +83,13 @@ A lead has been assigned to you. {{1}} enquired about {{2}} and is yours to work
 
 ### `handoff_negotiation_limit`
 
-**Sent automatically** when a buyer offers below the floor the agency set — the
+**Sent automatically** when an offer below the floor is recorded — the
 `negotiation_offers_notify` trigger (migrations `0089`, `0090`).
+
+Buyers do not put offers to agencies (migration `0092`). An offer is a figure
+the **agency** records, having heard it on the phone, on WhatsApp or at a
+viewing: `record_offer` is agency staff only, and the buyer-facing endpoint that
+briefly existed now answers 410.
 
 The floor lives in `listing_negotiation_authority`, one row per listing, set by
 an owner or admin from the Negotiation section of the listing drawer. It is not
