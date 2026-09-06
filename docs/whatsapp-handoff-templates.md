@@ -100,26 +100,35 @@ Tayo has stopped at the limit you set. {{1}} offered {{2}} on {{3}}, which is un
 
 ### `handoff_new_lead`
 
-- **Category:** UTILITY  
-- **Language:** en  
-- **Variables:** `{{1}}` buyer_name, `{{2}}` area, `{{3}}` budget, `{{4}}` listing
+**Sent automatically** the moment a lead is created, by the `leads_notify_agent`
+trigger (migration `0087`). The other three are queued by the product at the
+point they describe; this one fires on its own.
+
+- **Category:** UTILITY
+- **Language:** en
+- **Variables:** `{{1}}` buyer_name, `{{2}}` listing, `{{3}}` budget
 
 **Body**
 
 ```
-New lead from Tayo. {{1}} is looking in {{2}} with a budget around {{3}}, and asked about {{4}}. Open Synapse to read the conversation and reply.
+New lead from Tayo. {{1}} asked about {{2}} and their budget is {{3}}. Open Synapse to read the conversation and reply.
 ```
 
 **Sample values for review**
 
 - `{{1}}` = Chinaza Obi
-- `{{2}}` = Bodija, Ibadan
+- `{{2}}` = Bodija Park 3-Bedroom Flat
 - `{{3}}` = ₦3.2M/yr
-- `{{4}}` = Bodija Park 3-Bedroom Flat
 
 **Renders as**
 
-> New lead from Tayo. Chinaza Obi is looking in Bodija, Ibadan with a budget around ₦3.2M/yr, and asked about Bodija Park 3-Bedroom Flat. Open Synapse to read the conversation and reply.
+> New lead from Tayo. Chinaza Obi asked about Bodija Park 3-Bedroom Flat and their budget is ₦3.2M/yr. Open Synapse to read the conversation and reply.
+
+Every variable is something that can be missing, so each has a fallback that
+still reads: *A buyer*, *one of your listings*, *not stated*. Reworded from a
+draft that said "a budget around {{3}}" — fine with a figure, clumsy without
+one. Free to change only because nothing has been submitted; after approval the
+text is frozen and a reword means resubmitting.
 
 ### `handoff_viewing_booked`
 
@@ -156,9 +165,8 @@ select queue_agent_handoff_template(
   'handoff_new_lead',
   jsonb_build_object(
     'buyer_name', 'Chinaza Obi',
-    'area',       'Bodija, Ibadan',
-    'budget',     '₦3.2M/yr',
-    'listing',    'Bodija Park 3-Bedroom Flat'
+    'listing',    'Bodija Park 3-Bedroom Flat',
+    'budget',     '₦3.2M/yr'
   )
 );
 ```
@@ -174,7 +182,10 @@ receive a sentence with a hole in it.
 ## Still needed before any of this delivers
 
 1. These four submitted and approved, and their `provider_content_sid` written
-   back.
+   back. `handoff_new_lead` is already queued by the trigger, so the queue
+   fills before any of it can deliver — which is the right way round: the
+   messages accumulate and go out once approval lands, rather than leads
+   passing unrecorded.
 2. `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` set on the
    project. Until then `send-outbox` refuses to claim anything and says so.
 3. **Phone numbers on agent profiles.** As of 2026-09-06 none of the 41 agency
