@@ -57,6 +57,11 @@ back days later saying very little:
 
 ### `handoff_lead_assigned`
 
+**Sent automatically** when a lead changes hands — the
+`leads_notify_assignment` trigger, on UPDATE of `assigned_agent_id` only. It
+goes to the new owner and to nobody else: the agency owner is not a fallback
+here, because "assigned to you" is untrue of somebody who was not assigned it.
+
 - **Category:** UTILITY  
 - **Language:** en  
 - **Variables:** `{{1}}` buyer_name, `{{2}}` listing
@@ -77,6 +82,14 @@ A lead has been assigned to you. {{1}} enquired about {{2}} and is yours to work
 > A lead has been assigned to you. Chinaza Obi enquired about Bodija Park 3-Bedroom Flat and is yours to work now. The full conversation is on the lead in Synapse.
 
 ### `handoff_negotiation_limit`
+
+**Not wired yet, and deliberately so.** It needs an offer to compare against a
+floor the agency authorised, and no such column exists — `floor_level`,
+`total_floors` and `floor_size_sqm` are all about buildings. When the
+negotiator stores a floor, the call is
+`queue_agent_handoff_template(lead, 'handoff_negotiation_limit', vars)`. A
+trigger over data that does not exist would either never fire or fire on the
+wrong thing.
 
 - **Category:** UTILITY  
 - **Language:** en  
@@ -132,6 +145,13 @@ text is frozen and a reword means resubmitting.
 
 ### `handoff_viewing_booked`
 
+**Sent automatically** when a viewing is created with status `requested`,
+`scheduled` or `confirmed` — the `viewings_notify_agent` trigger. A viewing
+logged after the fact (`completed`, `cancelled`, `no_show`) notifies nobody, so
+an agency catching up on last month does not fire a month of messages. The time
+is rendered in Africa/Lagos: a UTC timestamp would send somebody to a house an
+hour early.
+
 - **Category:** UTILITY  
 - **Language:** en  
 - **Variables:** `{{1}}` buyer_name, `{{2}}` listing, `{{3}}` when
@@ -146,11 +166,11 @@ Viewing booked. {{1}} has asked to see {{2}} on {{3}}. Confirm it or move it in 
 
 - `{{1}}` = Chinaza Obi
 - `{{2}}` = Bodija Park 3-Bedroom Flat
-- `{{3}}` = Saturday 13 September, 11am
+- `{{3}}` = Saturday 12 September, 11:00am
 
 **Renders as**
 
-> Viewing booked. Chinaza Obi has asked to see Bodija Park 3-Bedroom Flat on Saturday 13 September, 11am. Confirm it or move it in Synapse before they travel.
+> Viewing booked. Chinaza Obi has asked to see Bodija Park 3-Bedroom Flat on Saturday 12 September, 11:00am. Confirm it or move it in Synapse before they travel.
 
 ---
 
