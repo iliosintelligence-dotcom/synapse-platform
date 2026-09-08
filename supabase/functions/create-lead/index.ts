@@ -85,6 +85,11 @@ Deno.serve(async (req: Request) => {
 
     const body = (await req.json().catch(() => ({}))) as {
       property_id?: string; source?: string; negotiation?: unknown;
+      /* The visitor id the consumer pages keep in localStorage. It is what
+         channel_interactions rows are keyed by, so it is the only way to
+         reconstruct which channel actually brought this person in. Optional:
+         a lead with no session is still attributed, just as 'direct'. */
+      session_id?: string;
     };
     if (!body.property_id) return json({ error: 'property_id is required' }, 400);
     // `source` is a Postgres enum; anything unrecognised would fail the insert,
@@ -171,6 +176,36 @@ Deno.serve(async (req: Request) => {
       .single();
     if (leadErr || !lead) return json({ error: `Could not create lead: ${leadErr?.message}` }, 500);
     const leadId = lead.id as string;
+
+    /* ── 1b. attribute it, here, on the server ─────────────────────────────
+       This used to be a fire-and-forget rpc made by the BROWSER after this
+       function had already returned, from exactly one of the several places
+       a lead can begin. Every part of that was fragile: it ran from the Tayo
+       handoff and nowhere else, it needed localStorage to have survived, and
+       it ended in `.catch(() => {})`, so any failure was silent. Attribution
+       is also only ever computed once, at creation, and never retried -- so a
+       lead that missed it is unattributable forever. Four of the five leads
+       in the live database have no attribution row at all for exactly this
+       reason, which quietly hollowed out the one report the agency uses to
+       decide where to spend.
+
+       Doing it here fixes the class rather than the instance: every lead is
+       attributed before this function returns, whatever created it.
+       attribute_lead is idempotent -- it returns 0 when rows already exist --
+       so the browser call that still runs afterwards is harmless.
+
+       The failure is logged and swallowed deliberately. Attribution is
+       reporting; the lead is the thing an agency cannot afford to lose, and
+       it is already saved above. Losing the report must never cost the lead,
+       which is the same ordering the WhatsApp step below uses. */
+    {
+      const { error: attErr } = await admin.rpc('attribute_lead', {
+        p_lead_id: leadId,
+        p_session_id: typeof body.session_id === 'string' && body.session_id
+          ? body.session_id : null,
+      });
+      if (attErr) console.error('attribute_lead failed for', leadId, attErr.message);
+    }
 
     // ── 2. deliver via WhatsApp, retry once ──
     const message = formatWhatsApp({
