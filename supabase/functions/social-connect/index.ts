@@ -219,7 +219,23 @@ async function finishFacebook(
 /** Sends the operator back to the portal with a plain-language outcome rather
  *  than leaving them on a white page owned by an edge function. */
 function backToPortal(status: string, detail?: string): Response {
-  const portal = Deno.env.get('PORTAL_URL') ?? '/app/agency.html';
+  /* THE DEFAULT IS ABSOLUTE, AND HAS TO BE.
+     This used to fall back to the RELATIVE '/app/agency.html'. A relative
+     redirect issued by an edge function resolves against the function's own
+     origin, so with PORTAL_URL unset the operator finished a successful OAuth
+     round trip and landed on
+     https://<ref>.supabase.co/app/agency.html -- a 404. The token was safely
+     in the vault by then, because the connect happens before this redirect, so
+     the actual outcome was "it worked and looked broken": the worst kind, and
+     one nobody would think to check because the failure appears after the
+     success.
+
+     PORTAL_URL still overrides, which is what a preview deployment or a
+     rename needs. But a setting whose absence silently breaks the flow is not
+     really optional, and making the operator discover that by walking into it
+     is not a reasonable thing to ship. */
+  const portal = Deno.env.get('PORTAL_URL')
+    || 'https://www.synapsecore.dev/app/agency.html';
   const u = new URL(portal, 'https://placeholder.invalid');
   u.searchParams.set('connected', status);
   if (detail) u.searchParams.set('detail', detail.slice(0, 180));
@@ -233,7 +249,23 @@ Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const appId = Deno.env.get('META_APP_ID') ?? '';
   const appSecret = Deno.env.get('META_APP_SECRET') ?? '';
-  const redirectUri = Deno.env.get('META_REDIRECT_URI') ?? '';
+  /* BOTH SPELLINGS, ON PURPOSE.
+     This cost roughly two weeks. The variable has always been read as
+     META_REDIRECT_URI here, and was set in Supabase as META_REDIRECT_URL --
+     which is what everyone calls it out loud, and what Meta's own console
+     labels "Valid OAuth Redirect URIs" while every human says URL. The
+     function reported it as unset, which was true of the name it looked for
+     and false of the thing the operator had actually done, so the debugging
+     went looking for a missing value that was sitting right there under one
+     letter's difference.
+
+     Accepting both is not sloppiness. The canonical name is still URI and is
+     still preferred; URL is accepted because it is the name a reasonable
+     person types, and a config system that punishes that with a silent 503 is
+     the thing at fault, not the person. */
+  const redirectUri = Deno.env.get('META_REDIRECT_URI')
+    || Deno.env.get('META_REDIRECT_URL')
+    || '';
 
   try {
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
@@ -248,8 +280,31 @@ Deno.serve(async (req: Request) => {
       }
       const platform = requested as Platform;
 
-      if (!appId || !redirectUri) {
-        return json({ error: 'Meta is not configured on this project yet — META_APP_ID and META_REDIRECT_URI are unset.' }, 503);
+      /* Name what is actually missing. The old message asserted that both
+         META_APP_ID and META_REDIRECT_URI were unset whenever either one was,
+         which sent at least one debugging session after the wrong variable --
+         the owner had set the secret and the redirect and not the app id, and
+         the error told them the redirect was missing too.
+
+         Presence only. The values are never read back, never logged and never
+         returned; this reports three booleans. META_APP_SECRET is included
+         because the callback leg needs it even though this guard does not, so
+         a half-configured app fails here rather than silently later, after the
+         person has already been sent to Meta and back. */
+      const missing = [
+        !appId && 'META_APP_ID',
+        !appSecret && 'META_APP_SECRET',
+        !redirectUri && 'META_REDIRECT_URI (or META_REDIRECT_URL)',
+      ].filter(Boolean) as string[];
+      if (missing.length) {
+        return json({
+          error: 'Meta is not configured on this project yet. Missing: ' + missing.join(', ') + '.',
+          missing,
+          hint: 'Set these on the synapse-platform project (bhrhejpekmhbhwryjhgk). '
+              + 'The redirect is read from META_REDIRECT_URI or META_REDIRECT_URL '
+              + '(either spelling works) and must be exactly '
+              + 'https://bhrhejpekmhbhwryjhgk.supabase.co/functions/v1/social-connect',
+        }, 503);
       }
 
       const authHeader = req.headers.get('Authorization');
