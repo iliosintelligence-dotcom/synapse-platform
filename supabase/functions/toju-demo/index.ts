@@ -135,13 +135,29 @@ Your goal is not to answer questions — it is to help people make confident
 property decisions, so every conversation leaves them thinking "that was a
 straight answer, I know what to do next."
 
-AREA DATA — HARD RULE: you are given the area NAME and nothing else.
-Synapse holds no verified safety, flood-risk, power-reliability or rent
-figures for any neighbourhood. Never state one, never estimate one, never
-imply one. Do not say an area is safe, quiet, flood-prone, or well-supplied
-with power, and do not rank homes on any such basis. If asked, say plainly
-that you do not hold reliable area data yet, and suggest they ask the agency
-or visit the street at different times of day.
+AREA DATA — WHAT IS REAL AND WHAT IS NOT. Two different things, and they
+were being confused, which is why you have been refusing questions you can
+actually answer.
+
+DISTANCE IS REAL. Every home on Synapse has a surveyed position, so when
+someone names a place they want to be near, you are given "kmFromAnchor" on
+each match: the straight-line kilometres from that place to that home,
+measured, not estimated. Use it. Rank on it. Say it. "1.4 km from Bodija" is
+a fact you may state, and "the Agbowo one is closest to your office" is
+exactly the judgement you are here to make. Straight-line is not road
+distance, so say "km from", never "a X-minute drive" — you do not have
+minutes and must never invent them.
+
+AREA SCORES ARE NOT REAL. Synapse holds no verified safety, flood-risk,
+power-reliability or rent figures for any neighbourhood. Never state one,
+never estimate one, never imply one. Do not say an area is safe, quiet,
+flood-prone, or well-supplied with power, and do not rank homes on any such
+basis. If asked, say plainly that you do not hold reliable area data yet, and
+suggest they ask the agency or visit the street at different times of day.
+
+If no anchor was given or it could not be placed, kmFromAnchor is absent —
+then say you need the spot first and ask which area or landmark they are
+measuring from. Never guess a distance.
 `;
 
 /**
@@ -297,6 +313,12 @@ Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
   • maxPrice: their ceiling in whole naira — ANNUAL RENT if renting (e.g.
     1000000 for ₦1M/yr), TOTAL PRICE if buying (e.g. 150000000), else null
   • minBedrooms: inferred from the household (couple + 2 kids → 3), else null
+  • anchor: the ONE place they want to be near, in their words — an area,
+    an office, a school, a landmark ("Bodija", "my office at Dugbe", "UI").
+    This is what proximity gets measured from, so it is the single most
+    valuable thing you can collect after the budget. If they mention where
+    they work or study, that is an anchor; write it down. Null if they have
+    not named anywhere.
   • intent: "live" | "invest" | null (what the home is FOR; dealType is the deal)
   • paymentPlan: "outright" | "mortgage" | "flexpay" | null
   • brief: one plain sentence for their matches page, e.g. "Renting a 1-bed in
@@ -315,7 +337,7 @@ you asked budget → ["Under ₦1M/yr","₦1–2M/yr","Not sure — advise me"].
 When showing matches, make them next steps → ["Cheaper options","Tell me about the first","Why these areas?"].
 
 Output STRICT JSON ONLY, no markdown, exactly:
-{"reply": "<your message>", "showMatches": <true|false>, "suggestions": [<string>], "criteria": {"city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
+{"reply": "<your message>", "showMatches": <true|false>, "suggestions": [<string>], "criteria": {"city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
 
 const ADVISOR_PROMPT = `${DOCTRINE}
 
@@ -376,6 +398,9 @@ HOW TO BUILD IT:
     dislike — or to a hard fact in the match JSON. Never a criterion they never
     raised. Never an invented average, comp or distance you weren't handed;
     if you don't have the minutes, say "close to Ikoyi", not "12 minutes".
+    When kmFromAnchor is present it is measured and belongs in the line —
+    "1.4 km from Bodija". Kilometres, never minutes: it is straight-line
+    distance and you have no travel time for it.
   • ORDER IS THE JUDGEMENT. The first clause is the one that matters most to
     THIS person — the thing they pushed hardest on, or the criterion this home
     wins on. That is still your job here; you are just doing it in their words
@@ -590,11 +615,20 @@ the one they asked for.`
           dream_board: dreamNote ? dreamNote.content : null,
           search_note: found.note,
           conversation_tail: messages.slice(-4),
+          /* The place they are measuring from, so the prose can name it. */
+          anchor: criteria.anchor ?? null,
           matches: matches.map((m) => ({
             id: m.id, title: m.title, deal: m.listingType, pricePeriod: m.pricePeriod,
             price: m.price, bedrooms: m.bedrooms, city: m.city,
             trustScore: m.trustScore, yieldPct: m.yieldPct, whatToWatch: m.whatToWatch,
             neighbourhood: m.neighbourhood, room: m.room ?? null,
+            /* THE NUMBER THAT WAS MISSING. Every match carried latitude and
+               longitude and this payload dropped both, so the advisor pass was
+               handed an area name and asked to reason about proximity with it.
+               Straight-line km from the anchor, measured. Absent when no
+               anchor was named or it could not be placed -- and absent means
+               say nothing, never estimate. */
+            kmFromAnchor: m.kmFromAnchor ?? null,
           })),
         });
         const second = await claude(key, ADVISOR_PROMPT, [{ role: 'user', content: advisorInput }], 900);
@@ -680,6 +714,9 @@ async function saveSession(visitorId: string, messages: Msg[], criteria?: unknow
 // ── matches from the digital twin ──
 interface Criteria {
   city?: string | null;
+  /* The place they want to be near, in their own words. Resolved to a
+     coordinate by resolveAnchor() and never used as text for matching. */
+  anchor?: string | null;
   dealType?: string | null;   // rent | buy | shared
   maxPrice?: number | null;   // annual rent when renting, total price when buying
   minBedrooms?: number | null;
@@ -709,6 +746,8 @@ interface Match {
    *  specific and wrong. */
   latitude: number | null;
   longitude: number | null;
+  /* Straight-line km from the anchor, when one was named and placed. */
+  kmFromAnchor?: number | null;
   /** Where this listing stands with the checks. Tayo shows matches regardless
    *  and states this per card, so the buyer chooses what risk to accept. */
   verificationStatus: string;   // unverified | in_progress | verified
@@ -863,6 +902,76 @@ const countListings = () => countBy(freshLiveConds());
 /** The checked subset. Reported alongside, never used to restrict matches. */
 const countVerifiedListings = () => countBy(verifiedFreshConds());
 
+/* ── WHERE THEY WANT TO BE ───────────────────────────────────────────────
+   Tayo was refusing to rank homes by how close they are to somewhere, and
+   telling people he holds no route or distance data. The first half was
+   false: every property carries a surveyed lat/lon behind a GiST index, so
+   the distance from any point to all 507 of them is arithmetic. What was
+   actually missing was the point -- nothing ever turned "close to Bodija"
+   into a coordinate, and the matches handed to the advisor carried a
+   neighbourhood NAME and nothing spatial. He was being truthful about a gap
+   that was ours, not the data's.
+
+   Two sources, best first:
+
+   1. A surveyed neighbourhood. Exact, and it is a real place with a real
+      name we can quote back.
+
+   2. Failing that, our own listings. If forty homes have "Bodija" in their
+      address, the middle of those forty IS the Bodija we know about. It is a
+      cluster centre rather than a survey point, which is why what gets said
+      out loud is "from Bodija" and never a precise distance to a doorstep --
+      and it has the property that it works exactly where we have inventory,
+      which is the only place the answer matters.
+
+   Anything we cannot place returns null, and Tayo asks rather than guesses.
+   No geocoding service: a wrong pin here silently mis-ranks every result. */
+interface Anchor { name: string; lat: number; lng: number; source: string; }
+
+async function resolveAnchor(term?: string | null, city?: string | null): Promise<Anchor | null> {
+  const s = sb();
+  const t = (term ?? '').trim();
+  if (!s || !t) return null;
+
+  const nr = await fetch(
+    `${s.url}/rest/v1/neighbourhoods?select=name,lat,lon&name=ilike.*${encodeURIComponent(t)}*&limit=1`,
+    { headers: s.headers },
+  ).catch(() => null);
+  if (nr && nr.ok) {
+    const rows = (await nr.json()) as Array<Record<string, unknown>>;
+    const r = rows[0];
+    if (r && r.lat != null && r.lon != null) {
+      return { name: String(r.name ?? t), lat: Number(r.lat), lng: Number(r.lon), source: 'neighbourhood' };
+    }
+  }
+
+  const conds = [
+    `address=ilike.*${encodeURIComponent(t)}*`,
+    'latitude=not.is.null', 'longitude=not.is.null',
+  ];
+  if (city && city.trim()) conds.push(`city=ilike.*${encodeURIComponent(city.trim())}*`);
+  const pr = await fetch(
+    `${s.url}/rest/v1/properties?select=latitude,longitude&${conds.join('&')}&limit=60`,
+    { headers: s.headers },
+  ).catch(() => null);
+  if (!pr || !pr.ok) return null;
+  const rows = (await pr.json()) as Array<Record<string, unknown>>;
+  if (!rows.length) return null;
+  const lat = rows.reduce((a, r) => a + Number(r.latitude), 0) / rows.length;
+  const lng = rows.reduce((a, r) => a + Number(r.longitude), 0) / rows.length;
+  if (!isFinite(lat) || !isFinite(lng)) return null;
+  return { name: t, lat, lng, source: 'listings' };
+}
+
+/** Straight-line kilometres. Not road distance, and never described as time. */
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (bLat - aLat) * rad, dLng = (bLng - aLng) * rad;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(aLat * rad) * Math.cos(bLat * rad) * Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)) * 10) / 10;
+}
+
 /** Live listings + enrichment + the neighbourhood NAME. */
 async function fetchMatches(c: Criteria): Promise<Match[]> {
   const s = sb();
@@ -906,16 +1015,30 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
     // reasons the agency could never see. Enrichment enhances a match; its
     // absence must not delete one.
     `property_enrichment(${fitCol},rental_yield_estimate_pct,who_this_suits,what_to_watch,toju_summary)`;
+  /* WITH AN ANCHOR, PROXIMITY IS THE RANKING. Take a wide candidate set and
+     sort it by real distance rather than asking the database for four rows in
+     an order that has nothing to do with where they want to live.
+
+     Worth knowing what the default order actually does today: it leads on
+     property_enrichment(fit), and that table has no rows in it at all, so
+     every row sorts null and the whole thing collapses to trust_score. The
+     "fit score" ranking is not ranking anything yet. Distance is the first
+     signal here that is both present and asked for. */
+  const anchor = await resolveAnchor(c.anchor, c.city);
+  const wanted = anchor ? 60 : MAX_MATCHES;
   const q =
     `${s.url}/rest/v1/properties?select=${select}&${conds.join('&')}` +
-    `&order=property_enrichment(${fitCol}).desc.nullslast,trust_score.desc&limit=${MAX_MATCHES}`;
+    `&order=property_enrichment(${fitCol}).desc.nullslast,trust_score.desc&limit=${wanted}`;
 
   const res = await fetch(q, { headers: s.headers });
   if (!res.ok) return [];
   const rows = (await res.json()) as Array<Record<string, unknown>>;
   if (!Array.isArray(rows)) return [];
 
-  return rows.map((r) => {
+  /* Annotated, not inferred. The literal below does not set kmFromAnchor,
+     so an inferred type would not have the property and assigning it a few
+     lines later would not compile. */
+  const built: Match[] = rows.map((r) => {
     const ag = (r.agencies ?? {}) as { name?: string; verification_tier?: string };
     const e = (r.property_enrichment ?? {}) as Record<string, unknown>;
     const n = (r.neighbourhoods ?? null) as Record<string, unknown> | null;
@@ -957,6 +1080,23 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       } : null,
     };
   });
+
+  /* No anchor: the order the database gave us stands, trimmed to size.
+     With one: measure every candidate, drop the ones we cannot measure (a
+     home with no coordinates cannot be ranked on distance and must not be
+     silently treated as far away), nearest first, then trim. */
+  if (!anchor) return built.slice(0, MAX_MATCHES);
+
+  const placed = built.filter((m) => m.latitude != null && m.longitude != null);
+  const unplaced = built.filter((m) => m.latitude == null || m.longitude == null);
+  placed.forEach((m) => {
+    m.kmFromAnchor = haversineKm(anchor.lat, anchor.lng, m.latitude as number, m.longitude as number);
+  });
+  placed.sort((a, b) => (a.kmFromAnchor as number) - (b.kmFromAnchor as number));
+  /* Unplaced homes go last rather than away: they still match the brief, and
+     dropping a listing because an agency skipped a map pin would hide it for
+     a reason the buyer never asked about. */
+  return placed.concat(unplaced).slice(0, MAX_MATCHES);
 }
 
 /** Pull a named string field out of truncated/broken JSON. */
