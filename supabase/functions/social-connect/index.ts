@@ -35,7 +35,11 @@
  * Authentication moved into the function; it was not removed.
  *
  * Secrets required (set in Supabase, never in this file):
- *   META_APP_ID, META_APP_SECRET, META_REDIRECT_URI, PORTAL_URL (optional)
+ *   META_APP_ID, META_APP_SECRET, PORTAL_URL (optional)
+ *   META_FB_CONFIG_ID (optional) -- set this when the Meta app is on
+ *   "Facebook Login for Business" rather than classic Facebook Login. What it
+ *   changes is documented at the dialog construction in the start branch.
+ *   The redirect is NOT a secret -- see the derivation in the handler.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -192,6 +196,26 @@ async function finishFacebook(
      when there are several, the portal is told so it can say which one. */
   const page = usable[0];
 
+  /* What Meta ACTUALLY granted, rather than what this file asked for.
+     Under a configuration the permissions are chosen in the Meta console, so
+     FB_SCOPES stops describing reality altogether. And even in classic mode
+     the operator can untick individual permissions in the dialog -- the
+     constant was always a request, never a result.
+
+     Nothing gates on the stored list today, so this is a record rather than a
+     check, and it must never cost a working connection: every failure path
+     here falls back to the requested list and says so in the log. */
+  let grantedScopes: string[] = FB_SCOPES;
+  const permRes = await fetch(
+    `${G}/me/permissions?access_token=${encodeURIComponent(userToken)}`,
+  ).catch(() => null);
+  const perms = permRes && permRes.ok ? await permRes.json().catch(() => null) : null;
+  const granted = ((perms?.data ?? []) as Array<{ permission: string; status: string }>)
+    .filter((p) => p.status === 'granted')
+    .map((p) => p.permission);
+  if (granted.length) grantedScopes = granted;
+  else console.warn('social-connect: could not read granted permissions; recording the requested list');
+
   const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
   const { error: connErr } = await admin.rpc('connect_social_account', {
     p_agency_id: claims.agency_id as string,
@@ -203,7 +227,7 @@ async function finishFacebook(
     // Deliberately null: a Page token from a long-lived user token has no
     // expiry, and a fabricated one would show as an expired session.
     p_expires_at: null,
-    p_scopes: FB_SCOPES,
+    p_scopes: grantedScopes,
     p_connected_by: claims.profile_id as string,
   });
   if (connErr) return backToPortal('error', connErr.message);
@@ -249,6 +273,12 @@ Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const appId = Deno.env.get('META_APP_ID') ?? '';
   const appSecret = Deno.env.get('META_APP_SECRET') ?? '';
+  /* Facebook only, and optional. Empty means classic Facebook Login. Set means
+     the app is on Facebook Login for Business, where a configuration -- not a
+     scope list -- decides what is asked for. Not a secret: it travels in the
+     dialog URL in plain sight. It sits with the secrets because it is the same
+     kind of thing, a per-app value this code cannot derive for itself. */
+  const fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
   /* Both spellings are still read below. META_REDIRECT_URI is canonical;
      META_REDIRECT_URL is what Meta's own console calls "Valid OAuth Redirect
      URIs" while every human says URL, and that one letter once cost about two
@@ -373,10 +403,48 @@ Deno.serve(async (req: Request) => {
       auth.searchParams.set('client_id', appId);
       auth.searchParams.set('redirect_uri', redirectUri);
       auth.searchParams.set('response_type', 'code');
-      auth.searchParams.set('scope', scopes.join(','));
+
+      /* -- FACEBOOK LOGIN FOR BUSINESS ------------------------------------
+         Meta ships two products both called Facebook Login and they take
+         different dialog parameters. Classic Login is driven by `scope`.
+         Login for Business is driven by a `config_id` naming a configuration
+         built in the app console, and Meta's guidance is explicit that scope
+         should NOT be sent with it -- the configuration decides the
+         permissions, so a scope list is at best redundant and at worst
+         fighting the configuration.
+
+         `override_default_response_type` is the half that is easy to miss. A
+         configuration carries its own default response type. Without this
+         flag the `response_type=code` set above is discarded in favour of
+         that default, which can hand back a token in the URL FRAGMENT rather
+         than a code in the query. A fragment is never sent to the server, so
+         the callback would arrive with nothing to exchange -- failing in
+         exactly the silent way the rest of this file exists to prevent. Meta
+         documents the flag as required whenever response_type is passed
+         alongside a config_id.
+
+         Unset, everything below behaves as it did: classic Login, scope list.
+         Instagram is untouched either way -- config_id is a Facebook Login
+         concept and the Instagram dialog does not accept it. */
+      const usingConfig = platform === 'facebook' && !!fbConfigId;
+      if (usingConfig) {
+        auth.searchParams.set('config_id', fbConfigId);
+        auth.searchParams.set('override_default_response_type', 'true');
+      } else {
+        auth.searchParams.set('scope', scopes.join(','));
+      }
       auth.searchParams.set('state', state);
 
-      return json({ url: auth.toString(), platform, scopes, expiresInMinutes: STATE_TTL_MS / 60000 });
+      /* `mode` is reported because the two products fail identically from the
+         portal's side -- you come back with nothing connected -- and which
+         dialog was actually built is the first thing worth knowing. */
+      return json({
+        url: auth.toString(),
+        platform,
+        mode: usingConfig ? 'login-for-business' : 'classic',
+        ...(usingConfig ? { configId: fbConfigId } : { scopes }),
+        expiresInMinutes: STATE_TTL_MS / 60000,
+      });
     }
 
     /* ── step 2: the callback ─────────────────────────────────────────────── */
