@@ -301,7 +301,27 @@ Deno.serve(async (req: Request) => {
      custom domain -- but a value that does not point back here is ignored
      rather than obeyed, because obeying it cannot work. The disagreement is
      logged rather than swallowed, so this is visible instead of mysterious. */
-  const derivedRedirect = url.origin + '/functions/v1/social-connect';
+  /* THE SCHEME IN url.origin IS A LIE HERE, AND IT COST A LOGIN.
+     TLS terminates at Supabase's gateway, so the request this function
+     actually receives is plain http and `url.origin` reads
+     http://<ref>.supabase.co -- correct about the host, wrong about the
+     scheme, and the scheme is the half Meta checks.
+
+     Deriving from it handed Facebook an http:// redirect_uri and produced
+     "Facebook has detected that this app isn't using a secure connection to
+     transfer information", which is a dead end with an OK button -- no code,
+     no callback, nothing in the logs but a 200 on ?action=start. Worse, the
+     derivation ALSO out-voted a META_REDIRECT_URI that was set correctly to
+     the https URL, on the grounds that it disagreed with "reality". It was
+     right and this was wrong.
+
+     So the host is taken from the request, which is the part it knows, and
+     the scheme is asserted rather than read: these functions are only ever
+     reachable over https in production. Localhost keeps http, because a
+     local runtime genuinely is http and there is no gateway in front of it. */
+  const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(url.host);
+  const derivedRedirect = (isLocalHost ? 'http://' : 'https://')
+    + url.host + '/functions/v1/social-connect';
   const configuredRedirect = (Deno.env.get('META_REDIRECT_URI')
     || Deno.env.get('META_REDIRECT_URL')
     || '').trim().replace(/\/+$/, '');
@@ -437,11 +457,14 @@ Deno.serve(async (req: Request) => {
 
       /* `mode` is reported because the two products fail identically from the
          portal's side -- you come back with nothing connected -- and which
-         dialog was actually built is the first thing worth knowing. */
+         dialog was actually built is the first thing worth knowing.
+         `redirectUri` is reported for the same reason: it was wrong once, in
+         a way nothing downstream could see. */
       return json({
         url: auth.toString(),
         platform,
         mode: usingConfig ? 'login-for-business' : 'classic',
+        redirectUri,
         ...(usingConfig ? { configId: fbConfigId } : { scopes }),
         expiresInMinutes: STATE_TTL_MS / 60000,
       });
