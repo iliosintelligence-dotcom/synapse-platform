@@ -185,7 +185,11 @@ async function finishFacebook(
   if (!usable.length) {
     /* Granting the permission without ticking a Page is the single most common
        way this flow ends with nothing connected, and Meta reports it as an
-       empty list rather than an error. Say what to do about it. */
+       empty list rather than an error. Say what to do about it, and say in
+       the log how many came back at all -- an empty list and a list of Pages
+       with no tokens are different problems wearing the same symptom. */
+    console.error('social-connect: /me/accounts returned ' + list.length
+      + ' page(s), ' + usable.length + ' with a token');
     return backToPortal('error',
       'No Facebook Page came back. Connect again and tick the Page you post from '
       + '-- you need to be an admin of it.');
@@ -260,6 +264,16 @@ function backToPortal(status: string, detail?: string): Response {
      is not a reasonable thing to ship. */
   const portal = Deno.env.get('PORTAL_URL')
     || 'https://www.synapsecore.dev/app/agency.html';
+  /* SAY IT IN THE LOG AS WELL AS THE URL.
+     Every failure on this leg used to exist in exactly one place: the
+     `detail` parameter of a 302, which is visible only to the person holding
+     the browser, as a toast that disappears. From the outside the callback
+     was a 302 and nothing else -- indistinguishable from success, and it was
+     read as success more than once today. The redirect stays; it is how the
+     operator is told. This is how anyone reading the logs is told. */
+  if (status === 'error') console.error('social-connect failed: ' + (detail ?? 'no detail'));
+  else console.log('social-connect ' + status + ': ' + (detail ?? ''));
+
   const u = new URL(portal, 'https://placeholder.invalid');
   u.searchParams.set('connected', status);
   if (detail) u.searchParams.set('detail', detail.slice(0, 180));
@@ -460,6 +474,10 @@ Deno.serve(async (req: Request) => {
          dialog was actually built is the first thing worth knowing.
          `redirectUri` is reported for the same reason: it was wrong once, in
          a way nothing downstream could see. */
+      console.log('social-connect start: platform=' + platform
+        + ' mode=' + (usingConfig ? 'login-for-business' : 'classic')
+        + ' redirect=' + redirectUri);
+
       return json({
         url: auth.toString(),
         platform,
