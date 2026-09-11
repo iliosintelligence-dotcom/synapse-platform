@@ -249,23 +249,39 @@ Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const appId = Deno.env.get('META_APP_ID') ?? '';
   const appSecret = Deno.env.get('META_APP_SECRET') ?? '';
-  /* BOTH SPELLINGS, ON PURPOSE.
-     This cost roughly two weeks. The variable has always been read as
-     META_REDIRECT_URI here, and was set in Supabase as META_REDIRECT_URL --
-     which is what everyone calls it out loud, and what Meta's own console
-     labels "Valid OAuth Redirect URIs" while every human says URL. The
-     function reported it as unset, which was true of the name it looked for
-     and false of the thing the operator had actually done, so the debugging
-     went looking for a missing value that was sitting right there under one
-     letter's difference.
+  /* Both spellings are still read below. META_REDIRECT_URI is canonical;
+     META_REDIRECT_URL is what Meta's own console calls "Valid OAuth Redirect
+     URIs" while every human says URL, and that one letter once cost about two
+     weeks of looking for a value that was already set. */
+  /* ── THE REDIRECT IS NOT A SETTING. IT IS THIS FUNCTION'S OWN ADDRESS ──
+     OAuth sends the browser back to redirect_uri with ?code=..., and the
+     only endpoint that can do anything with that code is this one. So there
+     is exactly one correct value, this function knows it without being told,
+     and every other value is broken by construction.
 
-     Accepting both is not sloppiness. The canonical name is still URI and is
-     still preferred; URL is accepted because it is the name a reasonable
-     person types, and a config system that punishes that with a silent 503 is
-     the thing at fault, not the person. */
-  const redirectUri = Deno.env.get('META_REDIRECT_URI')
+     It had been set to the portal. Meta honoured it, the browser went
+     straight back to the agency portal with a code nothing was listening
+     for, and the connection silently did nothing -- reported as "it takes me
+     to Facebook, I put in the code, and it just brings me back to the app".
+     The logs showed it exactly: action=start returning 200 and then no
+     callback to this function, ever.
+
+     Deriving it removes the whole class of failure. The env var is still
+     honoured when it agrees with reality -- an operator may need it for a
+     custom domain -- but a value that does not point back here is ignored
+     rather than obeyed, because obeying it cannot work. The disagreement is
+     logged rather than swallowed, so this is visible instead of mysterious. */
+  const derivedRedirect = url.origin + '/functions/v1/social-connect';
+  const configuredRedirect = (Deno.env.get('META_REDIRECT_URI')
     || Deno.env.get('META_REDIRECT_URL')
-    || '';
+    || '').trim().replace(/\/+$/, '');
+  const redirectUri = configuredRedirect === derivedRedirect
+    ? configuredRedirect
+    : derivedRedirect;
+  if (configuredRedirect && configuredRedirect !== derivedRedirect) {
+    console.warn('social-connect: ignoring META_REDIRECT_URI (' + configuredRedirect
+      + ') because the OAuth code can only be exchanged here; using ' + derivedRedirect);
+  }
 
   try {
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
@@ -291,19 +307,20 @@ Deno.serve(async (req: Request) => {
          because the callback leg needs it even though this guard does not, so
          a half-configured app fails here rather than silently later, after the
          person has already been sent to Meta and back. */
+      /* The redirect is no longer on this list: it is derived above and
+         cannot be missing. Only the two real secrets can be. */
       const missing = [
         !appId && 'META_APP_ID',
         !appSecret && 'META_APP_SECRET',
-        !redirectUri && 'META_REDIRECT_URI (or META_REDIRECT_URL)',
       ].filter(Boolean) as string[];
       if (missing.length) {
         return json({
           error: 'Meta is not configured on this project yet. Missing: ' + missing.join(', ') + '.',
           missing,
           hint: 'Set these on the synapse-platform project (bhrhejpekmhbhwryjhgk). '
-              + 'The redirect is read from META_REDIRECT_URI or META_REDIRECT_URL '
-              + '(either spelling works) and must be exactly '
-              + 'https://bhrhejpekmhbhwryjhgk.supabase.co/functions/v1/social-connect',
+              + 'The redirect no longer needs setting -- it is this function. '
+              + 'Meta must still allow it: add ' + derivedRedirect
+              + ' to Valid OAuth Redirect URIs on the Meta app.',
         }, 503);
       }
 
