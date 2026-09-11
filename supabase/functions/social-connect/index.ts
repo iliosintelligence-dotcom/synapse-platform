@@ -154,7 +154,16 @@ async function finishFacebook(
   );
   const tok = await tokRes.json().catch(() => ({}));
   if (!tokRes.ok || !tok.access_token) {
-    return backToPortal('error', tok?.error?.message ?? 'Facebook would not issue a token.');
+    /* "Error validating client secret" is Meta saying META_APP_SECRET does not
+       belong to META_APP_ID. Neither value is ever logged -- one is a secret
+       and the other identifies it -- but their SHAPE is not sensitive, and it
+       is exactly what separates "wrong secret" from "empty secret" from "the
+       secret of a different app". Two lengths tell those apart without
+       printing either value. */
+    const why = tok?.error?.message ?? 'Facebook would not issue a token.';
+    console.error('social-connect: token exchange rejected -- ' + why
+      + ' [app_id length ' + appId.length + ', secret length ' + appSecret.length + ']');
+    return backToPortal('error', why);
   }
 
   /* The short-lived user token lasts about an hour. Exchanging it is what
@@ -190,9 +199,11 @@ async function finishFacebook(
        with no tokens are different problems wearing the same symptom. */
     console.error('social-connect: /me/accounts returned ' + list.length
       + ' page(s), ' + usable.length + ' with a token');
-    return backToPortal('error',
-      'No Facebook Page came back. Connect again and tick the Page you post from '
-      + '-- you need to be an admin of it.');
+    return backToPortal('error', list.length
+      ? 'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
+        + 'Reconnect and leave every permission switched on.'
+      : 'No Facebook Page came back. Reconnect and tick the Page you post from '
+        + '-- you must be an admin of it, and you need at least one Page to exist.');
   }
 
   /* One Page per agency, which is what social_accounts models (unique on
@@ -285,8 +296,14 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   const url = new URL(req.url);
-  const appId = Deno.env.get('META_APP_ID') ?? '';
-  const appSecret = Deno.env.get('META_APP_SECRET') ?? '';
+  /* TRIMMED, because a secret is pasted by a human into a web form and the
+     failure mode of one trailing newline is "Error validating client secret"
+     -- a message that accuses the value of being WRONG when it is merely
+     untidy. That is an hour of regenerating a secret that was correct all
+     along, and this file has already lost a fortnight to one variable being
+     right and the code reading it being wrong. */
+  const appId = (Deno.env.get('META_APP_ID') ?? '').trim();
+  const appSecret = (Deno.env.get('META_APP_SECRET') ?? '').trim();
   /* Facebook only, and optional. Empty means classic Facebook Login. Set means
      the app is on Facebook Login for Business, where a configuration -- not a
      scope list -- decides what is asked for. Not a secret: it travels in the
@@ -467,6 +484,22 @@ Deno.serve(async (req: Request) => {
       } else {
         auth.searchParams.set('scope', scopes.join(','));
       }
+
+      /* ASK AGAIN, EVERY TIME. Facebook remembers what you granted last time
+         and reuses it silently -- including when what you granted was NOTHING.
+         Authorise once without ticking a Page and /me/accounts returns an
+         empty list; try again and Facebook shows no picker, reuses the empty
+         grant, and returns an empty list again. Forever. There is no way out
+         of that loop from inside the product: the dialog stops asking, and
+         the error looks identical on every attempt.
+
+          makes it re-ask rather than replay. On a first
+         connect it changes nothing, and on every later one it is the
+         difference between a recoverable mistake and a dead end. Facebook is
+         a rare enough thing to connect that showing the picker each time
+         costs nothing worth keeping. */
+      if (platform === 'facebook') auth.searchParams.set('auth_type', 'rerequest');
+
       auth.searchParams.set('state', state);
 
       /* `mode` is reported because the two products fail identically from the
