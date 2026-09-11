@@ -76,7 +76,18 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
    Meta refuses the publish call without it, which is not obvious from the
    error it returns. `business_management` is deliberately NOT requested: it is
    heavily scrutinised in review and nothing here needs it. */
-const FB_SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement'];
+/* pages_manage_metadata is here for ONE reason and it is not metadata: Meta's
+   own reference for /me/accounts says that endpoint needs a user token with
+   pages_manage_metadata AND pages_show_list. Without it the call does not
+   fail -- it returns an EMPTY LIST, which is indistinguishable from "this
+   person administers no Pages" and reads as the operator's fault.
+
+   That cost an afternoon. Every permission we asked for came back granted,
+   declined was empty, the operator ticked a Page in the dialog, and
+   /me/accounts still returned nothing, because the permission that unlocks
+   the listing was never among the ones we asked for. */
+const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
+                   'pages_manage_posts', 'pages_read_engagement'];
 
 const PLATFORMS = ['instagram', 'facebook'] as const;
 type Platform = typeof PLATFORMS[number];
@@ -179,6 +190,30 @@ async function finishFacebook(
   const long = await longRes.json().catch(() => ({}));
   if (longRes.ok && long.access_token) userToken = long.access_token;
 
+  /* READ THE GRANT BEFORE USING IT, not after it has already worked.
+     This sat after the Page check, so it only ever ran on the happy path --
+     which meant the one failure we were actually stuck on, /me/accounts
+     returning nothing, told us nothing about why. And the why is usually
+     right here: that endpoint returns an EMPTY LIST, not an error, when
+     pages_show_list was not granted. Same shape as ticking no Page, same
+     message, completely different fix.
+
+     Read first, log always, decide after. */
+  let grantedScopes: string[] = FB_SCOPES;
+  const permRes = await fetch(
+    `${G}/me/permissions?access_token=${encodeURIComponent(userToken)}`,
+  ).catch(() => null);
+  const perms = permRes && permRes.ok ? await permRes.json().catch(() => null) : null;
+  const permRows = (perms?.data ?? []) as Array<{ permission: string; status: string }>;
+  const granted = permRows
+    .filter((p) => p.status === 'granted')
+    .map((p) => p.permission);
+  if (granted.length) grantedScopes = granted;
+  else console.warn('social-connect: could not read granted permissions; recording the requested list');
+  console.log('social-connect: granted = [' + grantedScopes.join(', ')
+    + '] declined = [' + permRows.filter((p) => p.status !== 'granted')
+        .map((p) => p.permission).join(', ') + ']');
+
   /* Which Pages this person administers, and the token for each. */
   const pagesRes = await fetch(
     `${G}/me/accounts?fields=id,name,access_token&limit=50`
@@ -197,6 +232,13 @@ async function finishFacebook(
        empty list rather than an error. Say what to do about it, and say in
        the log how many came back at all -- an empty list and a list of Pages
        with no tokens are different problems wearing the same symptom. */
+    if (!list.length) {
+      /* Safe to print: the list is empty, so there is no token in here. What
+         it can carry is a paging cursor or a summary block, which is the
+         difference between "you have no Pages" and "we were handed page 2". */
+      console.error('social-connect: empty /me/accounts body = '
+        + JSON.stringify(pages).slice(0, 400));
+    }
     console.error('social-connect: /me/accounts returned ' + list.length
       + ' page(s), ' + usable.length + ' with a token');
     return backToPortal('error', list.length
@@ -211,25 +253,6 @@ async function finishFacebook(
      when there are several, the portal is told so it can say which one. */
   const page = usable[0];
 
-  /* What Meta ACTUALLY granted, rather than what this file asked for.
-     Under a configuration the permissions are chosen in the Meta console, so
-     FB_SCOPES stops describing reality altogether. And even in classic mode
-     the operator can untick individual permissions in the dialog -- the
-     constant was always a request, never a result.
-
-     Nothing gates on the stored list today, so this is a record rather than a
-     check, and it must never cost a working connection: every failure path
-     here falls back to the requested list and says so in the log. */
-  let grantedScopes: string[] = FB_SCOPES;
-  const permRes = await fetch(
-    `${G}/me/permissions?access_token=${encodeURIComponent(userToken)}`,
-  ).catch(() => null);
-  const perms = permRes && permRes.ok ? await permRes.json().catch(() => null) : null;
-  const granted = ((perms?.data ?? []) as Array<{ permission: string; status: string }>)
-    .filter((p) => p.status === 'granted')
-    .map((p) => p.permission);
-  if (granted.length) grantedScopes = granted;
-  else console.warn('social-connect: could not read granted permissions; recording the requested list');
 
   const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
   const { error: connErr } = await admin.rpc('connect_social_account', {
