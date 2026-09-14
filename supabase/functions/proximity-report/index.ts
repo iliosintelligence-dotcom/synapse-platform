@@ -9,14 +9,23 @@
  *   4. sends the web push.
  *
  * ALL the judgement lives in proximity_candidates(): radius, brief matching,
- * verified-only, the 14-day freshness rule, quiet hours, the daily cap and
- * per-property de-duplication. This function deliberately re-implements none
- * of it — two copies of a notification policy is how people get buzzed at 3am
- * after someone edits one of them.
+ * the 14-day freshness rule, quiet hours, the daily cap and per-property
+ * de-duplication. This function deliberately re-implements none of it — two
+ * copies of a notification policy is how people get buzzed at 3am after
+ * someone edits one of them.
+ *
+ * THE ONE THING THIS FUNCTION OWES THE BUYER is saying whether the home has
+ * been checked. Unverified listings are no longer excluded — they are
+ * disclosed — so `is_verified` comes back on every candidate and the copy
+ * below has to reflect it. This block used to read 'A verified home, right
+ * here' unconditionally, which was survivable only while the matcher returned
+ * nothing but verified homes. The moment that gate came off, the same line
+ * became a false claim pushed to a stranger's phone, walking them to an
+ * address on the strength of it. Never reintroduce the word as a constant.
  *
  * PRIVACY. The raw fix is never stored. It is rounded to ~3 decimal places
  * (about 100m) before it touches the database, which is far finer than the
- * 1.2km default radius needs and much coarser than a movement trail. No
+ * 500m default radius needs and much coarser than a movement trail. No
  * agency can read these rows: the watch is keyed to the visitor, and the
  * agency only ever learns that someone nearby saw a listing.
  *
@@ -206,12 +215,22 @@ Deno.serve(async (req: Request) => {
     for (const c of candidates as Array<Record<string, unknown>>) {
       const propertyId = String(c.property_id);
       const distance = Math.round(Number(c.distance_m) || 0);
+      /* Strictly true or false, never truthy: an is_verified that arrived
+         undefined because somebody renamed the column must read as NOT
+         verified. The safe default for a claim is refusing to make it. */
+      const verified = c.is_verified === true;
       const payload = {
         kind: 'proximity_match',
-        title: 'A verified home, right here',
-        body: `${c.title} · ${distance}m away · verified`,
+        title: verified ? 'A verified home, right here' : 'A home right where you are',
+        /* "not yet verified" rather than "unverified": the listing is not
+           accused of anything, it simply has not been checked, and the agency
+           may still be working through it. The buyer gets the fact and draws
+           their own conclusion — the same words property.html already uses, so
+           the notification and the page they land on agree. */
+        body: `${c.title} · ${distance}m away · ${verified ? 'verified by Synapse' : 'not yet verified'}`,
         route: `/app/property.html?id=${propertyId}`,
         propertyId,
+        verified,
       };
 
       // Record first. If the send fails the row still blocks a re-send of the
