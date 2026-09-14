@@ -106,7 +106,9 @@ Deno.serve(async (req: Request) => {
         min_bedrooms: num(c.minBedrooms, 0, 20),
         // clamped: the radius decides how often somebody is interrupted, so it
         // is not something a client gets to set to 50km.
-        radius_m: num(c.radiusM, 200, 5000) ?? 1200,
+        // 500 to match the column default and the client. A fallback that
+        // disagrees with both is a third opinion nobody is reading.
+        radius_m: num(c.radiusM, 200, 5000) ?? 500,
         enabled: true,
       };
 
