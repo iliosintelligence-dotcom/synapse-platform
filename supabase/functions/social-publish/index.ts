@@ -373,20 +373,40 @@ const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
 const trypostConfigured = (): boolean => Boolean(TRYPOST_URL && TRYPOST_KEY);
 
 /* Our social_platform values -> trypost content_type.
+   Taken from GET /api/content-types, not guessed. The first version of this
+   map WAS guessed, from the <platform>_<kind> pattern, and shipped
+   'youtube_video' -- which does not exist. Two of the three inferred values
+   happened to be right, which is the problem with inferring: you cannot tell
+   which.
 
-   ONLY THREE OF THESE ARE DOCUMENTED: pinterest_pin, x_post and
-   instagram_feed appear verbatim in trypost's create-post reference. The rest
-   follow the same <platform>_<kind> pattern and are INFERRED. An inferred
-   value that is wrong is rejected by trypost with a validation error, which
-   surfaces here as a failed post with trypost's own message -- visible and
-   fixable, not a post that silently goes somewhere unintended. Correct them
-   against a live instance before trusting any one of them. */
+   THE CHOICE IS DRIVEN BY WHAT WE ACTUALLY SEND, WHICH IS PHOTOGRAPHS.
+   media_urls on a social_post comes from property_media: a listing's pictures.
+   Several platforms split their types by medium, so the right value depends on
+   the payload, not only on the platform:
+
+     tiktok      tiktok_video | tiktok_photo    -> photo, because we send images
+     youtube     youtube_short ONLY             -> no image type exists at all
+     linkedin    linkedin_post (a person)
+                 linkedin_page_post (a company) -> a page, because an agency
+                                                   posts as itself
+     x           x_post
+     instagram   instagram_feed | _reel | _story    ) native adapters, never
+     facebook    facebook_post | _reel | _story     ) routed through trypost
+
+   YOUTUBE IS DELIBERATELY ABSENT. Its only content type is a Shorts video, so
+   a listing's photographs can never be a valid YouTube post through trypost.
+   Leaving it mapped would have produced a validation failure on every single
+   attempt, three times each, before giving up. Absent, it falls through to
+   notConfigured() and says plainly that we do not publish there -- which is
+   true, and is the honest version of the same outcome.
+
+   IF VIDEO IS EVER QUEUED, tiktok must move back to tiktok_video and youtube
+   becomes possible as youtube_short. Nothing here inspects the medium yet
+   because nothing upstream produces one. */
 const TRYPOST_CONTENT_TYPE: Record<string, string> = {
-  tiktok: 'tiktok_video',       // inferred
-  linkedin: 'linkedin_post',    // inferred
-  x: 'x_post',                  // documented
-  youtube: 'youtube_video',     // inferred
-  whatsapp: '',                 // trypost does not carry WhatsApp: no route
+  tiktok: 'tiktok_photo',
+  linkedin: 'linkedin_page_post',
+  x: 'x_post',
 };
 
 /** True when this platform should go out through trypost: it is configured,
