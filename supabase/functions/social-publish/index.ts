@@ -350,15 +350,13 @@ const facebookAdapter: Adapter = async (post, conn) => {
 };
 
 /* -- trypost ----------------------------------------------------------------
-   A self-hosted trypost instance, used as a DELIVERY ROUTE for the platforms
-   this file has no native adapter for -- TikTok, LinkedIn, X, YouTube and the
-   rest. Writing and maintaining each of those against its own API is the
-   expensive, constantly-breaking part of syndication, and trypost already
-   carries twelve of them.
+   A trypost instance, used as a DELIVERY ROUTE for the platforms this file has
+   no native adapter for -- TikTok, LinkedIn, X and the rest -- and for EVERY
+   Synapse-owned channel, whatever its platform.
 
-   IT IS NOT USED FOR INSTAGRAM OR FACEBOOK, deliberately. Those adapters
-   already work, and routing them through a third party would hand somebody
-   else's codebase a live Meta token for no gain at all.
+   IT IS NOT USED FOR AN AGENCY'S INSTAGRAM OR FACEBOOK, deliberately. Those
+   adapters already work, and routing them through a third party would hand
+   somebody else's codebase a live Meta token for no gain at all.
 
    WHAT STAYS HERE. The queue, the atomic claim, the retry ladder, dry_run, and
    the short link minted into the caption by queue_social_post are all ours and
@@ -367,11 +365,11 @@ const facebookAdapter: Adapter = async (post, conn) => {
    a separate service reached over HTTP, not a library linked into this one.
    trypost is AGPL-3.0 and that distinction is doing real work.
 
-   THE ACCOUNT LIVES IN TRYPOST, NOT HERE. social_accounts still holds the row
-   that says this agency has a TikTok -- platform_account_id carries trypost's
-   social_account_id for it -- but there is NO OAuth token on our side for
-   these platforms, and loadConnections deliberately does not ask for one. We
-   cannot leak a token we were never given. */
+   THE ACCOUNT LIVES IN TRYPOST, NOT HERE. For an agency platform,
+   social_accounts.platform_account_id carries trypost's social_account_id; for
+   a Synapse channel it is synapse_channels.trypost_account_id. Either way
+   there is NO OAuth token on our side, and loadConnections deliberately does
+   not ask for one. We cannot leak a token we were never given. */
 const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
 const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
 const trypostConfigured = (): boolean => Boolean(TRYPOST_URL && TRYPOST_KEY);
@@ -421,8 +419,9 @@ const TRYPOST_CONTENT_TYPE: Record<string, string> = {
   facebook: 'facebook_post',
 };
 
-/** True when this platform should go out through trypost: it is configured,
- *  we have no native adapter, and trypost has a content type for it. */
+/** True when this platform should go out through trypost ON THE AGENCY LEG:
+ *  it is configured, we have no native adapter, and trypost has a content type
+ *  for it. The Synapse leg does not ask this -- see adapterFor. */
 function viaTrypost(platform: string): boolean {
   if (!trypostConfigured()) return false;
   if (NATIVE_ADAPTERS[platform]) return false;
@@ -435,6 +434,7 @@ const trypostAdapter: Adapter = async (post, conn) => {
   const payload = {
     ...buildPayload(post),
     via: 'trypost',
+    leg: post.leg,
     content_type: contentType,
     social_account_id: accountId,
     host: TRYPOST_URL,
@@ -445,9 +445,12 @@ const trypostAdapter: Adapter = async (post, conn) => {
   if (!trypostConfigured()) return fail('trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY.');
   if (!contentType) return fail('trypost has no content type for ' + post.platform + '.');
   if (!accountId) {
-    return fail('No trypost account is mapped for ' + post.platform
-      + '. Connect it inside trypost, then put its social_account_id in '
-      + 'social_accounts.platform_account_id for this agency.');
+    return fail(post.leg === 'synapse'
+      ? 'Synapse has no trypost account id for ' + post.platform
+        + '. Add it to synapse_channels.'
+      : 'No trypost account is mapped for ' + post.platform
+        + '. Connect it inside trypost, then put its social_account_id in '
+        + 'social_accounts.platform_account_id for this agency.');
   }
 
   const headers = {
@@ -514,8 +517,9 @@ const trypostAdapter: Adapter = async (post, conn) => {
   };
 };
 
-/* Platforms this file publishes itself. Kept separate from the lookup below
-   so viaTrypost() has something to ask, and so "native" is stated once. */
+/* Platforms this file publishes itself, for an AGENCY. Kept separate from the
+   lookup below so viaTrypost() has something to ask, and so "native" is stated
+   once. */
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
@@ -771,12 +775,8 @@ Deno.serve(async (req: Request) => {
       /* No connected account is a different failure from a platform we cannot
          publish to at all, and it is the one the agency can fix themselves. It
          is reported without an attempt, so a missing connection never burns a
-         retry or waits out a backoff. */
-      /* viaTrypost is included so a TikTok row with no mapped account is
-         reported without an attempt, exactly like a missing Instagram
-         connection -- otherwise it would reach the adapter, fail there, and
-         burn one of its three attempts on something only the agency can
-         fix. */
+         retry or waits out a backoff. viaTrypost and the synapse leg are
+         included for the same reason. */
       const needsAccount = post.leg === 'synapse'
         || Boolean(NATIVE_ADAPTERS[post.platform])
         || viaTrypost(post.platform);
@@ -809,7 +809,7 @@ Deno.serve(async (req: Request) => {
           .eq('id', post.id);
         published++;
         results.push({
-          id: post.id, platform: post.platform, status: 'published',
+          id: post.id, platform: post.platform, leg: post.leg, status: 'published',
           provider: result.provider, dryRun: post.dry_run, postId: result.postId,
         });
         continue;
@@ -835,7 +835,7 @@ Deno.serve(async (req: Request) => {
 
       failed++;
       results.push({
-        id: post.id, platform: post.platform,
+        id: post.id, platform: post.platform, leg: post.leg,
         status: exhausted ? 'failed' : 'scheduled',
         provider: result.provider, error: result.error,
       });
