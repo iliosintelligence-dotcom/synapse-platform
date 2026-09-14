@@ -345,13 +345,153 @@ const facebookAdapter: Adapter = async (post, conn) => {
   }
 };
 
-const ADAPTERS: Record<string, Adapter> = {
-  mock: mockAdapter,
+/* -- trypost ----------------------------------------------------------------
+   A self-hosted trypost instance, used as a DELIVERY ROUTE for the platforms
+   this file has no native adapter for -- TikTok, LinkedIn, X, YouTube and the
+   rest. Writing and maintaining each of those against its own API is the
+   expensive, constantly-breaking part of syndication, and trypost already
+   carries twelve of them.
+
+   IT IS NOT USED FOR INSTAGRAM OR FACEBOOK, deliberately. Those adapters
+   already work, and routing them through a third party would hand somebody
+   else's codebase a live Meta token for no gain at all.
+
+   WHAT STAYS HERE. The queue, the atomic claim, the retry ladder, dry_run, and
+   the short link minted into the caption by queue_social_post are all ours and
+   all unchanged. trypost receives a finished caption and posts it. It is the
+   last mile, not the pipeline -- which is also what keeps it at arm's length:
+   a separate service reached over HTTP, not a library linked into this one.
+   trypost is AGPL-3.0 and that distinction is doing real work.
+
+   THE ACCOUNT LIVES IN TRYPOST, NOT HERE. social_accounts still holds the row
+   that says this agency has a TikTok -- platform_account_id carries trypost's
+   social_account_id for it -- but there is NO OAuth token on our side for
+   these platforms, and loadConnections deliberately does not ask for one. We
+   cannot leak a token we were never given. */
+const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
+const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
+const trypostConfigured = (): boolean => Boolean(TRYPOST_URL && TRYPOST_KEY);
+
+/* Our social_platform values -> trypost content_type.
+
+   ONLY THREE OF THESE ARE DOCUMENTED: pinterest_pin, x_post and
+   instagram_feed appear verbatim in trypost's create-post reference. The rest
+   follow the same <platform>_<kind> pattern and are INFERRED. An inferred
+   value that is wrong is rejected by trypost with a validation error, which
+   surfaces here as a failed post with trypost's own message -- visible and
+   fixable, not a post that silently goes somewhere unintended. Correct them
+   against a live instance before trusting any one of them. */
+const TRYPOST_CONTENT_TYPE: Record<string, string> = {
+  tiktok: 'tiktok_video',       // inferred
+  linkedin: 'linkedin_post',    // inferred
+  x: 'x_post',                  // documented
+  youtube: 'youtube_video',     // inferred
+  whatsapp: '',                 // trypost does not carry WhatsApp: no route
+};
+
+/** True when this platform should go out through trypost: it is configured,
+ *  we have no native adapter, and trypost has a content type for it. */
+function viaTrypost(platform: string): boolean {
+  if (!trypostConfigured()) return false;
+  if (NATIVE_ADAPTERS[platform]) return false;
+  return Boolean(TRYPOST_CONTENT_TYPE[platform]);
+}
+
+const trypostAdapter: Adapter = async (post, conn) => {
+  const contentType = TRYPOST_CONTENT_TYPE[post.platform] ?? '';
+  const accountId = conn.platformAccountId ?? '';
+  const payload = {
+    ...buildPayload(post),
+    via: 'trypost',
+    content_type: contentType,
+    social_account_id: accountId,
+    host: TRYPOST_URL,
+  };
+  const fail = (error: string) =>
+    ({ ok: false, postId: null, provider: 'trypost', error, payload } as PublishResult);
+
+  if (!trypostConfigured()) return fail('trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY.');
+  if (!contentType) return fail('trypost has no content type for ' + post.platform + '.');
+  if (!accountId) {
+    return fail('No trypost account is mapped for ' + post.platform
+      + '. Connect it inside trypost, then put its social_account_id in '
+      + 'social_accounts.platform_account_id for this agency.');
+  }
+
+  const headers = {
+    Authorization: 'Bearer ' + TRYPOST_KEY,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+
+  /* TWO CALLS, because trypost creates a draft and publishes it separately.
+     POST /api/posts returns 201 with a draft; PUT /api/posts/{id} with
+     status 'publishing' is what actually sends it. */
+  let draftId = '';
+  try {
+    const res = await fetch(TRYPOST_URL + '/api/posts', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        platforms: [{ social_account_id: accountId, content_type: contentType }],
+        content: post.caption ?? '',
+        media: post.media_urls.map((url) => ({ url })),
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    draftId = String((body as Record<string, unknown>)?.id ?? '');
+    if (!res.ok || !draftId) {
+      return fail('trypost refused the draft (HTTP ' + res.status + '): '
+        + JSON.stringify(body).slice(0, 300));
+    }
+  } catch (e) {
+    return fail('trypost unreachable while creating the draft: '
+      + (e instanceof Error ? e.message : String(e)));
+  }
+
+  try {
+    const res = await fetch(TRYPOST_URL + '/api/posts/' + encodeURIComponent(draftId), {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ status: 'publishing' }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      /* THE HALF-DONE STATE, NAMED. The draft exists in trypost and did not
+         go out. Retrying this row creates a SECOND draft rather than
+         resuming this one, so the message says where the first is: somebody
+         has to publish it or delete it there. Silently retrying is how an
+         agency ends up posting the same listing twice. */
+      return fail('trypost created draft ' + draftId + ' but would not publish it (HTTP '
+        + res.status + '): ' + body.slice(0, 240)
+        + ' -- the draft is still in trypost; publish or delete it there, because a retry '
+        + 'here will create another one.');
+    }
+  } catch (e) {
+    return fail('trypost created draft ' + draftId + ' but the publish call failed: '
+      + (e instanceof Error ? e.message : String(e))
+      + ' -- the draft is still in trypost; a retry here will create another one.');
+  }
+
+  return {
+    ok: true,
+    postId: draftId,
+    provider: 'trypost',
+    error: '',
+    payload: { ...payload, dispatched: true, trypost_post_id: draftId },
+  };
+};
+
+/* Platforms this file publishes itself. Kept separate from the lookup below
+   so viaTrypost() has something to ask, and so "native" is stated once. */
+const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
-  tiktok: notConfigured('TikTok'),
-  linkedin: notConfigured('LinkedIn'),
-  x: notConfigured('X'),
+};
+
+const ADAPTERS: Record<string, Adapter> = {
+  mock: mockAdapter,
+  ...NATIVE_ADAPTERS,
 };
 
 /** No connection for this platform. Distinct from "not implemented": the
@@ -361,10 +501,17 @@ function notConnected(platform: string): string {
 }
 
 /** A dry run always goes to the mock, whatever the platform -- that is what
- *  makes it a rehearsal. */
+ *  makes it a rehearsal.
+ *
+ *  Order after that: our own adapter, then trypost, then an honest refusal.
+ *  Native first is the point -- trypost is the fallback for what we have not
+ *  written, never a replacement for what works. */
 function adapterFor(post: QueuedPost, live: boolean): Adapter {
   if (post.dry_run || !live) return ADAPTERS.mock;
-  return ADAPTERS[post.platform] ?? notConfigured(post.platform);
+  const native = NATIVE_ADAPTERS[post.platform];
+  if (native) return native;
+  if (viaTrypost(post.platform)) return trypostAdapter;
+  return notConfigured(post.platform);
 }
 
 /** Stands in for a Connection when the batch is a rehearsal. The mock never
@@ -398,13 +545,23 @@ async function loadConnections(
     .is('deleted_at', null);
 
   for (const a of (accounts ?? []) as Array<Record<string, string>>) {
-    const { data: token } = await admin.rpc('social_account_token', { p_account_id: a.id });
-    if (!token) continue;   // connected but revoked: treated as not connected
+    /* NO TOKEN IS DECRYPTED FOR A TRYPOST PLATFORM, and there is none to
+       decrypt: trypost holds that OAuth grant, not us. The row here exists
+       only to say the agency has the account and to carry trypost's
+       social_account_id for it. Asking social_account_token for one would
+       return nothing and skip the row, which is how these would have looked
+       "not connected" forever. */
+    let token = '';
+    if (!viaTrypost(a.platform)) {
+      const { data } = await admin.rpc('social_account_token', { p_account_id: a.id });
+      if (!data) continue;  // connected but revoked: treated as not connected
+      token = data as unknown as string;
+    }
     out[a.platform] = {
       accountId: a.id,
       platformAccountId: a.platform_account_id,
       username: a.platform_username,
-      token: token as unknown as string,
+      token,
     };
   }
   return out;
@@ -523,7 +680,13 @@ Deno.serve(async (req: Request) => {
          publish to at all, and it is the one the agency can fix themselves. It
          is reported without an attempt, so a missing connection never burns a
          retry or waits out a backoff. */
-      const result: PublishResult = (!rehearsal && !conn && ADAPTERS[post.platform] && ADAPTERS[post.platform] !== ADAPTERS.mock)
+      /* viaTrypost is included so a TikTok row with no mapped account is
+         reported without an attempt, exactly like a missing Instagram
+         connection -- otherwise it would reach the adapter, fail there, and
+         burn one of its three attempts on something only the agency can
+         fix. */
+      const needsAccount = Boolean(NATIVE_ADAPTERS[post.platform]) || viaTrypost(post.platform);
+      const result: PublishResult = (!rehearsal && !conn && needsAccount)
         ? {
             ok: false, postId: null, provider: post.platform,
             error: notConnected(post.platform),
