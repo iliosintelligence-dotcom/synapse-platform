@@ -53,6 +53,10 @@ interface QueuedPost {
   attempts: number;
   max_attempts: number;
   dry_run: boolean;
+  /* 'agency' (the agency's own connected account) or 'synapse' (a channel we
+     own, amplifying the listing for free). It decides WHOSE ACCOUNT this goes
+     to, which is the real routing question -- not which platform it is. */
+  leg: string;
 }
 
 interface PublishResult {
@@ -407,6 +411,14 @@ const TRYPOST_CONTENT_TYPE: Record<string, string> = {
   tiktok: 'tiktok_photo',
   linkedin: 'linkedin_page_post',
   x: 'x_post',
+  /* Instagram and Facebook are here ONLY for the Synapse leg. An agency's
+     Instagram is connected through social-connect and publishes natively --
+     viaTrypost() refuses them for that reason. But SYNAPSE'S own Instagram
+     lives in the trypost workspace like every other channel we own, so a
+     synapse-leg post needs a content type for it. Same platform, different
+     account, different route. */
+  instagram: 'instagram_feed',
+  facebook: 'facebook_post',
 };
 
 /** True when this platform should go out through trypost: it is configured,
@@ -528,6 +540,24 @@ function notConnected(platform: string): string {
  *  written, never a replacement for what works. */
 function adapterFor(post: QueuedPost, live: boolean): Adapter {
   if (post.dry_run || !live) return ADAPTERS.mock;
+
+  /* THE LEG IS ASKED FIRST, because it answers whose account this is and the
+     platform only answers what it is called. Every Synapse channel lives in
+     the trypost workspace -- including our Instagram, which an agency would
+     have published natively. Deciding on the platform alone would have sent a
+     synapse-leg Instagram post to the Meta adapter, which would then look for
+     an OAuth token in social_accounts that does not and should not exist. */
+  if (post.leg === 'synapse') {
+    if (!trypostConfigured()) {
+      return notConfigured('Synapse ' + post.platform
+        + ' (trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY)');
+    }
+    if (!TRYPOST_CONTENT_TYPE[post.platform]) {
+      return notConfigured('Synapse ' + post.platform + ' (no trypost content type)');
+    }
+    return trypostAdapter;
+  }
+
   const native = NATIVE_ADAPTERS[post.platform];
   if (native) return native;
   if (viaTrypost(post.platform)) return trypostAdapter;
@@ -539,6 +569,31 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
 const NO_CONNECTION: Connection = {
   accountId: '', platformAccountId: '', username: 'rehearsal', token: '',
 };
+
+/**
+ * Synapse's own channels. Loaded ONCE for the whole batch, not once per agency
+ * -- they belong to no agency, which is exactly why they cannot live in
+ * social_accounts. There is no token: trypost holds every one of these grants,
+ * and platformAccountId carries its social_account_id instead.
+ */
+async function loadSynapseChannels(
+  admin: ReturnType<typeof createClient>,
+): Promise<Record<string, Connection>> {
+  const out: Record<string, Connection> = {};
+  const { data } = await admin
+    .from('synapse_channels')
+    .select('id, platform, trypost_account_id, handle')
+    .eq('is_active', true);
+  for (const c of (data ?? []) as Array<Record<string, string>>) {
+    out[c.platform] = {
+      accountId: c.id,
+      platformAccountId: c.trypost_account_id,
+      username: c.handle ?? 'synapse',
+      token: '',
+    };
+  }
+  return out;
+}
 
 /**
  * Loads the agency's live connections, one per platform, and the token for
@@ -687,6 +742,14 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    /* One read for the whole batch, and only when something in it is ours.
+       Synapse's channels are global, so this is not keyed by agency -- but a
+       batch of nothing but agency posts should still not read the table. */
+    let synapseChannels: Record<string, Connection> = {};
+    if (live && rows.some((r) => !r.dry_run && r.leg === 'synapse')) {
+      synapseChannels = await loadSynapseChannels(admin);
+    }
+
     let published = 0;
     let failed = 0;
     let dryRun = 0;
@@ -694,7 +757,16 @@ Deno.serve(async (req: Request) => {
 
     for (const post of rows) {
       const rehearsal = post.dry_run || !live;
-      const conn = rehearsal ? NO_CONNECTION : (connByAgency[post.agency_id] ?? {})[post.platform];
+      /* Whose account: ours from synapse_channels, or the agency's from
+         social_accounts. Reading the agency's connection for a synapse-leg
+         post would have published a listing to the AGENCY'S Instagram while
+         recording it as Synapse amplification -- the same post twice on one
+         account, and the attribution pointing at the wrong leg. */
+      const conn = rehearsal
+        ? NO_CONNECTION
+        : post.leg === 'synapse'
+          ? synapseChannels[post.platform]
+          : (connByAgency[post.agency_id] ?? {})[post.platform];
 
       /* No connected account is a different failure from a platform we cannot
          publish to at all, and it is the one the agency can fix themselves. It
@@ -705,11 +777,19 @@ Deno.serve(async (req: Request) => {
          connection -- otherwise it would reach the adapter, fail there, and
          burn one of its three attempts on something only the agency can
          fix. */
-      const needsAccount = Boolean(NATIVE_ADAPTERS[post.platform]) || viaTrypost(post.platform);
+      const needsAccount = post.leg === 'synapse'
+        || Boolean(NATIVE_ADAPTERS[post.platform])
+        || viaTrypost(post.platform);
       const result: PublishResult = (!rehearsal && !conn && needsAccount)
         ? {
             ok: false, postId: null, provider: post.platform,
-            error: notConnected(post.platform),
+            /* A missing Synapse channel is OUR configuration problem, not the
+               agency's. Telling them to go and connect an account they do not
+               own would be a dead end and would read as their fault. */
+            error: post.leg === 'synapse'
+              ? 'Synapse has no active ' + post.platform + ' channel. Add it to '
+                + 'synapse_channels with its trypost social_account_id.'
+              : notConnected(post.platform),
             payload: buildPayload(post),
           }
         : await adapterFor(post, live)(post, conn ?? NO_CONNECTION);
