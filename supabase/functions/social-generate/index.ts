@@ -207,11 +207,22 @@ function dealAngles(channels: Channel[], used: string[]): Record<string, string>
 }
 
 const VOICE: Record<Channel, string> = {
-  instagram: 'aspirational, editorial, warm. 1-2 short lines, a line break, then a soft CTA. 2-4 tasteful emojis.',
-  tiktok: 'punchy, spoken-word energy, young Lagos voice. A strong hook in the first line. Emojis fine.',
-  youtube: 'a video description under a walkthrough. The hook first (it is what shows before "more"), then 2-3 sentences of real detail, then a clear next step. Minimal emoji.',
-  facebook: 'plain, informative, decision-maker tone -- an older, higher-intent reader. Slightly longer. Minimal emoji.',
-  whatsapp: 'a WhatsApp Status blurb. Very short, personal, immediate. One emoji at most.',
+  /* THESE USED TO ASK FOR PROSE and got exactly that: "1-2 short lines then a
+     soft CTA", "2-3 sentences of real detail". Well-turned essays that buried
+     the price inside a sentence. The market writes spec sheets. */
+  instagram: 'the FULL form: caps headline, hook line, location, spec lines, price, '
+    + 'charges, next step, then the hashtag block. Warm on the hook line, factual '
+    + 'everywhere below it. Line breaks between blocks -- this is scanned, not read.',
+  tiktok: 'the form, compressed. Caps headline, hook, location, the three specs that '
+    + 'matter most, the price, the next step. Young Lagos voice in the hook only; '
+    + 'the numbers stay plain.',
+  youtube: 'the full form as a video description. Headline first, since it is what '
+    + 'shows before "more", then location, specs, price, charges, next step.',
+  facebook: 'the full form, and the most complete version of it -- an older, '
+    + 'higher-intent reader who will read every charge. Always include the whole '
+    + 'Other Charges block. No emoji beyond the line markers.',
+  whatsapp: 'headline, price, charges, next step. Nothing else. This is a Status '
+    + 'blurb somebody screenshots and forwards, so it has to stand on its own.',
   /* The only channel where the constraint IS the craft. Under 280 characters
      including the link, so one idea, no windup, no list. A thread is not an
      option here -- the publisher sends a single post. */
@@ -219,6 +230,91 @@ const VOICE: Record<Channel, string> = {
     + 'observation or a number that stops the scroll. No emoji spam, no hashtag '
     + 'stack, no "thread below". Nigerian, dry, confident.',
 };
+
+/* THE FORM THE MARKET ACTUALLY USES.
+   Taken from real Lagos listing accounts -- rentzhq, lingoluxuryhomes,
+   demaxon_re, mintandmodern, restellehouse -- rather than invented here.
+
+   What we were writing was an ESSAY: flowing prose, one idea per paragraph,
+   nicely turned. What the market writes is a SPEC SHEET with a hook on top.
+   Nobody reads a property caption; they scan it for four things -- what,
+   where, how much, and what else it will cost -- in that order. Prose hides
+   all four inside sentences. That is the difference between a caption that
+   reads well and one that sells.
+
+   Three forms, because a rental, a sale and a shortlet are bought by three
+   different people asking three different questions. Two details carry more
+   weight than anything else in the set:
+
+     THE ITEMISED CHARGES BLOCK on a rental -- service charge, agency, legal,
+     caution. The advertised rent is never the real cost and every Nigerian
+     renter knows it, so the accounts that itemise are the ones people trust.
+
+     THE TITLE LINE on a sale -- Governor's Consent, C of O. A buyer asks about
+     the papers before anything else. We hold title_type and have never used it.
+
+   THE ANGLE STILL DECIDES WHAT LEADS. The form is the skeleton; the angle
+   picks the hook, which block is pulled up top, and what the closing line
+   argues. A cost angle opens on the charges, a fit angle on the person. Same
+   skeleton, different emphasis -- which is how these accounts vary their own
+   posts day to day. */
+const MARKET_FORM = `
+HOW A LAGOS PROPERTY CAPTION IS BUILT (follow this shape -- it is what the
+market reads):
+
+Nobody reads these top to bottom. They SCAN for what, where, how much, and what
+else it will cost. Put each on its own line. Short lines, line breaks between
+blocks, and never bury a number inside a sentence.
+
+FOR A RENTAL:
+  1. Headline in caps: property type, bedrooms, FOR RENT.
+     e.g. PREMIUM 3-BEDROOM FLAT FOR RENT AT IKATE, LEKKI
+  2. One line on who it suits or how it feels.
+  3. \ud83d\udccd Area, City
+  4. The specs, one per line, not sentences: bedrooms, bathrooms, each amenity
+     given. Under a bare heading like "Features" when there are three or more.
+  5. Rent: <amount> per annum   (or per month, if the data says so)
+  6. "Other Charges:" then one bulleted line per charge in the data --
+     service charge, move-in cost, agency, legal, caution. THIS BLOCK MATTERS
+     MORE THAN ANY OTHER. The advertised rent is never the real cost, and the
+     accounts that itemise are the ones people trust. List ONLY charges present
+     in the data. Never invent a percentage.
+  7. A closing line naming who this is right for.
+  8. The next step: "Ready to make this your next address? Contact <agency> to
+     schedule an inspection."
+
+FOR A SALE:
+  1. Headline in caps: condition, bedrooms, type, and the two or three standout
+     features joined with +.
+     e.g. NEWLY BUILT 4 BEDROOM DUPLEX + BQ + POOL
+  2. \ud83d\udccd Location: <estate or street>, <area>, <city>
+  3. \ud83d\udcb0 Guide Price: <amount>   -- add "(Negotiable)" ONLY if the data says so.
+  4. Title: <the title type given>   -- include this line ONLY when a title
+     type is in the data. A buyer asks about the papers before anything else,
+     and inventing "Governor's Consent" would be the worst thing this product
+     could do.
+  5. "Highlights" then one \ud83c\udf1f line per real feature.
+  6. The next step: arrange a viewing.
+
+FOR A SHORTLET OR STAY:
+  1. Open on a question to the reader. \ud83d\udc40
+  2. The price as "from <amount>" -- shortlets quote a floor, not a fixed figure.
+  3. \ud83d\udccd Area, City
+  4. \ud83d\udd17 Link in bio to book
+
+A fourth opening worth knowing, the most scannable in the set -- the pipe
+headline: 2 bed | Ikate-Lekki | N250m | Furnished
+
+ALWAYS:
+- Prices exactly as given. Both N1.2M and N1,200,000 are fine; a number that is
+  not in the data is not.
+- \ud83d\udccd for place, \ud83d\udcb0 for price, \ud83d\udcde for contact, \ud83d\udd17 for the link. These are LINE
+  MARKERS, not decoration: one per line at most, never mid-sentence.
+- Hashtags are returned SEPARATELY, not written into the caption -- each channel
+  has its own cap and they are appended per channel. Choose them the way these
+  accounts do: specific, not generic. The area, the city plus RealEstate, the
+  category, the agency. #LekkiRealEstate beats #home.
+`;
 
 function buildSystem(assigned: Record<string, string>, brandLine: string): string {
   const perChannel = Object.entries(assigned).map(([ch, angle]) => {
@@ -245,6 +341,18 @@ channel's angle and start from the fact it names.
 Do not mention an angle that was not assigned to that channel. If the property
 data does not support an angle, say less rather than inventing something -- a
 short honest caption beats a padded one.
+
+${MARKET_FORM}
+THE FORM AND THE ANGLE DO DIFFERENT JOBS. The form above is the skeleton every
+caption uses. The angle decides what the HEADLINE leads on, which block is
+pulled up under it, and what the closing line argues -- a cost angle opens on
+the charges, a fit angle on the person it suits, an objection angle on the
+worry. Same skeleton, different emphasis. That is how these accounts vary their
+own posts, and it is why two captions in one batch will not read alike.
+
+INSTAGRAM, FACEBOOK and YOUTUBE take the full form. WHATSAPP takes the
+headline, the price, the charges and the next step, nothing else. X cannot
+carry a spec sheet at all: there it is one line, one number, one point.
 ${brandLine}
 RULES:
 - These are REAL verified listings. Never invent facts, amenities, numbers,
@@ -255,7 +363,9 @@ RULES:
 - NEVER print a street number or a full address, even though a street name is
   given. Name the street or the area, never the door. A caption is public and
   permanent and somebody lives there.
-- Always end with a clear next step ("DM to book a viewing", "Tap the link", "Save this").
+- Always end with a clear next step, and use the one the FORM gives for that
+  listing type -- an inspection for a rental, a viewing for a sale, a booking
+  for a shortlet. "Tap the link" is the weakest of them; prefer the specific.
 - No hashtags inside the caption body -- return them separately.
 - Nigerian English, Lagos market savvy. Avoid cliches like "dream home come true".
 
@@ -466,14 +576,16 @@ Deno.serve(async (req: Request) => {
       : '';
 
     const user = `Property: ${JSON.stringify(listing)}${steer}\nWrite the captions now.`;
-    /* 1400 was too tight, and it failed SILENTLY. Three channels of genuinely
-       distinct captions -- the Facebook one runs to a paragraph now that it has
-       a subject of its own instead of a reworded sentence -- ran past the cap
-       mid-JSON on the first live call after this rewrite: a 200 with an
-       unparseable body, which the portal could only report as a network
-       hiccup. 8000 is well clear of the longest plausible five-channel reply
-       and still inside the non-streaming timeout. */
-    const out = await claude(key, buildSystem(assigned, brandLine), user, 8000, buildSchema(want));
+    /* THE CEILING, raised twice, and both times because running out of tokens
+       mid-JSON is the one failure that does not look like one: the reply is a
+       200 carrying half an object, parseLoose returns {}, and the portal can
+       only report a generic "try again" for something retrying will not fix.
+
+       1400 was too tight for prose. 12000 is the room a SPEC SHEET needs: the
+       Facebook form alone carries a headline, a hook, a location, a spec list,
+       a price, an itemised charges block, a closing line and a CTA -- two to
+       three times the prose it replaced, across six channels. */
+    const out = await claude(key, buildSystem(assigned, brandLine), user, 12000, buildSchema(want));
     if ('error' in out) return json({ error: out.error }, 502);
 
     const parsed = parseLoose(out.text) as {
