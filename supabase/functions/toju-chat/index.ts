@@ -81,13 +81,39 @@ Conversation style:
   1) location (which city/area), 2) budget, 3) lifestyle/needs.
 - Ask ONE focused question at a time. Be warm, concise, and expert.
 
+SOMEBODY WHO ALREADY FOUND THE HOME IS NOT STARTING A SEARCH.
+The intake above is for a person who arrives with nothing. It is wrong for the
+person who arrives holding a specific property, and that is now a common
+arrival: Instagram does not make caption links clickable, so people read a post
+and come here and TYPE what they saw.
+
+"I saw a one-bedroom in Agbowo for 450k on your Instagram" is not a brief. It
+is an identification. Treat it as one:
+- Search IMMEDIATELY on what they gave you. Do not ask a question first.
+- Show what matches and ask them to confirm which one, if more than one fits.
+- Then answer about THAT home -- the charges, the papers, the viewing.
+- Do NOT ask who is moving, when they are moving, or what their budget is.
+  They told you the budget by naming the price of a home they already like, and
+  they did not come here to be qualified. If those things matter later, they
+  will come up when the conversation reaches them.
+
+The signals: a price with an area, or a property type with an area, or any
+mention of having seen it -- "I saw", "your post", "on Instagram", "on TikTok",
+"the one you posted". One is enough.
+
+If nothing matches what they described, say so plainly and say what IS in that
+area, rather than opening an interview.
+
 Hard rules:
 - You may only recommend properties via the search_properties tool.
-- city is REQUIRED before any search. If the user has not named a city,
-  ask for it — do NOT guess or search a default city.
-- Never mention properties from a city the user did not ask about.
+- Search needs a PLACE: either city, or area. An area is enough on its own --
+  "Agbowo", "Lekki Phase 1", "Ikate" are how people actually name where they
+  saw something, and demanding the city first is a question asked of somebody
+  who has already answered it. If you have neither, ask — do NOT guess or
+  search a default city.
+- Never mention properties from a place the user did not ask about.
 - If search returns nothing, say exactly: "I don't have any listings in
-  {city} yet — want me to notify you when one comes up?" Do not invent
+  {place} yet — want me to notify you when one comes up?" Do not invent
   listings or suggest other cities unprompted.
 - Results may include homes Synapse has not checked. Show them, and say
   which is which: each result carries verification_status. Never quietly
@@ -140,13 +166,20 @@ const TOOLS: GatewayTool[] = [
   {
     name: 'search_properties',
     description:
-      'Search live Synapse listings in a city. city is mandatory. Returns up to 5 properties, '
-      + 'best first, each carrying verification_status and whether it was listed recently. '
-      + 'Some results may be unverified -- say so rather than omitting them.',
+      'Search live Synapse listings by place. Give city, or area, or both -- at least one. '
+      + 'Returns up to 5 properties, best first, each carrying verification_status and whether '
+      + 'it was listed recently. Some results may be unverified -- say so rather than omitting them.',
     parameters: {
       type: 'object',
       properties: {
-        city: { type: 'string', description: 'City the user is searching in. REQUIRED.' },
+        city: { type: 'string', description: 'City, e.g. Lagos or Ibadan. Optional if area is given.' },
+        area: {
+          type: 'string',
+          description:
+            'Neighbourhood or street, e.g. Agbowo, Ikate, Lekki Phase 1. Use this when the user '
+            + 'names a place smaller than a city -- which is how people describe somewhere they '
+            + 'saw a post about. Matched against the address and the title as well as the city.',
+        },
         listing_type: { type: 'string', enum: ['sale', 'rent', 'shortlet'] },
         property_type: {
           type: 'string',
@@ -156,16 +189,39 @@ const TOOLS: GatewayTool[] = [
         budget_max: { type: 'number', description: 'Maximum price in naira' },
         bedrooms_min: { type: 'number' },
       },
-      required: ['city'],
+      /* Neither is required by the schema, because "one of these two" is not
+         something JSON Schema expresses in a way every provider honours. The
+         check is in runSearch instead, where it can say something useful. */
+      required: [],
     },
     async run(supabase, args) {
       const searchArgs = args as unknown as SearchArgs;
-      const { results, ids } = await runSearch(supabase, searchArgs);
+      /* The place, as the USER said it. An area search was asked for by area,
+         so the no-listings line has to name the area -- telling somebody who
+         asked about Agbowo that there is nothing in Ibadan answers a question
+         they did not ask. */
+      const place = (searchArgs.area || searchArgs.city || '').trim();
+
+      let results: SearchRow[] = [];
+      let ids: string[] = [];
+      try {
+        ({ results, ids } = await runSearch(supabase, searchArgs));
+      } catch (e) {
+        if ((e as Error)?.message === 'NO_PLACE') {
+          return {
+            content: 'NO_PLACE: the user has not named a city or an area yet. Ask which '
+              + 'area or city they mean, in one short question. Do not search.',
+            ids: [],
+          };
+        }
+        throw e;
+      }
+
       // Feed tool result back for the final natural-language answer.
       const content =
         results.length > 0
           ? JSON.stringify(results)
-          : `NO_RESULTS for city "${searchArgs.city}". Use the exact no-listings line.`;
+          : `NO_RESULTS for "${place}". Use the exact no-listings line, naming ${place}.`;
       return { content, ids };
     },
   },
@@ -174,7 +230,8 @@ const TOOLS: GatewayTool[] = [
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 interface SearchArgs {
-  city: string;
+  city?: string;
+  area?: string;
   listing_type?: string;
   property_type?: string;
   budget_min?: number;
@@ -628,14 +685,39 @@ async function runSearch(
   supabase: any,
   args: SearchArgs,
 ): Promise<{ results: SearchRow[]; ids: string[] }> {
-  // city is mandatory and case-insensitive. RLS (properties_select_public)
-  // already limits this to live, active, unexpired rows; asserted here too so
-  // the query reads as what it means.
+  /* A PLACE, WHICH IS NOT ALWAYS A CITY.
+     This was .ilike('city', args.city) and nothing else, so a person who said
+     "the one-bedroom in Agbowo" got either an interrogation about which city
+     Agbowo is in, or a search for a city called Agbowo and the no-listings
+     line -- about a listing we are actively advertising, whose title literally
+     ends in "Agbowo".
+
+     That is the common case now. Instagram captions are not clickable, so
+     people arrive typing what they saw, and what they saw was a neighbourhood.
+
+     An area is matched across address, title and city, which is WIDER in what
+     it looks at and NARROWER in what it returns: "Agbowo" can only match homes
+     that say Agbowo somewhere. The rule it protects -- never show a place the
+     user did not ask about -- is kept, not loosened.
+
+     RLS (properties_select_public) already limits this to live, active,
+     unexpired rows; the filters below are asserted anyway so the query reads
+     as what it means. */
   const since = Date.now() - RECOMMENDATION_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const city = (args.city ?? '').trim();
+  const area = (args.area ?? '').trim();
+  if (!city && !area) {
+    /* An empty result would be a lie of a different kind -- there are listings,
+       we just were not told where to look -- and the caller turns an empty
+       result into "I don't have any listings in {place} yet". With no place at
+       all that sentence names `undefined`. Throwing gives the caller something
+       to say instead. */
+    throw new Error('NO_PLACE');
+  }
+
   let query = supabase
     .from('properties')
     .select('id, title, city, price, listing_type, property_type, bedrooms, trust_score, verification_status, listed_at')
-    .ilike('city', args.city)
     .eq('is_active', true)
     .eq('status', 'live')
     // The enum sorts unverified < in_progress < verified, so descending puts
@@ -644,6 +726,15 @@ async function runSearch(
     .order('listed_at', { ascending: false, nullsFirst: false })
     .order('trust_score', { ascending: false, nullsFirst: false })
     .limit(5);
+
+  /* Applied after the base filters so the OR groups cleanly. An area search
+     looks in three columns; a city search stays exact, because "Lagos" as a
+     substring of an address would drag in anything mentioning Lagos State. */
+  if (area) {
+    const like = `%${area.replace(/[%,]/g, ' ')}%`;
+    query = query.or(`address.ilike.${like},title.ilike.${like},city.ilike.${like}`);
+  }
+  if (city) query = query.ilike('city', city);
 
   if (args.listing_type) query = query.eq('listing_type', args.listing_type);
   if (args.property_type) query = query.eq('property_type', args.property_type);

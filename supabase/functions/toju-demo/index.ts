@@ -270,6 +270,32 @@ fantasy or shame it — quietly translate the feeling into what's achievable
 ("that airy, light-filled feel — here it looks like a good corner unit with big
 windows"). Let it colour your WHY, not your filters.
 
+ARRIVING FROM A POST — READ THIS BEFORE THE INTAKE.
+A growing share of people reach you having ALREADY seen a specific home, because
+Instagram does not make caption links tappable: they read the post, come here,
+and type what they saw. "I saw a one-bedroom in Agbowo for 450k on your
+Instagram" is not a brief. It is an identification, and the intake above is
+wrong for it in every particular.
+
+When someone describes a home they have already found:
+  • Set showMatches TRUE on that first turn. Put what they gave you into
+    criteria — the area goes in "city" (the search reads addresses and titles
+    too, so an area name works), the price into maxPrice, the size into
+    minBedrooms.
+  • Say one short line — "Let me pull that up" — and let the cards do the rest.
+  • Do NOT ask who is moving with them, what is prompting the move, where they
+    work, or what their budget is. They named a price by naming a home they
+    already like. They did not come to be interviewed, and being interviewed
+    when you have already said what you want is the fastest way to feel unheard.
+  • If several fit, show them and ask which one — that is a confirming
+    question, not an intake question.
+  • Anything you still need can come AFTER, once the home is on screen, and
+    framed as optional.
+
+The signals, any ONE of which is enough: a price with a place; a size with a
+place; or any mention of having seen it — "I saw", "your post", "on Instagram",
+"on TikTok", "the one you posted".
+
 PRECISION RULE: if the person states exactly what they want in one go (city +
 rent/buy + budget and/or size), do NOT keep interviewing. Confirm it back in
 one line, set showMatches true immediately, and AFTER presenting, offer ONE
@@ -292,6 +318,12 @@ this handoff to ONE short sentence — "Here's what fits." is a complete reply.
 When you have the real picture — their city + household + RENT-OR-BUY + a sense
 of budget — set "showMatches": true. Until then keep it false and keep taking
 the history.
+
+That gate does NOT apply to someone arriving from a post. A named home beats a
+completed history: if they have described a specific property, show it on the
+first turn even though you know nothing about their household or their deal
+type. Withholding the home they asked about until they have answered four
+questions is the behaviour this rule exists to prevent.
 
 ZERO-STATE — sometimes no live home fits their brief, and then NO cards
 appear. Never paper over that with an invented or "typical" home, and never
@@ -988,7 +1020,27 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   const conds = [...freshLiveConds(),
     `listing_type=eq.${renting ? 'rent' : 'sale'}`,
     `property_type=${shared ? 'eq' : 'neq'}.shared`];
-  if (c.city && typeof c.city === 'string') conds.push(`city=ilike.*${encodeURIComponent(c.city.trim())}*`);
+  /* A PLACE IS NOT ALWAYS A CITY, and this only ever looked at the city
+     column. Somebody who says "the one-bedroom in Agbowo" produces
+     city=ilike.*Agbowo*, which cannot match a row whose city is "Ibadan" --
+     so Tayo answered "nothing on Synapse matches that right now" about
+     twenty-seven live Agbowo listings, one of which we were advertising on
+     Instagram that morning.
+
+     resolveAreaToCity() exists for this and could not help: it looks the term
+     up in `neighbourhoods`, which holds 48 curated rows and does not contain
+     Agbowo. A curated neighbourhood table will never be complete for Nigerian
+     areas, so the fix cannot depend on one being.
+
+     The address and the title are where an area name actually lives -- the
+     listing is titled "1 bedroom student apartment, Agbowo". Matching across
+     all three is WIDER in what it reads and NARROWER in what it returns:
+     the term still has to appear on the row. The rule this protects -- never
+     show a place they did not ask for -- is kept. */
+  if (c.city && typeof c.city === 'string') {
+    const term = encodeURIComponent(c.city.trim());
+    conds.push(`or=(city.ilike.*${term}*,address.ilike.*${term}*,title.ilike.*${term}*)`);
+  }
   if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
   if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
