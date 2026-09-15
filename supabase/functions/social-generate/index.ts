@@ -187,8 +187,24 @@ const AFFINITY: Record<Channel, string[]> = {
  * request, the history is dropped and the rotation starts again -- coming back
  * round to an angle after five others is variety, not repetition.
  */
-function dealAngles(channels: Channel[], used: string[]): Record<string, string> {
-  const all = Object.keys(ANGLES);
+function dealAngles(channels: Channel[], used: string[], verified: boolean): Record<string, string> {
+  /* THE TRUST ANGLE NEEDS SOMETHING TO HAVE BEEN CHECKED.
+     Its brief is "which checks passed and what that rules out", so on an
+     unverified listing the only honest version is a caption that opens
+     BEFORE WE TELL YOU ANYTHING ELSE: THIS LISTING IS NOT YET VERIFIED -- which
+     is exactly what it produced. Truthful, and the wrong thing to lead a
+     marketing post with, especially when `objection` is already in the
+     rotation to name the doubt honestly. Two of six captions opening on a
+     negative is not candour, it is a sales problem.
+
+     The old template engine had this right: its Verified-first angle carried
+     requiresVerified and was dropped on listings that had not been checked.
+     Same rule, restored.
+
+     Not silently swapped for a euphemism: the angle is dropped and another
+     subject takes the channel, and the verification status is still in the
+     fact block for any angle that needs to be straight about it. */
+  const all = Object.keys(ANGLES).filter((a) => verified || a !== 'trust');
   const spent = new Set(used.filter((a) => all.includes(a)));
   let pool = all.filter((a) => !spent.has(a));
   if (pool.length < channels.length) pool = all.slice();   // full rotation done
@@ -273,7 +289,7 @@ FOR A RENTAL:
   3. \ud83d\udccd Area, City
   4. The specs, one per line, not sentences: bedrooms, bathrooms, each amenity
      given. Under a bare heading like "Features" when there are three or more.
-  5. Rent: <amount> per annum   (or per month, if the data says so)
+  5. \ud83d\udcb0 Rent: <amount> per annum   (or per month, if the data says so)
   6. "Other Charges:" then one bulleted line per charge in the data --
      service charge, move-in cost, agency, legal, caution. THIS BLOCK MATTERS
      MORE THAN ANY OTHER. The advertised rent is never the real cost, and the
@@ -282,6 +298,12 @@ FOR A RENTAL:
   7. A closing line naming who this is right for.
   8. The next step: "Ready to make this your next address? Contact <agency> to
      schedule an inspection."
+
+NAMING THE AGENCY: use the agency's name only when one is given above. When
+none is, write "Send us a message to schedule an inspection" -- do NOT fall
+back to "Synapse". Synapse is the platform the listing sits on, not the agent
+the reader would be dealing with, and putting our name on an agency's own post
+misrepresents who would be answering the phone.
 
 FOR A SALE:
   1. Headline in caps: condition, bedrooms, type, and the two or three standout
@@ -303,11 +325,16 @@ FOR A SHORTLET OR STAY:
   4. \ud83d\udd17 Link in bio to book
 
 A fourth opening worth knowing, the most scannable in the set -- the pipe
-headline: 2 bed | Ikate-Lekki | N250m | Furnished
+headline: 2 bed | Ikate-Lekki | \u20a6250M | Furnished
 
 ALWAYS:
-- Prices exactly as given. Both N1.2M and N1,200,000 are fine; a number that is
-  not in the data is not.
+- The naira sign is \u20a6. Write it, every time. Not "N", not "NGN".
+- ABBREVIATE LARGE FIGURES the way the market does: \u20a6450K, \u20a614M, \u20a6250M,
+  \u20a61.2B. A price is a headline number and has to be read at a glance --
+  nobody counts the commas in \u20a61,200,000,000. Keep at most one decimal, and
+  spell a figure out only when abbreviating would lose it.
+- The FIGURE is exactly as given. Abbreviating \u20a61,200,000,000 to \u20a61.2B is
+  formatting; a number that is not in the data is not allowed at any length.
 - \ud83d\udccd for place, \ud83d\udcb0 for price, \ud83d\udcde for contact, \ud83d\udd17 for the link. These are LINE
   MARKERS, not decoration: one per line at most, never mid-sentence.
 - Hashtags are returned SEPARATELY, not written into the caption -- each channel
@@ -461,7 +488,9 @@ Deno.serve(async (req: Request) => {
     const used = Array.isArray(body.usedAngles)
       ? body.usedAngles.filter((a): a is string => typeof a === 'string')
       : [];
-    const assigned = dealAngles(want, used);
+    const assigned = dealAngles(
+      want, used,
+      (p.verification_status ?? p.verificationStatus) === 'verified');
 
     /* The brand block was being SENT by the portal and dropped on the floor
        here -- the composer has posted { brand: {...} } for as long as it has
