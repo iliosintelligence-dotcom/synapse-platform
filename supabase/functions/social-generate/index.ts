@@ -52,11 +52,18 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
-const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp'] as const;
+/* X IS PUBLISHABLE AND WAS NOT WRITABLE. social-publish has had x_post in its
+   content-type map all along, and Synapse's own X account has been carrying
+   every listing as a twin -- so posts were going out on X that no agency had
+   ever been offered the chance to write. The twin reworded the caption meant
+   for somewhere else, on the one platform where length is the whole craft.
+   Adding it here is what lets the composer offer it. */
+const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp', 'x'] as const;
 type Channel = typeof CHANNELS[number];
 
 /* ── THE ANGLES ────────────────────────────────────────────────────────────
-   Six different things a caption can BE ABOUT. Not six tones -- six subjects,
+   Eleven different things a caption can BE ABOUT. Not eleven tones -- eleven
+   subjects,
    each opening on a different fact, so two captions built from two of these
    cannot be rewordings of one another even when written in the same voice.
 
@@ -99,24 +106,82 @@ const ANGLES: Record<string, { label: string; brief: string }> = {
       + 'place goes in this area. Opens on the clock. Never manufacture '
       + 'scarcity that the data does not support.',
   },
+
+  /* SIX WAS NOT ENOUGH, and the arithmetic says so plainly: one generation
+     over five channels spends five of six, so the rotation resets almost every
+     round and the second batch is the first batch again. Eleven means a
+     property gets two genuinely different rounds before anything comes back.
+
+     Each of these is tied to a field the fact block now actually carries --
+     an angle with no data behind it produces the short generic caption this
+     was reported for, so adding subjects without adding facts would have made
+     the problem worse rather than better. */
+  cost: {
+    label: 'what it really costs to move in',
+    brief: 'The total, not the headline: rent plus service charge plus what '
+      + 'must be paid before the keys change hands. Opens on the true number. '
+      + 'This is the single most common complaint about Nigerian listings -- '
+      + 'the advertised price is never the price -- so being straight about it '
+      + 'is the whole point. Only the figures given; if a cost is not in the '
+      + 'data, say what IS known and stop.',
+  },
+  amenity: {
+    label: 'the specific things it has',
+    brief: 'The listed amenities, named exactly and not padded. In Nigeria '
+      + 'security and running water are not features, they are the difference '
+      + 'between a place that works and one that does not, so treat them as '
+      + 'the point rather than as a list at the bottom. Opens on the one that '
+      + 'matters most. Never add an amenity that is not in the data.',
+  },
+  objection: {
+    label: 'the thing a careful buyer would worry about',
+    brief: 'Name the obvious hesitation about THIS listing -- what is not '
+      + 'verified yet, what the photos do not show, what the price implies -- '
+      + 'and answer it honestly. Opens on the worry, in the reader\'s own '
+      + 'words. This builds more trust than any claim, and it must never '
+      + 'invent a reassurance: if the answer is "we have not checked that '
+      + 'yet", that is the answer.',
+  },
+  process: {
+    label: 'what happens if you enquire',
+    brief: 'The next step, concretely: how a viewing is arranged, who the '
+      + 'reader would be dealing with, what is checked before money moves. '
+      + 'Opens on the action, not the home. Never promise a timeline the data '
+      + 'does not support.',
+  },
+  question: {
+    label: 'a question put to the reader',
+    brief: 'Open with a direct question this listing answers, then answer it '
+      + 'in two lines. A real question somebody house-hunting would ask -- not '
+      + 'a rhetorical hook. Changes the SHAPE of the post, so avoid it when '
+      + 'another channel in the same batch already has it.',
+  },
 };
 
 /* Which angles suit which platform, best first. Preference, not restriction:
    the dealer below falls back to whatever is left, because a guaranteed
    different angle beats a perfectly matched duplicate. */
 const AFFINITY: Record<Channel, string[]> = {
-  instagram: ['space', 'fit', 'moment', 'location', 'value', 'trust'],
-  tiktok: ['moment', 'fit', 'space', 'location', 'trust', 'value'],
-  youtube: ['space', 'location', 'value', 'trust', 'fit', 'moment'],
-  facebook: ['trust', 'value', 'location', 'fit', 'space', 'moment'],
-  whatsapp: ['moment', 'value', 'trust', 'fit', 'space', 'location'],
+  /* EVERY LIST RUNS THE FULL ELEVEN. They were six long, so the five angles
+     added alongside them could only ever be reached by the dealer's fallback
+     -- present in the catalogue, last in every queue, and in practice never
+     chosen while any of the original six remained. Ranking all of them is what
+     actually puts the new subjects into rotation. */
+  instagram: ['space', 'fit', 'amenity', 'moment', 'location', 'question', 'objection', 'value', 'cost', 'process', 'trust'],
+  tiktok: ['moment', 'fit', 'question', 'space', 'amenity', 'location', 'objection', 'cost', 'trust', 'value', 'process'],
+  youtube: ['space', 'location', 'process', 'amenity', 'cost', 'value', 'trust', 'objection', 'fit', 'moment', 'question'],
+  facebook: ['trust', 'cost', 'objection', 'value', 'location', 'process', 'fit', 'amenity', 'space', 'moment', 'question'],
+  whatsapp: ['moment', 'cost', 'value', 'process', 'fit', 'amenity', 'trust', 'question', 'space', 'objection', 'location'],
+  /* Cost and the single sharp number read well in 240 characters; the space
+     and the process do not. */
+  x: ['cost', 'value', 'question', 'moment', 'objection', 'trust', 'amenity', 'fit', 'location', 'space', 'process'],
 };
 
 /**
  * Deal one distinct angle to each channel, skipping angles this property has
  * already spent.
  *
- * The reset matters: with six angles, a property that has had a few rounds of
+ * The reset matters: a property that has had a few rounds of
  * generation would eventually have every angle "used", and a strict exclusion
  * would then return nothing at all. When the remaining pool cannot cover the
  * request, the history is dropped and the rotation starts again -- coming back
@@ -147,6 +212,12 @@ const VOICE: Record<Channel, string> = {
   youtube: 'a video description under a walkthrough. The hook first (it is what shows before "more"), then 2-3 sentences of real detail, then a clear next step. Minimal emoji.',
   facebook: 'plain, informative, decision-maker tone -- an older, higher-intent reader. Slightly longer. Minimal emoji.',
   whatsapp: 'a WhatsApp Status blurb. Very short, personal, immediate. One emoji at most.',
+  /* The only channel where the constraint IS the craft. Under 280 characters
+     including the link, so one idea, no windup, no list. A thread is not an
+     option here -- the publisher sends a single post. */
+  x: 'one post, hard limit 240 characters before the link. A single sharp '
+    + 'observation or a number that stops the scroll. No emoji spam, no hashtag '
+    + 'stack, no "thread below". Nigerian, dry, confident.',
 };
 
 function buildSystem(assigned: Record<string, string>, brandLine: string): string {
@@ -178,7 +249,12 @@ ${brandLine}
 RULES:
 - These are REAL verified listings. Never invent facts, amenities, numbers,
   distances, landmarks or comparisons that are not in the data given.
-- Naira prices exactly as given.
+- Naira prices exactly as given. Where a service charge or a move-in cost is
+  given, treating the headline rent as the whole cost is the one dishonesty
+  this product exists to remove -- so never imply it is.
+- NEVER print a street number or a full address, even though a street name is
+  given. Name the street or the area, never the door. A caption is public and
+  permanent and somebody lives there.
 - Always end with a clear next step ("DM to book a viewing", "Tap the link", "Save this").
 - No hashtags inside the caption body -- return them separately.
 - Nigerian English, Lagos market savvy. Avoid cliches like "dream home come true".
@@ -292,11 +368,95 @@ Deno.serve(async (req: Request) => {
     ].filter(Boolean);
     const brandLine = brandBits.length ? '\n' + brandBits.join(' ') + '\n' : '';
 
-    const listing = {
-      title: p.title, price: p.price, city: p.city, area: p.area ?? null,
-      bedrooms: p.bedrooms, listingType: p.listingType ?? 'sale',
-      propertyType: p.propertyType ?? 'whole', trustScore: p.trustScore ?? null,
+    /* EIGHT FIELDS WAS THE WHOLE PROBLEM.
+       This sent title, price, city, area, bedrooms, listingType, propertyType
+       and trustScore -- and then asked for six captions, each about a
+       DIFFERENT subject. Four of those subjects had nothing to work from:
+       "the rooms, the layout, the light" had `bedrooms: 1`; "what is walkable,
+       what the commute looks like" had `city: Ibadan`; "which checks passed"
+       had `trustScore: null`; "newly listed, just re-confirmed" had no dates
+       at all. The prompt correctly says to say less rather than invent, so it
+       said less -- and every caption converged on the two facts it actually
+       had. That reads as no variety, and it is not the model's fault.
+
+       The row carries about fifty columns. These are the ones that are TRUE,
+       PUBLISHABLE and give a subject something to be about. Nulls are stripped
+       below rather than sent, because "furnished: null" invites a sentence
+       about furnishing nobody has established.
+
+       NOT sent, deliberately: the street number. `address` holds a door number
+       and a caption naming it publishes where a specific person lives, to an
+       audience of strangers, permanently. The street and area go; the number
+       does not. */
+    /* One loose view of the row. Every field below is optional and arrives
+       from a client, so narrowing each one individually would be forty guards
+       for no safety that the null-strip does not already provide. */
+    const pr = p as Record<string, any>;
+    const addr = typeof pr.address === 'string' ? pr.address : '';
+    const street = addr.replace(/^[\s]*[0-9]+[a-zA-Z]?[,\s/-]+/, '').trim() || null;
+
+    const daysSince = (v: unknown) => {
+      const t = v ? Date.parse(String(v)) : NaN;
+      return Number.isFinite(t) ? Math.max(0, Math.round((Date.now() - t) / 86400000)) : null;
     };
+    const daysUntil = (v: unknown) => {
+      const t = v ? Date.parse(String(v)) : NaN;
+      return Number.isFinite(t) ? Math.max(0, Math.round((t - Date.now()) / 86400000)) : null;
+    };
+
+    const raw: Record<string, unknown> = {
+      title: pr.title,
+      /* The agent's own words about the property, and the single most
+         valuable field here -- it is the only place the listing says anything
+         a form could not capture. On the listing that prompted this report it
+         reads "A newly vacated room and parlour in Agbowo perfect for a
+         student or NYSC corper", which alone answers two of the angles. */
+      description: pr.description ?? null,
+
+      price: pr.price,
+      currency: pr.currency ?? 'NGN',
+      pricePeriod: pr.price_period ?? pr.pricePeriod ?? null,
+      serviceCharge: pr.service_charge ?? pr.serviceCharge ?? null,
+      moveInCost: pr.move_in_cost ?? pr.moveInCost ?? null,
+      negotiable: pr.is_negotiable ?? pr.negotiable ?? null,
+
+      city: pr.city,
+      state: pr.state ?? null,
+      area: pr.area ?? pr.neighbourhood ?? null,
+      street,
+
+      bedrooms: pr.bedrooms,
+      bathrooms: pr.bathrooms ?? null,
+      toilets: pr.toilets ?? null,
+      areaSqm: pr.area_sqm ?? pr.areaSqm ?? null,
+      parkingSpaces: pr.parking_spaces ?? pr.parkingSpaces ?? null,
+      floorLevel: pr.floor_level ?? pr.floorLevel ?? null,
+      yearBuilt: pr.year_built ?? pr.yearBuilt ?? null,
+      furnished: pr.furnished ?? null,
+      condition: pr.property_condition ?? pr.condition ?? null,
+      amenities: Array.isArray(pr.amenities) && pr.amenities.length ? pr.amenities : null,
+
+      listingType: pr.listingType ?? pr.listing_type ?? 'sale',
+      propertyType: pr.propertyType ?? pr.property_type ?? 'whole',
+      titleType: pr.title_type ?? pr.titleType ?? null,
+
+      verified: (pr.verification_status ?? pr.verificationStatus) === 'verified',
+      verificationStatus: pr.verification_status ?? pr.verificationStatus ?? null,
+      trustScore: pr.trustScore ?? pr.trust_score ?? null,
+      photos: Array.isArray(pr.media) ? pr.media.length : null,
+
+      daysListed: daysSince(pr.listed_at ?? pr.listedAt),
+      daysLeft: daysUntil(pr.expires_at ?? pr.expiresAt),
+      lastConfirmedDaysAgo: daysSince(pr.availability_confirmed_at ?? pr.availabilityConfirmedAt),
+    };
+
+    /* Nulls stripped. A field the model cannot see is a field it cannot be
+       tempted to write around, and an explicit null reads to a model as an
+       invitation to explain the absence. */
+    const listing: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v !== null && v !== undefined && v !== '') listing[k] = v;
+    }
     /* A caller-supplied angle is a steer on top of the assignment, not a
        replacement for it -- it used to be the only variety input there was,
        and one angle across every channel is how five identical captions get
