@@ -792,6 +792,9 @@ interface Match {
   agency: string;
   tier: string;
   why?: string | null;
+  /** The listing's own first photograph, or null when it has none. Never a
+   *  stand-in: a stock photo of another home is worse than no photo. */
+  img?: string | null;
   /** Area NAME only. The score and summary fields this once carried were
    *  seed_rand output, so they were removed from both the query and this type
    *  -- leaving them here would invite the mapping to fill them again. */
@@ -1071,6 +1074,16 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
        name that table did not know, at Lagos, four hundred miles from the
        listing. Reported as "the locations are not correct". */
     'latitude,longitude,' +
+    /* THE PHOTOGRAPH THE AGENCY ACTUALLY UPLOADED. This select never asked
+       for it, so every match arrived with no image and the card fell back to
+       a stock flat from Unsplash — a real listing wearing a photograph of a
+       different building, which a buyer cannot tell from the real thing. The
+       renderer has since dropped that fallback and shows an honest empty
+       state, so without this the cards were simply blank. Greenlight has 21
+       photos across three listings; none of them had ever reached Tayo.
+       display_order is the primary signal here: property_media has no
+       is_primary column. */
+    'property_media(url,display_order),' +
     'agencies(name,verification_tier),' +
     // Only the NAME. Every other column on this table -- safety_score,
     // family_score, flood_risk, power_reliability, avg_rent_*, toju_summary --
@@ -1134,6 +1147,14 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       whoThisSuits: (e.who_this_suits as string) ?? null,
       whatToWatch: (e.what_to_watch as string) ?? null,
       summary: (e.toju_summary as string) ?? null,
+      /* Lowest display_order wins. The array comes back in whatever order
+         PostgREST felt like, so it is sorted here rather than trusted. */
+      img: (function () {
+        const m = (r.property_media ?? []) as Array<{ url?: string; display_order?: number }>;
+        if (!Array.isArray(m) || !m.length) return null;
+        const first = m.slice().sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0))[0];
+        return typeof first?.url === 'string' && first.url.trim() ? first.url.trim() : null;
+      })(),
       agency: ag.name ?? 'Verified agency',
       tier: ag.verification_tier ?? 'basic',
       // Name only. The scores and the summary that used to travel with it were
