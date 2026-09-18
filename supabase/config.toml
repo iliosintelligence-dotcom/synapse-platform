@@ -1,0 +1,96 @@
+# Supabase project config.
+#
+# WHY THIS FILE EXISTS, AND WHY IT IS MOSTLY verify_jwt LINES.
+#
+# verify_jwt defaults to TRUE and RE-ARMS ON EVERY DEPLOY. It is not sticky:
+# a function deployed once with --no-verify-jwt goes back to requiring a JWT
+# the next time anybody deploys it without that flag. Eight of the nineteen
+# functions here must stay open, and every one of them is open for a reason
+# that has nothing to do with being careless:
+#
+#   toju-demo        the public prototype chat — no session exists yet
+#   social-generate  called from the agency portal's composer
+#   social-connect   the OAuth callback; Meta does not carry our JWT
+#   short-link       /s/<token> is clicked from Instagram by strangers
+#   paystack-webhook Paystack signs its own requests; it has no Supabase JWT
+#   push-key         anonymous visitors enable proximity alerts before signup
+#   push-subscribe   same
+#   proximity-report same
+#
+# Getting one of those wrong does not fail loudly. It returns 401 to real
+# users on a path nobody is watching — a stranger tapping a bio link, a
+# Paystack callback — while every internal test still passes because internal
+# calls carry a token. The flag was being remembered by hand, once per deploy,
+# forever. Now it is written down, and `supabase functions deploy` reads it.
+project_id = "bhrhejpekmhbhwryjhgk"
+
+# ── open to the world (verify_jwt = false) ────────────────────────────────
+[functions.toju-demo]
+verify_jwt = false
+
+[functions.social-generate]
+verify_jwt = false
+
+[functions.social-connect]
+verify_jwt = false
+
+[functions.short-link]
+verify_jwt = false
+
+[functions.paystack-webhook]
+verify_jwt = false
+
+[functions.push-key]
+verify_jwt = false
+
+[functions.push-subscribe]
+verify_jwt = false
+
+[functions.proximity-report]
+verify_jwt = false
+
+# ── signed-in callers only (verify_jwt = true) ────────────────────────────
+# Stated explicitly rather than left to the default, so that reading this file
+# tells you the intended posture of every function rather than of eight of them.
+[functions.toju-chat]
+verify_jwt = true
+
+[functions.analyze-listing]
+verify_jwt = true
+
+[functions.paystack-checkout]
+verify_jwt = true
+
+[functions.create-lead]
+verify_jwt = true
+
+[functions.send-outbox]
+verify_jwt = true
+
+[functions.social-publish]
+verify_jwt = true
+
+[functions.property-intelligence]
+verify_jwt = true
+
+[functions.save-place]
+verify_jwt = true
+
+[functions.agency-advisor]
+verify_jwt = true
+
+[functions.toju-offer]
+verify_jwt = true
+
+[functions.post-metrics]
+verify_jwt = true
+
+# Not currently deployed, and listed here precisely because of that: the day
+# somebody does deploy it, it must arrive closed. It holds the only use of the
+# service-role key in the codebase and refuses anyone whose profiles.role is
+# not 'platform_admin', so an open one would put the RLS bypass behind a check
+# it performs on itself. It also imports ../_shared/cors.ts, which is why it
+# has to go out through the CLI rather than by hand — a relative import needs
+# its sibling files to travel with it.
+[functions.admin-actions]
+verify_jwt = true

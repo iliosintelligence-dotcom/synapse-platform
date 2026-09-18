@@ -1,0 +1,136 @@
+# Deploy edge functions from the repo, on push.
+#
+# THE PROBLEM THIS SOLVES. Deploying a function has required somebody to run
+# the CLI by hand, which means it has to be somebody logged in — so committed
+# fixes sat undeployed. toju-demo shipped a fix on 15 Sep and was still serving
+# the 9 Sep build days later, asking people arriving from Instagram who was
+# moving in with them. The code was right and pushed; only the deploy was
+# missing, and nothing anywhere said so.
+#
+# Deploying from the repo also removes the transcription risk entirely. The
+# bytes that reach Supabase are the bytes in git — not a copy of them typed
+# out somewhere in between, which for a 66 KB file full of prompt prose is the
+# difference between a deploy and a rewrite nobody reviewed.
+#
+# ONLY WHAT CHANGED. A push that touches one function deploys that one. The
+# alternative — redeploy everything on every push — turns an unrelated typo
+# into a nineteen-function event, and each of those carries the verify_jwt
+# reset described in supabase/config.toml. Narrow blast radius by default.
+#
+# SETUP, ONCE: add a repository secret named SUPABASE_ACCESS_TOKEN
+#   1. https://supabase.com/dashboard/account/tokens → Generate new token
+#   2. this repo → Settings → Secrets and variables → Actions → New secret
+#      Name: SUPABASE_ACCESS_TOKEN   Value: the token
+# The token stays in GitHub. It is never printed by this workflow, and a
+# pull_request from a fork cannot read it — which is why this runs on push
+# only.
+
+name: Deploy edge functions
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'supabase/functions/**'
+      - 'supabase/config.toml'
+      - '.github/workflows/deploy-functions.yml'
+  workflow_dispatch:
+    inputs:
+      function:
+        description: 'Function slug to deploy, or "all"'
+        required: true
+        default: all
+
+concurrency:
+  # Two deploys of the same function racing each other is a coin flip over
+  # which build survives. Queue them instead, and never cancel one midway:
+  # an interrupted deploy leaves the previous version live, which is safe,
+  # but it also silently drops the change somebody just pushed.
+  group: deploy-functions
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # FULL history, not a shallow two. The diff below is against
+          # github.event.before, and a push carrying three commits puts that
+          # commit outside a depth-2 clone — git then fails with "bad object"
+          # and the deploy is skipped for the one push that changed the most.
+          fetch-depth: 0
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Work out which functions to deploy
+        id: pick
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            want='${{ github.event.inputs.function }}'
+          else
+            want=''
+          fi
+
+          if [ "$want" = "all" ]; then
+            slugs=$(ls -1 supabase/functions | while read -r d; do
+              [ -f "supabase/functions/$d/index.ts" ] && echo "$d"
+            done)
+          elif [ -n "$want" ]; then
+            slugs="$want"
+          else
+            # Everything under supabase/functions/<slug>/ that this push touched.
+            # config.toml changes deploy nothing on their own: verify_jwt is
+            # applied by the next deploy of each function, and redeploying all
+            # twenty to apply one flag is the blast radius this avoids.
+            before='${{ github.event.before }}'
+            # A branch's FIRST push reports before as forty zeros, and a force
+            # push can name a commit that no longer exists. Either way the diff
+            # would abort and take the deploy with it, so fall back to this
+            # commit's own parent — which is the right answer for a normal push
+            # and a safe one otherwise.
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              before=$(git rev-parse "${{ github.sha }}^" 2>/dev/null || echo '')
+            fi
+            if [ -z "$before" ]; then
+              slugs=''          # a root commit with no parent: nothing to diff
+            else
+              slugs=$(git diff --name-only "$before" "${{ github.sha }}" -- 'supabase/functions/**' \
+                | awk -F/ '{print $3}' | sort -u | while read -r d; do
+                    [ -n "$d" ] && [ -f "supabase/functions/$d/index.ts" ] && echo "$d"
+                  done)
+            fi
+          fi
+
+          if [ -z "${slugs:-}" ]; then
+            echo "nothing to deploy"
+          else
+            echo "will deploy:"; echo "$slugs" | sed 's/^/  /'
+          fi
+          {
+            echo 'slugs<<EOF'
+            echo "${slugs:-}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        if: steps.pick.outputs.slugs != ''
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set. See the setup note at the top of this workflow."
+            exit 1
+          fi
+          # No --no-verify-jwt anywhere: config.toml is the single source of
+          # truth for that flag. Passing it here as well is how the two drift.
+          echo "${{ steps.pick.outputs.slugs }}" | while read -r slug; do
+            [ -z "$slug" ] && continue
+            echo "── $slug"
+            supabase functions deploy "$slug" --project-ref bhrhejpekmhbhwryjhgk
+          done
