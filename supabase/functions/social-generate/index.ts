@@ -230,8 +230,8 @@ const VOICE: Record<Channel, string> = {
     + 'charges, next step, then the hashtag block. Warm on the hook line, factual '
     + 'everywhere below it. Line breaks between blocks -- this is scanned, not read.',
   tiktok: 'the form, compressed. Caps headline, hook, location, the three specs that '
-    + 'matter most, the price, the next step. Young Lagos voice in the hook only; '
-    + 'the numbers stay plain.',
+    + 'matter most, the price, the next step. The hook may be livelier than the '
+    + 'rest, but it is still standard English; the numbers stay plain.',
   youtube: 'the full form as a video description. Headline first, since it is what '
     + 'shows before "more", then location, specs, price, charges, next step.',
   facebook: 'the full form, and the most complete version of it -- an older, '
@@ -275,6 +275,21 @@ const VOICE: Record<Channel, string> = {
    skeleton, different emphasis -- which is how these accounts vary their own
    posts day to day. */
 const MARKET_FORM = `
+LANGUAGE: STANDARD ENGLISH. Write every caption in clear, standard English.
+No Nigerian Pidgin, in any proportion, anywhere in the caption -- not in the
+hook, not as a closing aside, not one phrase dropped in for warmth. "Make we
+break am down", "no wahala", "e go make sense", "abeg", "no hidden something",
+"we no go" and anything of that shape are all out.
+
+This is not a judgement about Pidgin. It is that these captions are an agency's
+own voice on its own feed, and the agency did not choose that register. A
+listing for a 4-bedroom duplex reads as unserious in it, and the reader cannot
+tell whether the account is being friendly or careless with their money.
+
+Warmth comes from being specific and straight -- naming the real charges,
+saying who the home suits -- not from switching register. Nigerian English is
+English: write the way a professional Lagos agency writes to a client.
+
 HOW A LAGOS PROPERTY CAPTION IS BUILT (follow this shape -- it is what the
 market reads):
 
