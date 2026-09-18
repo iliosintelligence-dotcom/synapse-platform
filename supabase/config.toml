@@ -85,6 +85,15 @@ verify_jwt = true
 [functions.post-metrics]
 verify_jwt = true
 
+# Closed, because it writes to every listing on the map. A signed-in agency
+# calls it right after posting; the sweep that catches import and API paths
+# calls it with the service role. It is paced at roughly one lookup a second
+# against a free geocoder we are guests on, so leaving it open would hand a
+# stranger a way to get our Nominatim access blocked — and then no listing
+# anywhere gets a pin.
+[functions.geocode-listings]
+verify_jwt = true
+
 # Not currently deployed, and listed here precisely because of that: the day
 # somebody does deploy it, it must arrive closed. It holds the only use of the
 # service-role key in the codebase and refuses anyone whose profiles.role is
