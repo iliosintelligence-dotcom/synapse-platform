@@ -23,11 +23,15 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'plan (dry run) · apply · baseline (record as done, run nothing)'
+        description: 'plan (dry run) · apply · baseline (record as done) · query (read-only)'
         required: true
         default: plan
         type: choice
-        options: [plan, apply, baseline]
+        options: [plan, apply, baseline, query]
+      query:
+        description: 'For mode=query only. A single SELECT or WITH; anything else is refused.'
+        required: false
+        default: ''
 
 concurrency:
   # Two migration runs at once is how you get half a schema. Queue, never
@@ -56,4 +60,4 @@ jobs:
             echo "::error::SUPABASE_ACCESS_TOKEN is not set."
             exit 1
           fi
-          node scripts/migrate.mjs "${{ inputs.mode }}"
+          QUERY="${{ inputs.query }}" node scripts/migrate.mjs "${{ inputs.mode }}"

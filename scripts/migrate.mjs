@@ -49,9 +49,45 @@ if (!TOKEN) {
   console.error('SUPABASE_ACCESS_TOKEN is not set.');
   process.exit(1);
 }
-if (!['plan', 'apply', 'baseline'].includes(MODE)) {
-  console.error(`Unknown mode "${MODE}". Use plan, apply or baseline.`);
+if (!['plan', 'apply', 'baseline', 'query'].includes(MODE)) {
+  console.error(`Unknown mode "${MODE}". Use plan, apply, baseline or query.`);
   process.exit(1);
+}
+
+/* READ-ONLY, AND ENFORCED RATHER THAN TRUSTED. The Supabase connector is
+   authorised for another organisation, so a session cannot see this database
+   at all — which has meant answering "did that post carousel?" by guessing.
+   This gives the same token a way to LOOK without a way to change anything.
+
+   The Management API endpoint will run whatever it is given, so the guard is
+   here: one statement, and it must be a SELECT or a WITH. Anything else is
+   refused before it is sent. That is deliberately blunt — a clever allowlist
+   invites somebody to widen it, and the whole point is that the read path
+   cannot become a write path by accident. Schema changes go through `apply`,
+   where they are recorded and reviewable. */
+function assertReadOnly(q) {
+  const stripped = q
+    .replace(/--[^\n]*/g, ' ')            // line comments
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')    // block comments
+    .trim()
+    .replace(/;\s*$/, '');                // one trailing semicolon is fine
+  if (!stripped) throw new Error('Empty query.');
+  if (stripped.includes(';')) {
+    throw new Error('One statement only \u2014 found a semicolon inside the query.');
+  }
+  if (!/^(select|with)\b/i.test(stripped)) {
+    throw new Error('Read-only: the query must begin with SELECT or WITH. '
+      + 'Schema and data changes belong in a migration, applied with mode "apply".');
+  }
+  /* THE WORD BOUNDARIES ARE NOT DECORATION. Without \b this matches inside
+     ordinary identifiers \u2014 "created_at" contains "create", "updated_at"
+     contains "update" \u2014 so `select created_at from social_posts` would be
+     refused as a write. A guard that blocks the query you actually need is a
+     guard somebody switches off. */
+  const banned = /\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|vacuum|refresh)\b/i;
+  const hit = stripped.match(banned);
+  if (hit) throw new Error(`Read-only: "${hit[0]}" is not allowed in a query.`);
+  return stripped;
 }
 
 /** One round trip. Errors carry the server's own words — a migration that
@@ -156,7 +192,25 @@ function recordSql(version, name, body) {
    an unreachable API printed a stack trace instead of the sentence the throw
    already carried. An explicit catch is the only version that works. */
 async function main() {
-  const { managed: files, legacy, unnamed } = partition();
+  /* Before the migration bookkeeping: a query neither reads nor writes
+   schema_migrations, and should not fail because a file is misnamed. */
+if (MODE === 'query') {
+  const q = process.argv.slice(3).join(' ').trim() || process.env.QUERY || '';
+  if (!q) {
+    console.error('Nothing to run. Pass the SQL after the mode, or set QUERY.');
+    process.exit(1);
+  }
+  const safe = assertReadOnly(q);
+  const rows = await sql(safe);
+  if (!Array.isArray(rows) || rows.length === 0) console.log('(no rows)');
+  else {
+    console.log(`${rows.length} row(s)`);
+    console.log(JSON.stringify(rows, null, 2));
+  }
+  process.exit(0);
+}
+
+const { managed: files, legacy, unnamed } = partition();
 
   /* BEFORE ANY NETWORK CALL. A misnamed file is a problem with the checkout, not
      with the database, and finding out about it after two round trips — or worse,
