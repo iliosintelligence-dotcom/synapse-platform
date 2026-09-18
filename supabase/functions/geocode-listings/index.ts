@@ -146,6 +146,16 @@ Deno.serve(async (req: Request) => {
     'address=not.is.null',
     'address=neq.',
     'or=(latitude.is.null,longitude.is.null)',
+    /* NO geo_precision FILTER HERE, and that is deliberate after measuring it.
+       `geo_precision=not.eq.manual` looks like sensible belt-and-braces against
+       overwriting a hand-placed pin, and it matched 0 of 503 rows: PostgREST
+       renders it as NOT (col = 'manual'), which is NULL — and therefore false —
+       for every row whose precision is unset, which is all of them. It would
+       have disabled this function completely and silently.
+
+       It is also unnecessary. 'manual' means a human typed coordinates, so such
+       a row HAS them, and the clause above already excludes anything placed.
+       One correct condition beats two where the second quietly negates it. */
   ];
   if (body.id) conds.push(`id=eq.${body.id}`);
 
@@ -179,7 +189,12 @@ Deno.serve(async (req: Request) => {
       const up = await fetch(`${SB_URL}/rest/v1/properties?id=eq.${r.id}`, {
         method: 'PATCH',
         headers: { ...h, Prefer: 'return=minimal' },
-        body: JSON.stringify({ latitude: got.lat, longitude: got.lon }),
+        /* The rung goes in with the coordinates, in the same write. A pin
+           whose precision is unknown is a pin that gets drawn as though it
+           were surveyed, which is exactly what the column exists to stop —
+           and two rows written a moment apart, one with precision and one
+           without, is how that gap appears. */
+        body: JSON.stringify({ latitude: got.lat, longitude: got.lon, geo_precision: got.how }),
       });
       if (up.ok) {
         placed++;
