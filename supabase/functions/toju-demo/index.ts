@@ -303,6 +303,14 @@ optional question — "want me to factor in your commute or schools to sharpen
 these?" — framed as optional, never a gate. Same if they push for matches
 early: show them, then say what you'd still love to know.
 
+"Show me places to rent in Ibadan, budget 2 million" IS that brief: city, deal
+and budget, all three. The right reply shows the homes. The wrong reply — and
+the one this rule exists to stop, because it happened five times out of six —
+is "whereabouts in Ibadan do you want to be near?". An area is a refinement, and
+you cannot refine a list somebody has not been shown yet. The same goes for
+household, work and timeline: every one of them is a better question once the
+homes are on screen, and a worse one before.
+
 Never invent specific listings, prices, or facts about a particular property.
 
 HARD RULE — your "reply" in this pass NEVER names a specific home, price,
@@ -347,10 +355,15 @@ Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
   • minBedrooms: inferred from the household (couple + 2 kids → 3), else null
   • anchor: the ONE place they want to be near, in their words — an area,
     an office, a school, a landmark ("Bodija", "my office at Dugbe", "UI").
-    This is what proximity gets measured from, so it is the single most
-    valuable thing you can collect after the budget. If they mention where
-    they work or study, that is an anchor; write it down. Null if they have
-    not named anywhere.
+    This is what proximity gets measured from, and it is worth having — but it
+    is NOTICED, not demanded. If they mention where they work or study, write
+    it down. Null if they have not named anywhere, and null is fine.
+    NEVER HOLD MATCHES BACK TO GET IT. "Which area of Ibadan do you want to be
+    near?" in reply to someone who has already told you the city, the deal and
+    the budget is the single most common way this conversation goes wrong —
+    measured, five times out of six. They asked to see homes; asking them to
+    narrow first, before they have seen anything, reads as a form. Show the
+    homes, then ask the area to sharpen the order.
   • intent: "live" | "invest" | null (what the home is FOR; dealType is the deal)
   • paymentPlan: "outright" | "mortgage" | "flexpay" | null
   • brief: one plain sentence for their matches page, e.g. "Renting a 1-bed in
@@ -586,7 +599,28 @@ Deno.serve(async (req: Request) => {
        most of what it offers is somewhere we hold nothing. The list is read
        per request rather than baked in: inventory is the thing most likely to
        change, and a stale list of cities is exactly the bug being fixed. */
-    const liveCities = await citiesWithListings();
+    const [liveCities, catalogueSize] = await Promise.all([
+      citiesWithListings(),
+      countListings(),
+    ]);
+
+    /* HOW BIG THE WHOLE CATALOGUE IS, because the right amount of intake
+       depends on it and the prompt cannot know it in advance. Narrowing
+       questions earn their place against hundreds of homes. Against a handful
+       they are theatre: asking which part of Ibadan somebody wants, when three
+       homes exist in total, spends the person's patience to filter a list they
+       could have read in ten seconds. This catalogue is small today and will
+       not always be, so it is measured per request rather than written down. */
+    const smallCatalogue = (catalogueSize != null && catalogueSize > 0 && catalogueSize <= 12)
+      ? `
+
+THE WHOLE CATALOGUE IS ${catalogueSize} HOMES RIGHT NOW. That changes what a
+useful question is. Do not narrow, do not ask which area, do not build a
+picture first -- there is no list long enough to need filtering. As soon as you
+know the deal type, show what fits and let them look. Anything else you want to
+know is a better question once the homes are on screen. If nothing fits, say so
+plainly rather than asking another question.`
+      : '';
     const cityGuidance = (liveCities && liveCities.length)
       ? `
 
@@ -603,7 +637,7 @@ choice in the first place, and never substitute a different city for`
 the one they asked for.`
       : '';
 
-    const first = await claude(key, SYSTEM_PROMPT + cityGuidance, messages, MAX_TOKENS);
+    const first = await claude(key, SYSTEM_PROMPT + cityGuidance + smallCatalogue, messages, MAX_TOKENS);
     if ('error' in first) return json({ error: first.error }, 502);
     const parsed = parseLoose(first.text) as {
       reply?: string; showMatches?: boolean; suggestions?: unknown;
