@@ -1,0 +1,59 @@
+# Apply database migrations through the Supabase Management API.
+#
+# MANUAL ONLY, and deliberately not on push. Edge functions deploy on push
+# because a bad one is replaced by the next one a minute later. A migration is
+# not like that: it changes data and schema, this project has no staging
+# database, and "it ran automatically because I pushed" is how a Friday
+# afternoon gets ruined. Choosing to run it is part of the safety.
+#
+# The default mode is `plan`, which runs nothing and prints what would happen.
+#
+# FIRST RUN: use `baseline`. This database already has ~112 migrations applied
+# by hand, and schema_migrations may know about none of them — `apply` would
+# try to recreate existing tables and fail on the first file. Baseline records
+# the current files as already applied without running them, so only genuinely
+# new ones ever execute. It refuses to run if anything is already recorded.
+#
+# Uses the SUPABASE_ACCESS_TOKEN secret the function deploy already needs. No
+# database password, which is the one credential nobody has put in CI.
+
+name: Migrate database
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'plan (dry run) · apply · baseline (record as done, run nothing)'
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply, baseline]
+
+concurrency:
+  # Two migration runs at once is how you get half a schema. Queue, never
+  # cancel: an interrupted run may have applied some files already, and the
+  # log is the only record of how far it got.
+  group: migrate-database
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: ${{ inputs.mode }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: bhrhejpekmhbhwryjhgk
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set."
+            exit 1
+          fi
+          node scripts/migrate.mjs "${{ inputs.mode }}"
