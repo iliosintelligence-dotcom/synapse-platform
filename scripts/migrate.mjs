@@ -132,6 +132,22 @@ console.log(`on disk   ${files.length} migration(s)`);
 console.log(`recorded  ${done.size}`);
 console.log(`pending   ${pending.length}`);
 
+/* WHEN NOTHING MATCHES, SAY SO LOUDLY. A database with history recorded under
+   a different version scheme reports every file as pending, which looks
+   identical to a fresh database and is the most dangerous state this script
+   can be in: `apply` would try to recreate tables that already exist. The
+   numbers alone do not reveal it, so the versions themselves are printed. */
+const overlap = files.filter((f) => done.has(versionOf(f))).length;
+if (done.size > 0 && overlap === 0) {
+  const sample = [...done].slice(0, 3).join(', ');
+  const last = [...done].slice(-3).join(', ');
+  console.log('\n!! The recorded history does not use this repo\'s version scheme.');
+  console.log(`   recorded versions look like: ${sample} … ${last}`);
+  console.log(`   this repo's files look like: ${files.slice(0, 3).map(versionOf).join(', ')}`);
+  console.log('   Every file therefore reads as pending when it may already be applied.');
+  console.log('   Do NOT run apply until these are reconciled.');
+}
+
 if (MODE === 'plan') {
   if (!pending.length) console.log('\nNothing pending.');
   else {
@@ -160,6 +176,13 @@ if (MODE === 'baseline') {
 }
 
 // apply
+if (done.size > 0 && overlap === 0) {
+  console.error('\nRefusing to apply: this database has ' + done.size + ' migration(s) recorded '
+    + 'and not one of them matches a file in this repo. That means the history was tracked under '
+    + 'a different version scheme, not that these files are new — applying them would try to '
+    + 'recreate objects that already exist, against a live database. Reconcile the versions first.');
+  process.exit(1);
+}
 if (!pending.length) {
   console.log('\nNothing pending.');
   process.exit(0);
