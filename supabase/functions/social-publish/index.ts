@@ -707,7 +707,48 @@ Deno.serve(async (req: Request) => {
       agencyId = membership.agency_id as string;
     }
 
-    const body = (await req.json().catch(() => ({}))) as { limit?: number; live?: boolean };
+    const body = (await req.json().catch(() => ({}))) as {
+      limit?: number; live?: boolean; action?: string;
+    };
+
+    /* WHAT TRYPOST WILL ACTUALLY ACCEPT, read from trypost rather than
+       remembered. TRYPOST_CONTENT_TYPE above is a hardcoded map, and its own
+       comment records that the first version was inferred from the
+       <platform>_<kind> pattern and shipped 'youtube_video', which does not
+       exist — two of three guesses happened to be right, which is the problem
+       with guessing. A map like that drifts silently: nothing fails until a
+       post fails.
+
+       It also carries max_media_count, which is the number that decides how
+       many photographs a carousel may hold. The portal caps galleries at ten
+       because that is Meta's limit; this is how to check trypost agrees rather
+       than assume it. Read-only, and it returns no credential. */
+    if (body.action === 'content-types') {
+      if (!trypostConfigured()) return json({ error: 'trypost is not configured' }, 400);
+      const res = await fetch(TRYPOST_URL + '/api/content-types', {
+        headers: { Authorization: 'Bearer ' + TRYPOST_KEY, Accept: 'application/json' },
+      }).catch(() => null);
+      if (!res || !res.ok) {
+        return json({ error: 'trypost content-types failed: ' + (res ? res.status : 'unreachable') }, 502);
+      }
+      const cat = await res.json().catch(() => null);
+      const list: Array<Record<string, unknown>> = Array.isArray(cat)
+        ? cat
+        : (Array.isArray((cat as { data?: unknown })?.data) ? (cat as { data: Array<Record<string, unknown>> }).data : []);
+      /* Only what we use, and only what is safe to echo: the id, the media
+         ceiling, and whether our map still points at something real. */
+      const ours = new Set(Object.values(TRYPOST_CONTENT_TYPE));
+      return json({
+        mapped: TRYPOST_CONTENT_TYPE,
+        catalogue: list.map((c) => ({
+          id: c.id ?? c.content_type ?? c.type ?? null,
+          max_media_count: c.max_media_count ?? c.media_max ?? null,
+          used_by_us: ours.has(String(c.id ?? c.content_type ?? c.type ?? '')),
+        })),
+        missing: [...ours].filter((id) =>
+          !list.some((c) => String(c.id ?? c.content_type ?? c.type ?? '') === id)),
+      });
+    }
     const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 50);
     /* A human has to ask for a live run explicitly, because the portal's
        ordinary button is a rehearsal. The scheduler cannot ask, so it always
