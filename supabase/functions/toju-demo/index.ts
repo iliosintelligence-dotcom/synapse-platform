@@ -526,7 +526,10 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'matches') {
       if (!visitorId) return json({ criteria: null, matches: [] });
       const row = await loadSession(visitorId);
-      return json({ criteria: row?.criteria ?? null, matches: row?.matches ?? [] });
+      return json({
+        criteria: row?.criteria ?? null,
+        matches: await refreshStored(row?.matches ?? []),
+      });
     }
     if (body.action === 'restore') {
       // listingCount feeds the greeting's {{LISTING_COUNT}} token — everything
@@ -543,7 +546,7 @@ Deno.serve(async (req: Request) => {
       return json({
         messages: row?.messages ?? [],
         criteria: row?.criteria ?? null,
-        matches: row?.matches ?? [],
+        matches: await refreshStored(row?.matches ?? []),
         listingCount,
         verifiedListingCount,
       });
@@ -775,6 +778,61 @@ async function saveSession(visitorId: string, messages: Msg[], criteria?: unknow
     headers: { ...s.headers, Prefer: 'resolution=merge-duplicates' },
     body: JSON.stringify(patch),
   }).catch(() => {});
+}
+
+/**
+ * A SAVED MATCH IS A SNAPSHOT, AND SNAPSHOTS GO STALE.
+ *
+ * saveSession stores the matches exactly as they were when Tayo found them,
+ * and "Your matches" reads that copy rather than searching again. So a session
+ * from last week still serves last week's world: listings that have since been
+ * retired keep appearing, and matches saved before a field existed never gain
+ * it. Both bit at once here — the 500 mock listings were retired and the photo
+ * was added on the same day, so every existing session went on showing
+ * deleted homes with no pictures, which is exactly the complaint that started
+ * all of this.
+ *
+ * Re-reading them on the way out costs one query and makes old sessions heal
+ * themselves. A match whose listing is no longer live is DROPPED rather than
+ * shown greyed out: it is not a home anybody can enquire about, and leaving it
+ * on the page invites a message to an agency about a listing that is gone.
+ */
+async function refreshStored(matches: unknown): Promise<unknown[]> {
+  if (!Array.isArray(matches) || matches.length === 0) return [];
+  const s = sb();
+  if (!s) return matches;                      // no service role: better stale than empty
+
+  const ids = matches
+    .map((m) => (m && typeof m === 'object' ? String((m as { id?: unknown }).id ?? '') : ''))
+    .filter((id) => UUID_RE.test(id));
+  if (!ids.length) return matches;
+
+  const res = await fetch(
+    `${s.url}/rest/v1/properties?select=id,property_media(url,display_order)`
+    + `&id=in.(${ids.join(',')})&${freshLiveConds().join('&')}`,
+    { headers: s.headers },
+  ).catch(() => null);
+  if (!res || !res.ok) return matches;         // a failed refresh must not empty the page
+
+  const rows = (await res.json().catch(() => [])) as Array<{
+    id: string; property_media?: Array<{ url?: string; display_order?: number }>;
+  }>;
+  if (!Array.isArray(rows)) return matches;
+
+  const live = new Map<string, string | null>();
+  for (const r of rows) {
+    const media = Array.isArray(r.property_media) ? r.property_media.slice() : [];
+    media.sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+    const url = media[0]?.url;
+    live.set(r.id, typeof url === 'string' && url.trim() ? url.trim() : null);
+  }
+
+  return matches
+    .filter((m) => live.has(String((m as { id?: unknown }).id ?? '')))
+    .map((m) => {
+      const o = m as Record<string, unknown>;
+      return { ...o, img: live.get(String(o.id)) ?? null };
+    });
 }
 
 // ── matches from the digital twin ──
