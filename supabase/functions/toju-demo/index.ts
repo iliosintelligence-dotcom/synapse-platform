@@ -874,8 +874,20 @@ function freshLiveConds(): string[] {
   // SERVICE ROLE, which bypasses RLS: the public policy's expiry clause does not
   // protect this path, so the filter here has to be the same rule, not a
   // lookalike. Matches properties_select_public exactly.
+  //
+  // AND deleted_at, WHICH WAS MISSING — the same mistake the paragraph above
+  // describes, in the same function, for a different column. Service role
+  // bypasses RLS, so a retired listing stayed fully visible to Tayo while it
+  // was correctly gone from browse, the property page and the portal. One
+  // table, two different answers, depending on which door you came through:
+  // "it keeps only bringing me the mock data" is exactly what that feels like
+  // from the outside, and it is the whole reason this reads as two datasets.
+  //
+  // It was never only about mock data either. Any listing an agency deleted
+  // would have gone on being recommended here, and Tayo would have handed a
+  // buyer a home nobody is selling.
   const now = new Date().toISOString();
-  return ['status=eq.live', 'is_active=is.true', `expires_at=gt.${now}`];
+  return ['status=eq.live', 'is_active=is.true', 'deleted_at=is.null', `expires_at=gt.${now}`];
 }
 
 /** The subset that has actually passed the checks — used for counts and copy,
@@ -980,6 +992,12 @@ async function resolveAnchor(term?: string | null, city?: string | null): Promis
   const conds = [
     `address=ilike.*${encodeURIComponent(t)}*`,
     'latitude=not.is.null', 'longitude=not.is.null',
+    /* Retired listings must not move the anchor either. This is the "middle of
+       the forty homes with Bodija in the address" fallback, and a set that
+       still counts deleted ones puts that middle somewhere no live home is —
+       quietly, since the number it produces looks exactly as plausible as a
+       correct one. */
+    'deleted_at=is.null',
   ];
   if (city && city.trim()) conds.push(`city=ilike.*${encodeURIComponent(city.trim())}*`);
   const pr = await fetch(
