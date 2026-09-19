@@ -327,6 +327,32 @@ Deno.serve(async (req: Request) => {
      right and the code reading it being wrong. */
   const appId = (Deno.env.get('META_APP_ID') ?? '').trim();
   const appSecret = (Deno.env.get('META_APP_SECRET') ?? '').trim();
+
+  /* INSTAGRAM LOGIN HAS ITS OWN CREDENTIALS. "Instagram API with Instagram
+     Login" is a separate product from Facebook Login and Meta issues it a
+     separate app id and secret -- both shown on the same console page as the
+     redirect URI box:
+
+       Instagram > API setup with Instagram login
+         > 3. Set up Instagram business login > Business login settings
+
+     Sending the Facebook app id to instagram.com/oauth/authorize is rejected
+     at the dialog, before any permissions screen appears, so there is nothing
+     for the operator to read except Meta's own generic page.
+
+     Falls back to the Facebook pair when unset, deliberately: requiring the
+     new variables would make this function start refusing on a project where
+     it currently answers, for a reason nobody has been told yet. */
+  const igAppId = (Deno.env.get('META_IG_APP_ID') ?? '').trim() || appId;
+  const igAppSecret = (Deno.env.get('META_IG_APP_SECRET') ?? '').trim() || appSecret;
+
+  /* Whichever pair this request actually needs. */
+  /* Takes unknown, because the callback's platform comes out of the signed
+     state as unknown and is compared the same way everywhere else in this
+     file. Anything that is not 'instagram' gets the Facebook pair, which is
+     the correct default for the only other platform there is. */
+  const idFor = (p: unknown) => (p === 'instagram' ? igAppId : appId);
+  const secretFor = (p: unknown) => (p === 'instagram' ? igAppSecret : appSecret);
   /* Facebook only, and optional. Empty means classic Facebook Login. Set means
      the app is on Facebook Login for Business, where a configuration -- not a
      scope list -- decides what is asked for. Not a secret: it travels in the
@@ -413,10 +439,15 @@ Deno.serve(async (req: Request) => {
          person has already been sent to Meta and back. */
       /* The redirect is no longer on this list: it is derived above and
          cannot be missing. Only the two real secrets can be. */
-      const missing = [
-        !appId && 'META_APP_ID',
-        !appSecret && 'META_APP_SECRET',
-      ].filter(Boolean) as string[];
+      /* Named for the platform being connected. Telling somebody
+         META_APP_ID is missing when they have set it and are connecting
+         Instagram is how a debugging session goes after the wrong variable
+         -- which the comment above records happening already. */
+      const missing = (platform === 'instagram'
+        ? [!igAppId && 'META_IG_APP_ID (or META_APP_ID)',
+           !igAppSecret && 'META_IG_APP_SECRET (or META_APP_SECRET)']
+        : [!appId && 'META_APP_ID', !appSecret && 'META_APP_SECRET']
+      ).filter(Boolean) as string[];
       if (missing.length) {
         return json({
           error: 'Meta is not configured on this project yet. Missing: ' + missing.join(', ') + '.',
@@ -474,7 +505,7 @@ Deno.serve(async (req: Request) => {
       const auth = new URL(platform === 'facebook'
         ? 'https://www.facebook.com/v21.0/dialog/oauth'
         : 'https://www.instagram.com/oauth/authorize');
-      auth.searchParams.set('client_id', appId);
+      auth.searchParams.set('client_id', idFor(platform));
       auth.searchParams.set('redirect_uri', redirectUri);
       auth.searchParams.set('response_type', 'code');
 
@@ -553,10 +584,18 @@ Deno.serve(async (req: Request) => {
     if (denied) return backToPortal('cancelled', url.searchParams.get('error_description') ?? denied);
 
     if (!code || !state) return json({ error: 'This endpoint expects an OAuth redirect from Meta.' }, 400);
-    if (!appId || !appSecret || !redirectUri) return backToPortal('error', 'Meta is not configured on this project.');
 
     const claims = await readState(state);
     if (!claims) return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+
+    /* AFTER the state is read, because the state is what says which
+       platform this is -- and the two platforms need different
+       credentials. Checking before it meant reading claims.platform one
+       line above the const that declares it. */
+    if (!idFor(claims.platform) || !secretFor(claims.platform) || !redirectUri) {
+      return backToPortal('error',
+        'Meta is not configured for ' + claims.platform + ' on this project.');
+    }
 
     /* The platform is read from the state we signed, never from the query --
        the callback's parameters are attacker-reachable and this one decides
@@ -567,8 +606,10 @@ Deno.serve(async (req: Request) => {
 
     /* short-lived token */
     const form = new FormData();
-    form.append('client_id', appId);
-    form.append('client_secret', appSecret);
+    /* The Instagram pair. This is the exchange that was silently going to
+       fail with the Facebook app's credentials. */
+    form.append('client_id', igAppId);
+    form.append('client_secret', igAppSecret);
     form.append('grant_type', 'authorization_code');
     form.append('redirect_uri', redirectUri);
     form.append('code', code);
