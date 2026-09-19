@@ -106,6 +106,133 @@ function metricValue(metrics: unknown, label: string): number | null {
  * metrics_at still moves so a permanently unsupported post does not hog
  * every sweep.
  */
+/* Same versions social-publish addresses. Kept in step with it: a metric
+   read against a different version than the publish is how you get a number
+   that does not match the post it is attached to. */
+const IG_GRAPH = 'https://graph.instagram.com/v21.0';
+const FB_GRAPH = 'https://graph.facebook.com/v21.0';
+
+/** A number, or null when the answer was not a number. Graph omits a field
+ *  entirely rather than returning 0 when it has nothing, and `Number(undefined)`
+ *  is NaN, which would be written as null anyway -- but silently, and for the
+ *  wrong reason. */
+function num(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Engagement for posts published straight to Meta, which the trypost sweep
+ * below never looks at because it filters on provider=trypost.
+ *
+ * Needs no scope the connect flow does not already request: on Instagram
+ * like_count and comments_count are fields on the media object
+ * (instagram_business_basic), and on Facebook the summaries need
+ * pages_read_engagement, which the publish call requires anyway.
+ */
+async function sweepMeta(limit: number, h: Record<string, string>): Promise<Record<string, unknown>> {
+  const stale = new Date(Date.now() - 3600e3).toISOString();
+  const q = `${SB_URL}/rest/v1/social_posts`
+    + '?select=id,platform,platform_post_id,agency_id'
+    + '&deleted_at=is.null&status=eq.published&provider=in.(instagram,facebook)'
+    + '&platform_post_id=not.is.null'
+    + `&or=(metrics_at.is.null,metrics_at.lt.${stale})`
+    + `&order=metrics_at.nullsfirst&limit=${limit}`;
+
+  const res = await fetch(q, { headers: h });
+  if (!res.ok) return { looked_at: 0, updated: 0, error: `read failed ${res.status}` };
+  const rows = (await res.json()) as Array<{
+    id: string; platform: string; platform_post_id: string; agency_id: string;
+  }>;
+  if (!Array.isArray(rows) || !rows.length) return { looked_at: 0, updated: 0 };
+
+  /* One token read per agency+platform. social_account_token is the only way
+     a token may leave storage and it is service_role only -- decrypting the
+     same secret once per row would be ten reads to answer one question. */
+  const tokens = new Map<string, string | null>();
+  async function tokenFor(agencyId: string, platform: string): Promise<string | null> {
+    const key = agencyId + ':' + platform;
+    if (tokens.has(key)) return tokens.get(key) ?? null;
+
+    const accRes = await fetch(
+      `${SB_URL}/rest/v1/social_accounts?select=id&agency_id=eq.${agencyId}`
+      + `&platform=eq.${platform}&is_active=is.true&deleted_at=is.null&limit=1`,
+      { headers: h },
+    );
+    const accs = accRes.ok ? await accRes.json().catch(() => []) : [];
+    const accountId = Array.isArray(accs) && accs[0] ? accs[0].id : null;
+    if (!accountId) { tokens.set(key, null); return null; }
+
+    const tRes = await fetch(`${SB_URL}/rest/v1/rpc/social_account_token`, {
+      method: 'POST', headers: h,
+      body: JSON.stringify({ p_account_id: accountId }),
+    });
+    const tok = tRes.ok ? await tRes.json().catch(() => null) : null;
+    const value = (typeof tok === 'string' && tok) ? tok : null;
+    tokens.set(key, value);
+    return value;
+  }
+
+  let updated = 0;
+  const results: unknown[] = [];
+
+  for (const row of rows) {
+    const token = await tokenFor(row.agency_id, row.platform);
+    /* Revoked or disconnected since publishing. metrics_at is NOT moved: the
+       numbers are genuinely unknown and should stay unknown, and the next
+       sweep should look again in case the agency reconnects. */
+    if (!token) { results.push({ id: row.id, skipped: 'no token' }); continue; }
+
+    let likes: number | null = null;
+    let comments: number | null = null;
+    let shares: number | null = null;
+
+    try {
+      if (row.platform === 'instagram') {
+        const r = await fetch(
+          `${IG_GRAPH}/${encodeURIComponent(row.platform_post_id)}`
+          + `?fields=like_count,comments_count&access_token=${encodeURIComponent(token)}`,
+        );
+        if (r.ok) {
+          const j = await r.json().catch(() => ({}));
+          likes = num(j.like_count);
+          comments = num(j.comments_count);
+          /* Instagram does not expose a share count on a media object. null
+             rather than 0, which would assert nobody shared it. */
+          shares = null;
+        }
+      } else {
+        const r = await fetch(
+          `${FB_GRAPH}/${encodeURIComponent(row.platform_post_id)}`
+          + '?fields=likes.summary(true).limit(0),comments.summary(true).limit(0),shares'
+          + `&access_token=${encodeURIComponent(token)}`,
+        );
+        if (r.ok) {
+          const j = await r.json().catch(() => ({}));
+          /* limit(0) asks for the COUNT without the rows. Without it Graph
+             returns the first 25 likers, which is both slower and more
+             personal data than this needs. */
+          likes = num(j?.likes?.summary?.total_count);
+          comments = num(j?.comments?.summary?.total_count);
+          shares = num(j?.shares?.count);
+        }
+      }
+    } catch { /* unreachable: leave the three null and move on */ }
+
+    const patch = { likes, comments, shares, metrics_at: new Date().toISOString() };
+    const up = await fetch(`${SB_URL}/rest/v1/social_posts?id=eq.${row.id}`, {
+      method: 'PATCH',
+      headers: { ...h, Prefer: 'return=minimal' },
+      body: JSON.stringify(patch),
+    });
+    if (up.ok) updated++;
+    results.push({ id: row.id, platform: row.platform, ...patch, written: up.ok });
+  }
+
+  return { looked_at: rows.length, updated, results };
+}
+
 async function sweep(limit: number): Promise<Response> {
   if (!SB_URL || !SERVICE_KEY) return json({ error: 'Server misconfigured' }, 500);
   const h = {
@@ -121,10 +248,17 @@ async function sweep(limit: number): Promise<Response> {
     + `&or=(metrics_at.is.null,metrics_at.lt.${new Date(Date.now() - 3600e3).toISOString()})`
     + `&order=metrics_at.nullsfirst&limit=${limit}`;
 
+  /* Meta-published posts first, and independently: they are a different
+     provider asked a different way, and a trypost outage must not stop an
+     agency's own numbers refreshing. */
+  const meta = await sweepMeta(limit, h);
+
   const res = await fetch(q, { headers: h });
-  if (!res.ok) return json({ error: `read failed ${res.status}` }, 502);
+  if (!res.ok) return json({ error: `read failed ${res.status}`, meta }, 502);
   const rows = (await res.json()) as Array<{ id: string; platform: string; platform_post_id: string }>;
-  if (!Array.isArray(rows) || !rows.length) return json({ looked_at: 0, updated: 0 });
+  if (!Array.isArray(rows) || !rows.length) {
+    return json({ looked_at: 0, updated: 0, meta });
+  }
 
   /* One trypost call per DISTINCT trypost post, not per row. Our Instagram,
      Facebook and X rows for one publish share a trypost id, so asking once
@@ -174,7 +308,9 @@ async function sweep(limit: number): Promise<Response> {
     }
   }
 
-  return json({ looked_at: rows.length, trypost_calls: byTrypost.size, updated, results });
+  return json({
+    looked_at: rows.length, trypost_calls: byTrypost.size, updated, results, meta,
+  });
 }
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
