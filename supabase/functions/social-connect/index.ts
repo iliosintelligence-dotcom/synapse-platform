@@ -86,8 +86,16 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
    declined was empty, the operator ticked a Page in the dialog, and
    /me/accounts still returned nothing, because the permission that unlocks
    the listing was never among the ones we asked for. */
+/* instagram_basic is what makes instagram_business_account return a value
+   at all. Without it /me/accounts answers with the Page and silently omits
+   the linked Instagram account -- which reads as "no Instagram linked" and
+   is not. instagram_content_publish is what allows posting to it.
+
+   On an app using Login for Business these must ALSO be ticked in the
+   configuration: the dialog obeys the configuration and ignores this list. */
 const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
-                   'pages_manage_posts', 'pages_read_engagement'];
+                   'pages_manage_posts', 'pages_read_engagement',
+                   'instagram_basic', 'instagram_content_publish'];
 
 const PLATFORMS = ['instagram', 'facebook'] as const;
 type Platform = typeof PLATFORMS[number];
@@ -215,8 +223,13 @@ async function finishFacebook(
         .map((p) => p.permission).join(', ') + ']');
 
   /* Which Pages this person administers, and the token for each. */
+  /* instagram_business_account comes back in the SAME call. Asking for it
+     here rather than in a second round trip is not only cheaper -- it means
+     the Page and the Instagram account it belongs to can never be read at
+     two different moments and disagree. */
   const pagesRes = await fetch(
-    `${G}/me/accounts?fields=id,name,access_token&limit=50`
+    `${G}/me/accounts?fields=id,name,access_token,`
+      + `instagram_business_account{id,username}&limit=50`
       + `&access_token=${encodeURIComponent(userToken)}`,
   );
   const pages = await pagesRes.json().catch(() => ({}));
@@ -224,7 +237,10 @@ async function finishFacebook(
     return backToPortal('error', pages?.error?.message ?? 'Could not read your Facebook Pages.');
   }
 
-  const list = (pages.data ?? []) as Array<{ id: string; name: string; access_token: string }>;
+  const list = (pages.data ?? []) as Array<{
+    id: string; name: string; access_token: string;
+    instagram_business_account?: { id: string; username?: string };
+  }>;
   const usable = list.filter((pg) => pg.access_token);
   if (!usable.length) {
     /* Granting the permission without ticking a Page is the single most common
@@ -270,10 +286,50 @@ async function finishFacebook(
   });
   if (connErr) return backToPortal('error', connErr.message);
 
+  /* ── and the Instagram account that Page owns ────────────────────────
+     Reached through Facebook rather than through the Instagram product, so
+     the credential is the PAGE's token and every call about it goes to
+     graph.facebook.com. auth_source carries that to the publisher, which
+     would otherwise send a Page token to graph.instagram.com and be told
+     only that it is invalid.
+
+     Not finding one is an ordinary outcome, not a failure: plenty of Pages
+     have no Instagram attached, and the Facebook connection just succeeded
+     either way. It is reported in the outcome rather than raised. */
+  const ig = page.instagram_business_account;
+  let igNote = '';
+  if (ig && ig.id) {
+    const { error: igErr } = await admin.rpc('connect_social_account', {
+      p_agency_id: claims.agency_id as string,
+      p_platform: 'instagram',
+      p_account_id: ig.id,
+      p_username: ig.username ?? '',
+      /* The PAGE token, deliberately. Instagram publishing through this path
+         is authorised as the Page, and there is no separate Instagram token
+         to be had. */
+      p_access_token: page.access_token,
+      p_refresh_token: null,
+      p_expires_at: null,
+      p_scopes: grantedScopes,
+      p_connected_by: claims.profile_id as string,
+      p_auth_source: 'facebook_login',
+    });
+    if (igErr) {
+      /* The Facebook half is already saved and genuinely worked. Saying so,
+         and naming what did not, beats reporting the whole thing as failed. */
+      console.error('social-connect: Page connected, Instagram did not: ' + igErr.message);
+      igNote = ' — Instagram could not be linked: ' + igErr.message;
+    } else {
+      igNote = ' — Instagram @' + (ig.username || ig.id) + ' connected too';
+    }
+  } else {
+    console.log('social-connect: no instagram_business_account on Page ' + page.id);
+  }
+
   return backToPortal('facebook',
-    usable.length > 1
+    (usable.length > 1
       ? `${page.name} (chosen from ${usable.length} Pages)`
-      : page.name);
+      : page.name) + igNote);
 }
 
 /* ── the flow ─────────────────────────────────────────────────────────────── */

@@ -83,6 +83,11 @@ interface Connection {
   platformAccountId: string;
   username: string;
   token: string;
+  /** WHICH OAUTH FLOW ISSUED THE TOKEN, and therefore which Graph host will
+   *  accept it. An Instagram account connected through Facebook Login holds
+   *  the PAGE's token and must be addressed on graph.facebook.com;
+   *  graph.instagram.com refuses it, and says only that it is invalid. */
+  authSource: 'instagram_login' | 'facebook_login';
 }
 
 type Adapter = (post: QueuedPost, conn: Connection) => Promise<PublishResult>;
@@ -261,6 +266,13 @@ async function waitForContainer(host: string, id: string, token: string, ms = 45
  * only call that actually makes anything public.
  */
 const instagramAdapter: Adapter = async (post, conn) => {
+  /* An Instagram account reached through Facebook Login is addressed on
+     graph.facebook.com with the Page's token. One reached through Instagram
+     Login is addressed on graph.instagram.com with its own. The endpoints
+     and parameters below are identical either way -- only the host differs,
+     and sending a token to the wrong one fails with an error that never
+     mentions the host. */
+  const HOST = conn.authSource === 'facebook_login' ? FB_GRAPH : IG_GRAPH;
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, ig_user_id: conn.platformAccountId,
   };
@@ -284,12 +296,12 @@ const instagramAdapter: Adapter = async (post, conn) => {
          API accepts for a single video -- there is no "video feed post" to
          ask for any more, and sending image_url with an mp4 fails in the
          container poll rather than at the call. */
-      const c = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media',
+      const c = await graph(HOST, '/' + conn.platformAccountId + '/media',
         isVideoUrl(only)
           ? { media_type: 'REELS', video_url: only, caption: caption, access_token: conn.token }
           : { image_url: only, caption: caption, access_token: conn.token });
       creationId = c.id;
-      await waitForContainer(IG_GRAPH, creationId, conn.token, waitMs);
+      await waitForContainer(HOST, creationId, conn.token, waitMs);
     } else {
       /* Children carry no caption of their own -- the parent holds it. Built in
          sequence rather than in parallel: Meta rate-limits container creation
@@ -298,7 +310,7 @@ const instagramAdapter: Adapter = async (post, conn) => {
       for (const url of post.media_urls) {
         /* A video CHILD is media_type VIDEO -- not REELS, which is only for a
            standalone post and is rejected inside a carousel. */
-        const child = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media',
+        const child = await graph(HOST, '/' + conn.platformAccountId + '/media',
           isVideoUrl(url)
             ? {
               media_type: 'VIDEO', video_url: url,
@@ -307,20 +319,20 @@ const instagramAdapter: Adapter = async (post, conn) => {
             : { image_url: url, is_carousel_item: 'true', access_token: conn.token });
         children.push(child.id);
       }
-      for (const id of children) await waitForContainer(IG_GRAPH, id, conn.token, waitMs);
+      for (const id of children) await waitForContainer(HOST, id, conn.token, waitMs);
 
-      const parent = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media', {
+      const parent = await graph(HOST, '/' + conn.platformAccountId + '/media', {
         media_type: 'CAROUSEL',
         children: children.join(','),
         caption: caption,
         access_token: conn.token,
       });
       creationId = parent.id;
-      await waitForContainer(IG_GRAPH, creationId, conn.token, waitMs);
+      await waitForContainer(HOST, creationId, conn.token, waitMs);
       payload.carousel_children = children;
     }
 
-    const published = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media_publish', {
+    const published = await graph(HOST, '/' + conn.platformAccountId + '/media_publish', {
       creation_id: creationId,
       access_token: conn.token,
     });
@@ -676,6 +688,10 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
  *  reads it, and no token is fetched for a run that makes no network call. */
 const NO_CONNECTION: Connection = {
   accountId: '', platformAccountId: '', username: 'rehearsal', token: '',
+  /* Never read -- a rehearsal makes no network call, so no host is chosen.
+     Present because Connection requires it, and the standalone flow is the
+     right thing for a placeholder to claim to be. */
+  authSource: 'instagram_login',
 };
 
 /**
@@ -698,6 +714,10 @@ async function loadSynapseChannels(
       platformAccountId: c.trypost_account_id,
       username: c.handle ?? 'synapse',
       token: '',
+      /* A Synapse channel publishes through trypost, which holds the grant
+         and addresses no Graph host of ours. The value is inert here; it is
+         set rather than omitted so the shape is one thing everywhere. */
+      authSource: 'instagram_login',
     };
   }
   return out;
@@ -721,7 +741,7 @@ async function loadConnections(
 
   const { data: accounts } = await admin
     .from('social_accounts')
-    .select('id, platform, platform_account_id, platform_username')
+    .select('id, platform, platform_account_id, platform_username, auth_source')
     .eq('agency_id', agencyId)
     .in('platform', platforms)
     .eq('is_active', true)
@@ -742,6 +762,9 @@ async function loadConnections(
     }
     out[a.platform] = {
       accountId: a.id,
+      /* Anything that is not explicitly facebook_login is the standalone
+         flow, which is what every row predating the column is. */
+      authSource: a.auth_source === 'facebook_login' ? 'facebook_login' : 'instagram_login',
       platformAccountId: a.platform_account_id,
       username: a.platform_username,
       token,
