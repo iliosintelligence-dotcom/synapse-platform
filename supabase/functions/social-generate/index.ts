@@ -483,9 +483,83 @@ function parseLoose(raw: string): Record<string, unknown> {
   return {};
 }
 
+/* ── who is asking, and may they ──────────────────────────────────────────
+   Returns null when the caller may proceed, or a Response to send back.
+
+   This function ran with no authentication at all: verify_jwt is false so the
+   gateway waves it through, and nothing here looked at the Authorization
+   header. A public endpoint that calls Anthropic on demand is a bill anybody
+   who finds the URL can run up, quite apart from the plan question.
+
+   The agency comes from the CALLER'S membership, never from the property in
+   the body. A property carries an agency_id, and trusting it would mean
+   anybody could generate captions by naming an agency whose plan includes
+   them. */
+async function gateCaptions(req: Request): Promise<Response | null> {
+  const authHeader = req.headers.get('Authorization') || '';
+  const supaUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  if (!supaUrl || !anonKey || !serviceKey) {
+    return json({ error: 'Server misconfigured' }, 500);
+  }
+
+  /* The anon key IS a bearer token, so "has a header" is not "is signed in".
+     The user lookup below is what actually distinguishes them: the anon key
+     resolves to no user. */
+  const userRes = await fetch(supaUrl + '/auth/v1/user', {
+    headers: { apikey: anonKey, Authorization: authHeader },
+  });
+  const user = userRes.ok ? await userRes.json().catch(() => null) : null;
+  if (!user || !user.id) {
+    return json({
+      error: 'Sign in to generate captions.',
+      hint: 'This endpoint now needs your session, not the public key.',
+    }, 401);
+  }
+
+  /* Service role to read membership: the caller's own token would be subject
+     to RLS on agency_members, which is correct for the portal and wrong for a
+     question the server is asking about the caller. */
+  const memRes = await fetch(
+    supaUrl + '/rest/v1/agency_members?select=agency_id&profile_id=eq.'
+      + encodeURIComponent(user.id) + '&deleted_at=is.null&limit=1',
+    { headers: { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey } },
+  );
+  const mem = memRes.ok ? await memRes.json().catch(() => []) : [];
+  const agencyId = Array.isArray(mem) && mem[0] ? mem[0].agency_id : null;
+  if (!agencyId) return json({ error: 'You are not a member of an agency.' }, 403);
+
+  const canRes = await fetch(supaUrl + '/rest/v1/rpc/agency_can', {
+    method: 'POST',
+    headers: {
+      apikey: serviceKey, Authorization: 'Bearer ' + serviceKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_agency_id: agencyId, p_feature: 'ai_captions' }),
+  });
+  const can = canRes.ok ? await canRes.json().catch(() => false) : false;
+  if (can !== true) {
+    /* 402, not 403. The feature exists and works and is not on your plan --
+       "payment required" is the honest status, and it lets the portal offer
+       an upgrade rather than report a fault. */
+    return json({
+      error: 'AI captions are on the Accelerate plan and above.',
+      upgrade: true,
+      hint: 'Your listings still go out on Synapse\'s own channels, and you can '
+          + 'write captions yourself. Subscription in the portal shows the plans.',
+    }, 402);
+  }
+
+  return null;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
+    const gated = await gateCaptions(req);
+    if (gated) return gated;
+
     const body = (await req.json().catch(() => ({}))) as {
       property?: Record<string, unknown>; channels?: string[];
       brand?: { name?: string; tagline?: string; voice?: string; handle?: string } | null;
