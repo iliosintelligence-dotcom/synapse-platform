@@ -172,13 +172,53 @@ async function graph(
 /** Meta will not fetch media from a URL it cannot reach, and a signed URL that
  *  expires mid-publish fails halfway through a carousel. Catch it here, where
  *  the message can name the URL, rather than as a generic Graph error. */
-function checkMedia(post: QueuedPost, max: number): string {
-  if (!post.media_urls.length) return 'This post has no media, and Meta requires at least one image.';
-  if (post.media_urls.length > max) {
-    return 'Meta accepts at most ' + max + ' items in one post; this has ' + post.media_urls.length + '.';
+/* The same test agency-listings.js applies when it records media_type and
+   the property page applies when it chooses an element. media_urls is a
+   text[] of bare URLs, so the type has to be re-derived here -- and by the
+   same rule, because two different guesses about one string is how a video
+   gets handed to Meta as a photograph.
+
+   Query and fragment are stripped first: a Supabase public URL can arrive
+   with ?t= on it, and ".mp4?t=1" matches nothing. */
+const VIDEO_EXT = /\.(mp4|mov|m4v|qt)$/i;
+function isVideoUrl(u: string): boolean {
+  return VIDEO_EXT.test(String(u || '').split('#')[0].split('?')[0]);
+}
+
+interface MediaRules {
+  max: number;
+  /* X allows four images OR one video and never a mix. That is Twitter's
+     rule rather than a preference, so it is stated here instead of being
+     discovered as a rejection. */
+  mixed: boolean;
+  maxVideos: number;
+  who: string;
+}
+
+function checkMedia(post: QueuedPost, rules: MediaRules | number): string {
+  const r: MediaRules = typeof rules === 'number'
+    ? { max: rules, mixed: true, maxVideos: rules, who: 'Meta' }
+    : rules;
+
+  if (!post.media_urls.length) {
+    return 'This post has no media, and ' + r.who + ' requires at least one photo or video.';
+  }
+  if (post.media_urls.length > r.max) {
+    return r.who + ' accepts at most ' + r.max + ' items in one post; this has '
+      + post.media_urls.length + '.';
   }
   const bad = post.media_urls.find((u) => !/^https:\/\//i.test(u));
-  if (bad) return 'Media must be a public https URL Meta can fetch. Got: ' + bad.slice(0, 80);
+  if (bad) return 'Media must be a public https URL ' + r.who + ' can fetch. Got: ' + bad.slice(0, 80);
+
+  const videos = post.media_urls.filter(isVideoUrl);
+  if (videos.length > r.maxVideos) {
+    return r.who + ' accepts at most ' + r.maxVideos + ' video'
+      + (r.maxVideos === 1 ? '' : 's') + ' in one post; this has ' + videos.length + '.';
+  }
+  if (!r.mixed && videos.length > 0 && videos.length !== post.media_urls.length) {
+    return r.who + ' cannot mix video and photos in one post — send the video on its own, '
+      + 'or photos on their own.';
+  }
   return '';
 }
 
@@ -186,8 +226,14 @@ function checkMedia(post: QueuedPost, max: number): string {
    own schedule, and publishing before it is FINISHED fails. Poll rather than
    sleep-and-hope, and give up before the function's own wall clock does -- a
    timeout that reports honestly is worth more than one that gets killed. */
-async function waitForContainer(host: string, id: string, token: string): Promise<void> {
-  const deadline = Date.now() + 45000;
+async function waitForContainer(host: string, id: string, token: string, ms = 45000): Promise<void> {
+  /* 45s is generous for a photograph and nowhere near enough for video --
+     Meta routinely spends two to five minutes transcoding one. A deadline
+     that fires before the work could possibly have finished reports a
+     failure that did not happen, and the post is marked failed while
+     Instagram is still busy succeeding. Callers pass the longer window when
+     the post carries video. */
+  const deadline = Date.now() + ms;
   let delay = 1000;
   for (;;) {
     const r = await graph(host, '/' + id, { fields: 'status_code,status', access_token: token }, 'GET');
@@ -218,35 +264,50 @@ const instagramAdapter: Adapter = async (post, conn) => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, ig_user_id: conn.platformAccountId,
   };
-  const bad = checkMedia(post, 10);
+  /* Instagram will mix video and photos inside one carousel, which is the
+     whole point of allowing it here. */
+  const bad = checkMedia(post, { max: 10, mixed: true, maxVideos: 10, who: 'Instagram' });
   if (bad) return { ok: false, postId: null, provider: 'instagram', error: bad, payload };
+
+  /* Transcoding is the slow part, so the wait is set by whether there is any
+     video at all rather than by how many. */
+  const hasVideo = post.media_urls.some(isVideoUrl);
+  const waitMs = hasVideo ? 300000 : 45000;
 
   try {
     const caption = post.caption ?? '';
     let creationId: string;
 
     if (post.media_urls.length === 1) {
-      const c = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media', {
-        image_url: post.media_urls[0],
-        caption: caption,
-        access_token: conn.token,
-      });
+      const only = post.media_urls[0];
+      /* A lone video is a REEL. Since 2024 that is the only shape the Graph
+         API accepts for a single video -- there is no "video feed post" to
+         ask for any more, and sending image_url with an mp4 fails in the
+         container poll rather than at the call. */
+      const c = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media',
+        isVideoUrl(only)
+          ? { media_type: 'REELS', video_url: only, caption: caption, access_token: conn.token }
+          : { image_url: only, caption: caption, access_token: conn.token });
       creationId = c.id;
-      await waitForContainer(IG_GRAPH, creationId, conn.token);
+      await waitForContainer(IG_GRAPH, creationId, conn.token, waitMs);
     } else {
       /* Children carry no caption of their own -- the parent holds it. Built in
          sequence rather than in parallel: Meta rate-limits container creation
          per IG user, and a burst of ten is the reliable way to hit it. */
       const children: string[] = [];
       for (const url of post.media_urls) {
-        const child = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media', {
-          image_url: url,
-          is_carousel_item: 'true',
-          access_token: conn.token,
-        });
+        /* A video CHILD is media_type VIDEO -- not REELS, which is only for a
+           standalone post and is rejected inside a carousel. */
+        const child = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media',
+          isVideoUrl(url)
+            ? {
+              media_type: 'VIDEO', video_url: url,
+              is_carousel_item: 'true', access_token: conn.token,
+            }
+            : { image_url: url, is_carousel_item: 'true', access_token: conn.token });
         children.push(child.id);
       }
-      for (const id of children) await waitForContainer(IG_GRAPH, id, conn.token);
+      for (const id of children) await waitForContainer(IG_GRAPH, id, conn.token, waitMs);
 
       const parent = await graph(IG_GRAPH, '/' + conn.platformAccountId + '/media', {
         media_type: 'CAROUSEL',
@@ -255,7 +316,7 @@ const instagramAdapter: Adapter = async (post, conn) => {
         access_token: conn.token,
       });
       creationId = parent.id;
-      await waitForContainer(IG_GRAPH, creationId, conn.token);
+      await waitForContainer(IG_GRAPH, creationId, conn.token, waitMs);
       payload.carousel_children = children;
     }
 
@@ -290,11 +351,54 @@ const facebookAdapter: Adapter = async (post, conn) => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, page_id: conn.platformAccountId,
   };
-  const bad = checkMedia(post, 10);
+  const bad = checkMedia(post, { max: 10, mixed: true, maxVideos: 10, who: 'Facebook' });
   if (bad) return { ok: false, postId: null, provider: 'facebook', error: bad, payload };
 
   try {
     const caption = post.caption ?? '';
+    const videos = post.media_urls.filter(isVideoUrl);
+    const photos = post.media_urls.filter((u) => !isVideoUrl(u));
+
+    /* Video lives on a different edge entirely: /videos with file_url, not
+       /photos with url. Sending an mp4 to /photos is rejected outright. */
+    if (videos.length === 1 && photos.length === 0) {
+      const vid = await graph(FB_GRAPH, '/' + conn.platformAccountId + '/videos', {
+        file_url: videos[0],
+        description: caption,
+        access_token: conn.token,
+      });
+      return {
+        ok: true,
+        postId: String(vid.post_id ?? vid.id),
+        provider: 'facebook',
+        error: '',
+        payload: { ...payload, video_id: vid.id, dispatched: true },
+      };
+    }
+
+    /* Facebook has no single call that interleaves video and photos the way
+       an Instagram carousel does. With both, the video is the post -- it is
+       the thing someone filmed -- and the photographs follow in their own
+       attachment. Stated here because it is a real difference in what the
+       two platforms will show, not an oversight. */
+    if (videos.length >= 1) {
+      const vid = await graph(FB_GRAPH, '/' + conn.platformAccountId + '/videos', {
+        file_url: videos[0],
+        description: caption,
+        access_token: conn.token,
+      });
+      return {
+        ok: true,
+        postId: String(vid.post_id ?? vid.id),
+        provider: 'facebook',
+        error: '',
+        payload: {
+          ...payload, video_id: vid.id, dispatched: true,
+          photos_omitted: photos.length,
+          note: 'Facebook posted the video; it cannot interleave photos with it in one post.',
+        },
+      };
+    }
 
     if (post.media_urls.length === 1) {
       const photo = await graph(FB_GRAPH, '/' + conn.platformAccountId + '/photos', {
