@@ -498,6 +498,30 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    /* ── step 0: which platforms can this project actually connect ────────
+       Setting up a Meta product is OURS, once, for every agency there will
+       ever be: the app, its credentials, its redirect URIs, App Review. An
+       agency's whole part is pressing a button and authorising.
+
+       The portal did not know which buttons were real, so it drew them all --
+       and an agency pressing the wrong one got a refusal naming environment
+       variables they have never heard of and could not set if they had. This
+       endpoint is how the portal finds out, so it can stop offering what only
+       we can fix.
+
+       BOOLEANS, NOT VALUES. It says whether credentials exist, never what they
+       are, and it is the same thing anyone learns by pressing the button and
+       reading the answer. No agency is named in the question and no user data
+       is in the reply, so it needs no session. */
+    if (url.searchParams.get('action') === 'status') {
+      return json({
+        platforms: {
+          facebook: { ready: Boolean(appId && appSecret) },
+          instagram: { ready: Boolean(igAppId && igAppSecret) },
+        },
+      });
+    }
+
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
     if (url.searchParams.get('action') === 'start') {
       /* Which product. Both live on one Meta app and one redirect URI, so the
