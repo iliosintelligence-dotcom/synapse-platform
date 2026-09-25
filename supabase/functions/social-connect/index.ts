@@ -417,8 +417,18 @@ Deno.serve(async (req: Request) => {
      Falls back to the Facebook pair when unset, deliberately: requiring the
      new variables would make this function start refusing on a project where
      it currently answers, for a reason nobody has been told yet. */
-  const igAppId = (Deno.env.get('META_IG_APP_ID') ?? '').trim() || appId;
-  const igAppSecret = (Deno.env.get('META_IG_APP_SECRET') ?? '').trim() || appSecret;
+  /* NO FALLBACK TO THE FACEBOOK PAIR. It used to fall back, and the stated
+     reason -- "requiring these would make the function start refusing on a
+     project where it currently answers" -- was wrong about what answering
+     meant. It answered with a dialog URL carrying a Facebook app id to
+     instagram.com, which Meta rejects with "invalid request" AFTER the
+     operator has typed a password. There is no configuration in which that
+     id is the right thing to send here: Instagram API with Instagram Login is
+     issued its own id and secret, beside the Facebook app's and different
+     from them. A lenient default that is never correct is just a wrong answer
+     with a friendly face. */
+  const igAppId = (Deno.env.get('META_IG_APP_ID') ?? '').trim();
+  const igAppSecret = (Deno.env.get('META_IG_APP_SECRET') ?? '').trim();
 
   /* Whichever pair this request actually needs. */
   /* Takes unknown, because the callback's platform comes out of the signed
@@ -518,13 +528,33 @@ Deno.serve(async (req: Request) => {
          Instagram is how a debugging session goes after the wrong variable
          -- which the comment above records happening already. */
       const missing = (platform === 'instagram'
-        ? [!igAppId && 'META_IG_APP_ID (or META_APP_ID)',
-           !igAppSecret && 'META_IG_APP_SECRET (or META_APP_SECRET)']
+        ? [!igAppId && 'META_IG_APP_ID', !igAppSecret && 'META_IG_APP_SECRET']
         : [!appId && 'META_APP_ID', !appSecret && 'META_APP_SECRET']
       ).filter(Boolean) as string[];
       if (missing.length) {
+        /* THE INSTAGRAM MESSAGE IS LONGER ON PURPOSE. Two of the three things
+           needed cannot be guessed from the name of a missing variable: the
+           product has to be added to the app at all, and Instagram registers
+           its redirect URI under its OWN settings rather than inheriting the
+           one Facebook Login already has.
+
+           It also names the route that works TODAY. An account linked to a
+           Facebook Page connects through the Facebook button with none of
+           this configured, and withholding that while listing what is missing
+           would be half a message. */
+        const detail = platform === 'instagram'
+          ? 'Connecting Instagram on its own needs the Instagram product set up in the '
+            + 'Meta app: App Dashboard > Instagram > API setup with Instagram login > '
+            + 'Set up Instagram business login. That page holds the Instagram App ID and '
+            + 'Secret (its own, not the Facebook app\'s) and its own OAuth redirect box, '
+            + 'which does not inherit the one Facebook Login uses. '
+            + 'If this Instagram account is linked to a Facebook Page, press Connect on '
+            + 'Facebook instead \u2014 one dialog connects the Page and the Instagram '
+            + 'account together, and needs none of the above.'
+          : '';
         return json({
-          error: 'Meta is not configured on this project yet. Missing: ' + missing.join(', ') + '.',
+          error: 'Instagram is not configured on this project yet. Missing: '
+            + missing.join(', ') + '.' + (detail ? ' ' + detail : ''),
           missing,
           hint: 'Set these on the synapse-platform project (bhrhejpekmhbhwryjhgk). '
               + 'The redirect no longer needs setting -- it is this function. '
