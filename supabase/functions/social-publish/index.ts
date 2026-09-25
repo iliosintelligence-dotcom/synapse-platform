@@ -63,6 +63,11 @@ interface QueuedPost {
      its destination. Rides along free: claim_social_due_any returns
      `setof social_posts`. */
   social_account_id: string | null;
+  /* 'feed' or 'story'. A Story is a different MEDIA TYPE on the same account,
+     not a different platform, so it travels on the row rather than in the
+     routing. Undefined on rows queued before the column existed, which read
+     as 'feed' -- which is what they are. */
+  post_format?: string | null;
 }
 
 interface PublishResult {
@@ -284,8 +289,15 @@ const instagramAdapter: Adapter = async (post, conn) => {
   };
   /* Instagram will mix video and photos inside one carousel, which is the
      whole point of allowing it here. */
-  const bad = checkMedia(post, { max: 10, mixed: true, maxVideos: 10, who: 'Instagram' });
-  if (bad) return { ok: false, postId: null, provider: 'instagram', error: bad, payload };
+  /* Feed rules only. A Story takes exactly one item -- queue_story_twin
+     already trimmed the array to one -- and running the ten-item carousel
+     rule over it would pass while meaning nothing, which reads as validation
+     that is not there. The Story branch checks the one thing that matters to
+     it: that there is a frame at all. */
+  if (post.post_format !== 'story') {
+    const bad = checkMedia(post, { max: 10, mixed: true, maxVideos: 10, who: 'Instagram' });
+    if (bad) return { ok: false, postId: null, provider: 'instagram', error: bad, payload };
+  }
 
   /* Transcoding is the slow part, so the wait is set by whether there is any
      video at all rather than by how many. */
@@ -296,7 +308,31 @@ const instagramAdapter: Adapter = async (post, conn) => {
     const caption = post.caption ?? '';
     let creationId: string;
 
-    if (post.media_urls.length === 1) {
+    if (post.post_format === 'story') {
+      /* A STORY. One media item, no caption -- the STORIES container accepts
+         image_url or video_url and nothing else. No link sticker either,
+         which is the whole of what Phase 4 was for; see the migration.
+
+         First, before the single/carousel split, because a Story is not a
+         shape of feed post. Deciding it after the media count would make a
+         one-image Story and a one-image feed post the same branch with an
+         extra condition on it, and the next media rule added here would have
+         to remember that. */
+      const only = post.media_urls[0];
+      if (!only) {
+        return {
+          ok: false, postId: null, provider: 'instagram',
+          error: 'A Story needs one photograph or video.', payload,
+        };
+      }
+      const c = await graph(HOST, '/' + conn.platformAccountId + '/media',
+        isVideoUrl(only)
+          ? { media_type: 'STORIES', video_url: only, access_token: conn.token }
+          : { media_type: 'STORIES', image_url: only, access_token: conn.token });
+      creationId = c.id;
+      await waitForContainer(HOST, creationId, conn.token, waitMs);
+      payload.story = true;
+    } else if (post.media_urls.length === 1) {
       const only = post.media_urls[0];
       /* A lone video is a REEL. Since 2024 that is the only shape the Graph
          API accepts for a single video -- there is no "video feed post" to
