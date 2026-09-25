@@ -389,6 +389,38 @@ function backToPortal(status: string, detail?: string): Response {
   return new Response(null, { status: 302, headers: { ...corsHeaders, Location: target } });
 }
 
+/* A server-side switch, read with the service role. platform_settings has
+   RLS on and no policy at all, so it is unreachable through the API and this
+   is the only way in.
+
+   Never throws. A configuration read that takes the whole function down with
+   it would turn a missing row into a 500 on a path that has a perfectly good
+   answer without it. */
+async function settingText(key: string): Promise<string> {
+  try {
+    const admin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    );
+    const { data } = await admin
+      .from('platform_settings').select('value').eq('key', key).maybeSingle();
+    const v = (data as { value?: unknown } | null)?.value;
+    /* jsonb, so it arrives as whatever was stored. Both shapes are accepted
+       because both are things a person writing a migration would reasonably
+       write, and refusing one of them would be a trap with no upside. */
+    if (typeof v === 'string') return v.trim();
+    if (v && typeof v === 'object') {
+      const id = (v as Record<string, unknown>).id;
+      if (typeof id === 'string') return id.trim();
+    }
+    return '';
+  } catch (err) {
+    console.error('settingText(' + key + ') failed: '
+      + (err instanceof Error ? err.message : String(err)));
+    return '';
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -414,9 +446,8 @@ Deno.serve(async (req: Request) => {
      at the dialog, before any permissions screen appears, so there is nothing
      for the operator to read except Meta's own generic page.
 
-     Falls back to the Facebook pair when unset, deliberately: requiring the
-     new variables would make this function start refusing on a project where
-     it currently answers, for a reason nobody has been told yet. */
+     There is no fallback to the Facebook pair -- see below for why there
+     used to be one and why it was wrong. */
   /* NO FALLBACK TO THE FACEBOOK PAIR. It used to fall back, and the stated
      reason -- "requiring these would make the function start refusing on a
      project where it currently answers" -- was wrong about what answering
@@ -442,7 +473,13 @@ Deno.serve(async (req: Request) => {
      scope list -- decides what is asked for. Not a secret: it travels in the
      dialog URL in plain sight. It sits with the secrets because it is the same
      kind of thing, a per-app value this code cannot derive for itself. */
-  const fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
+  /* ENV FIRST, THEN THE DATABASE. Env wins where it is set, so a project
+     that already has the variable behaves exactly as it did. The database
+     answers where the question was going unanswered -- which, on this
+     project, is everywhere, and is why every Facebook dialog so far has gone
+     out in classic mode against an app that is not classic. */
+  let fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
+  if (!fbConfigId) fbConfigId = await settingText('meta_fb_config_id');
   /* Both spellings are still read below. META_REDIRECT_URI is canonical;
      META_REDIRECT_URL is what Meta's own console calls "Valid OAuth Redirect
      URIs" while every human says URL, and that one letter once cost about two
@@ -516,7 +553,15 @@ Deno.serve(async (req: Request) => {
     if (url.searchParams.get('action') === 'status') {
       return json({
         platforms: {
-          facebook: { ready: Boolean(appId && appSecret) },
+          /* `mode` is reported because ready:true is not the whole story on
+             Facebook. An app built as Login for Business needs a config_id,
+             and without one this opens the classic dialog -- which is the
+             difference between a connection and an error page, and is
+             invisible from the portal either way. */
+          facebook: {
+            ready: Boolean(appId && appSecret),
+            mode: fbConfigId ? 'login-for-business' : 'classic',
+          },
           instagram: { ready: Boolean(igAppId && igAppSecret) },
         },
       });
