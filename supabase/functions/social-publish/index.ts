@@ -57,6 +57,12 @@ interface QueuedPost {
      own, amplifying the listing for free). It decides WHOSE ACCOUNT this goes
      to, which is the real routing question -- not which platform it is. */
   leg: string;
+  /* WHICH of the agency's accounts, now that there can be more than one on a
+     platform. NULL means the agency's default, which is what every row queued
+     before the column existed means -- so nothing already in the queue changes
+     its destination. Rides along free: claim_social_due_any returns
+     `setof social_posts`. */
+  social_account_id: string | null;
 }
 
 interface PublishResult {
@@ -745,7 +751,13 @@ async function loadConnections(
     .eq('agency_id', agencyId)
     .in('platform', platforms)
     .eq('is_active', true)
-    .is('deleted_at', null);
+    .is('deleted_at', null)
+    /* OLDEST FIRST, and the order is load-bearing rather than tidy. The first
+       account for a platform becomes the default for posts that name none,
+       and unordered that default would change between runs. Oldest is the
+       agency's original account -- where every post queued before there was
+       anything to choose was already going. */
+    .order('connected_at', { ascending: true });
 
   for (const a of (accounts ?? []) as Array<Record<string, string>>) {
     /* NO TOKEN IS DECRYPTED FOR A TRYPOST PLATFORM, and there is none to
@@ -760,7 +772,7 @@ async function loadConnections(
       if (!data) continue;  // connected but revoked: treated as not connected
       token = data as unknown as string;
     }
-    out[a.platform] = {
+    const conn: Connection = {
       accountId: a.id,
       /* Anything that is not explicitly facebook_login is the standalone
          flow, which is what every row predating the column is. */
@@ -769,6 +781,12 @@ async function loadConnections(
       username: a.platform_username,
       token,
     };
+    /* TWO KEYS, ONE MAP. Under its own id, so a post that named this account
+       gets exactly it; and under the platform name if nothing has claimed
+       that yet, so a post that named none gets the agency's first account.
+       uuids and platform names cannot collide. */
+    out[a.id] = conn;
+    if (!(a.platform in out)) out[a.platform] = conn;
   }
   return out;
 }
@@ -934,11 +952,19 @@ Deno.serve(async (req: Request) => {
          post would have published a listing to the AGENCY'S Instagram while
          recording it as Synapse amplification -- the same post twice on one
          account, and the attribution pointing at the wrong leg. */
+      /* THE ACCOUNT THE POST NAMED, falling back to the platform's default.
+         An agency with one account behaves exactly as before, because the
+         single account is also the platform default.
+
+         A named account that is no longer connected resolves to undefined and
+         drops into the no-connection branch below -- deliberately. Quietly
+         publishing to a DIFFERENT account because the chosen one was
+         disconnected is the one outcome nobody asked for. */
       const conn = rehearsal
         ? NO_CONNECTION
         : post.leg === 'synapse'
           ? synapseChannels[post.platform]
-          : (connByAgency[post.agency_id] ?? {})[post.platform];
+          : (connByAgency[post.agency_id] ?? {})[post.social_account_id || post.platform];
 
       /* No connected account is a different failure from a platform we cannot
          publish to at all, and it is the one the agency can fix themselves. It

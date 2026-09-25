@@ -546,8 +546,18 @@ Deno.serve(async (req: Request) => {
 
       /* Which agency, decided here from membership rather than taken from the
          caller. The state we sign is only trustworthy if what it asserts was
-         established server-side. Only an owner or admin may connect an account:
-         it is a credential for the whole agency, not for one agent. */
+         established server-side.
+
+         ANY MEMBER MAY CONNECT (changed 2026-09-25). It was owner/admin, on
+         the grounds that a Meta token speaks for the whole agency. That held
+         while there was one account per platform. Now that an agency can hold
+         several and a post names which one it goes to, an agent connecting
+         their own account is not a claim to speak for anybody -- and
+         disconnect_social_account has accepted any member since 0053, so an
+         agent could already remove an account they were not allowed to add.
+
+         Same three roles queue_social_post accepts, and connected_by records
+         who did it. */
       const admin = createClient(supaUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
@@ -558,8 +568,8 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
 
       if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
-      if (!['agency_admin', 'agency_owner'].includes(membership.role as string)) {
-        return json({ error: 'Only an agency owner or admin can connect a social account' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a social account' }, 403);
       }
 
       const state = await signState({

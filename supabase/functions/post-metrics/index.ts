@@ -138,7 +138,7 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
        can tell whether anything changed. `property_id` rides along so a
        comment can be filed against the listing it was written under without
        a second query per post. */
-    + '?select=id,platform,platform_post_id,agency_id,property_id,comments'
+    + '?select=id,platform,platform_post_id,agency_id,property_id,comments,social_account_id'
     + '&deleted_at=is.null&status=eq.published&provider=in.(instagram,facebook)'
     + '&platform_post_id=not.is.null'
     + `&or=(metrics_at.is.null,metrics_at.lt.${stale})`
@@ -149,6 +149,7 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
   const rows = (await res.json()) as Array<{
     id: string; platform: string; platform_post_id: string; agency_id: string;
     property_id: string | null; comments: number | null;
+    social_account_id: string | null;
   }>;
   if (!Array.isArray(rows) || !rows.length) return { looked_at: 0, updated: 0 };
 
@@ -163,26 +164,46 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
      ask the wrong host and record the silence as an answer. */
   type Account = { token: string; authSource: string };
   const accounts = new Map<string, Account | null>();
-  async function accountFor(agencyId: string, platform: string): Promise<Account | null> {
-    const key = agencyId + ':' + platform;
+  /* THE ACCOUNT THE POST WENT OUT ON, not "an account for that platform". A
+     token may only read its own media, so with two Instagram accounts on one
+     agency the old lookup was a coin toss and the wrong side of it comes back
+     as a permission error rather than a number.
+
+     The cache key moves with it: agency+platform identified an account when
+     there could only be one and identifies a SET now, so keying on it would
+     hand one post the token warmed by a sibling belonging to somebody else. */
+  async function accountFor(row: {
+    agency_id: string; platform: string; social_account_id: string | null;
+  }): Promise<Account | null> {
+    const key = row.social_account_id || (row.agency_id + ':' + row.platform);
     if (accounts.has(key)) return accounts.get(key) ?? null;
 
     const accRes = await fetch(
-      `${SB_URL}/rest/v1/social_accounts?select=id,auth_source&agency_id=eq.${agencyId}`
-      + `&platform=eq.${platform}&is_active=is.true&deleted_at=is.null&limit=1`,
+      row.social_account_id
+        /* Named. Still checked for active and not-deleted: an account
+           disconnected since publishing has no token to give, and the numbers
+           are then genuinely unknown rather than zero. */
+        ? `${SB_URL}/rest/v1/social_accounts?select=id,auth_source`
+          + `&id=eq.${row.social_account_id}&is_active=is.true&deleted_at=is.null&limit=1`
+        /* Not named -- a row queued before there was anything to name. Oldest
+           connected first, which is the same rule social-publish uses to pick
+           its default, so both ends resolve NULL to the same account. */
+        : `${SB_URL}/rest/v1/social_accounts?select=id,auth_source&agency_id=eq.${row.agency_id}`
+          + `&platform=eq.${row.platform}&is_active=is.true&deleted_at=is.null`
+          + '&order=connected_at.asc&limit=1',
       { headers: h },
     );
     const accs = accRes.ok ? await accRes.json().catch(() => []) : [];
-    const row = Array.isArray(accs) && accs[0] ? accs[0] : null;
-    if (!row?.id) { accounts.set(key, null); return null; }
+    const acc = Array.isArray(accs) && accs[0] ? accs[0] : null;
+    if (!acc?.id) { accounts.set(key, null); return null; }
 
     const tRes = await fetch(`${SB_URL}/rest/v1/rpc/social_account_token`, {
       method: 'POST', headers: h,
-      body: JSON.stringify({ p_account_id: row.id }),
+      body: JSON.stringify({ p_account_id: acc.id }),
     });
     const tok = tRes.ok ? await tRes.json().catch(() => null) : null;
     const value: Account | null = (typeof tok === 'string' && tok)
-      ? { token: tok, authSource: row.auth_source === 'facebook_login'
+      ? { token: tok, authSource: acc.auth_source === 'facebook_login'
             ? 'facebook_login' : 'instagram_login' }
       : null;
 
@@ -286,7 +307,7 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
   const results: unknown[] = [];
 
   for (const row of rows) {
-    const account = await accountFor(row.agency_id, row.platform);
+    const account = await accountFor(row);
     /* Revoked or disconnected since publishing. metrics_at is NOT moved: the
        numbers are genuinely unknown and should stay unknown, and the next
        sweep should look again in case the agency reconnects. */
