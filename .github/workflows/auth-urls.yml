@@ -78,7 +78,7 @@ jobs:
           # referrer; only method, path, status, error code and message are
           # ever printed.
           if [ "$MODE" = "errors" ]; then
-            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs.all"
+            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
             START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
             END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS" \
