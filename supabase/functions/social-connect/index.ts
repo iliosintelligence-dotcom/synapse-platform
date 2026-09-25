@@ -365,41 +365,68 @@ async function finishFacebook(
       + 'You must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
   }
 
-  /* One Page per agency, which is what social_accounts models (unique on
-     agency + platform). The first is chosen deliberately rather than silently:
-     when there are several, the portal is told so it can say which one. */
-  const page = usable[0];
+  /* ── EVERY PAGE THE OPERATOR SHARED ──────────────────────────────────
+     This kept usable[0] and reported which one it had picked. Facebook's
+     dialog asks which Pages to share and the operator ticks them -- that is
+     a decision, already made, and taking the first row of the answer threw
+     the rest of it away. On an account that administers the company's Page
+     and an agency's, "the first" is whichever Meta happened to order first.
 
+     The comment that defended it said social_accounts is unique on agency +
+     platform. That stopped being true this morning: an agency can hold
+     several accounts per platform and a post names which one it goes to. The
+     reader had been left behind by its own schema.
 
+     So each shared Page is stored, with the Instagram account it owns, and
+     the agent chooses per post. */
   const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
-  const { error: connErr } = await admin.rpc('connect_social_account', {
-    p_agency_id: claims.agency_id as string,
-    p_platform: 'facebook',
-    p_account_id: page.id,
-    p_username: page.name ?? '',
-    p_access_token: page.access_token,
-    p_refresh_token: null,
-    // Deliberately null: a Page token from a long-lived user token has no
-    // expiry, and a fabricated one would show as an expired session.
-    p_expires_at: null,
-    p_scopes: grantedScopes,
-    p_connected_by: claims.profile_id as string,
-  });
-  if (connErr) return backToPortal('error', connErr.message);
+  const connected: string[] = [];
+  const problems: string[] = [];
 
-  /* ── and the Instagram account that Page owns ────────────────────────
-     Reached through Facebook rather than through the Instagram product, so
-     the credential is the PAGE's token and every call about it goes to
-     graph.facebook.com. auth_source carries that to the publisher, which
-     would otherwise send a Page token to graph.instagram.com and be told
-     only that it is invalid.
+  for (const pg of usable) {
+    const { error: connErr } = await admin.rpc('connect_social_account', {
+      p_agency_id: claims.agency_id as string,
+      p_platform: 'facebook',
+      p_account_id: pg.id,
+      p_username: pg.name ?? '',
+      p_access_token: pg.access_token,
+      p_refresh_token: null,
+      // Deliberately null: a Page token from a long-lived user token has no
+      // expiry, and a fabricated one would show as an expired session.
+      p_expires_at: null,
+      p_scopes: grantedScopes,
+      p_connected_by: claims.profile_id as string,
+      /* NEVER PASSED BEFORE, so every Page ever connected was recorded as
+         'instagram_login'. Harmless so far only because the Facebook adapter
+         uses graph.facebook.com whatever the column says -- but it is a false
+         statement in the one column whose job is to name the host that
+         accepts this token. */
+      p_auth_source: 'facebook_login',
+    });
+    if (connErr) {
+      /* One Page failing is not the others failing. Recorded and carried to
+         the end rather than abandoning Pages that would have saved. */
+      console.error('social-connect: could not save Page ' + pg.id + ': ' + connErr.message);
+      problems.push((pg.name || pg.id) + ': ' + connErr.message);
+      continue;
+    }
+    connected.push(pg.name || pg.id);
 
-     Not finding one is an ordinary outcome, not a failure: plenty of Pages
-     have no Instagram attached, and the Facebook connection just succeeded
-     either way. It is reported in the outcome rather than raised. */
-  const ig = page.instagram_business_account;
-  let igNote = '';
-  if (ig && ig.id) {
+    /* ── and the Instagram account that Page owns ──────────────────────
+       Reached through Facebook rather than through the Instagram product, so
+       the credential is the PAGE's token and every call about it goes to
+       graph.facebook.com. auth_source carries that to the publisher, which
+       would otherwise send a Page token to graph.instagram.com and be told
+       only that it is invalid.
+
+       Not finding one is an ordinary outcome, not a failure: plenty of Pages
+       have no Instagram attached, and the Facebook connection just succeeded
+       either way. */
+    const ig = pg.instagram_business_account;
+    if (!ig?.id) {
+      console.log('social-connect: no instagram_business_account on Page ' + pg.id);
+      continue;
+    }
     const { error: igErr } = await admin.rpc('connect_social_account', {
       p_agency_id: claims.agency_id as string,
       p_platform: 'instagram',
@@ -408,7 +435,7 @@ async function finishFacebook(
       /* The PAGE token, deliberately. Instagram publishing through this path
          is authorised as the Page, and there is no separate Instagram token
          to be had. */
-      p_access_token: page.access_token,
+      p_access_token: pg.access_token,
       p_refresh_token: null,
       p_expires_at: null,
       p_scopes: grantedScopes,
@@ -416,21 +443,24 @@ async function finishFacebook(
       p_auth_source: 'facebook_login',
     });
     if (igErr) {
-      /* The Facebook half is already saved and genuinely worked. Saying so,
-         and naming what did not, beats reporting the whole thing as failed. */
       console.error('social-connect: Page connected, Instagram did not: ' + igErr.message);
-      igNote = ' — Instagram could not be linked: ' + igErr.message;
+      problems.push('Instagram @' + (ig.username || ig.id) + ': ' + igErr.message);
     } else {
-      igNote = ' — Instagram @' + (ig.username || ig.id) + ' connected too';
+      connected.push('Instagram @' + (ig.username || ig.id));
     }
-  } else {
-    console.log('social-connect: no instagram_business_account on Page ' + page.id);
+  }
+
+  /* Every one of them failed to save. That is our problem, not Meta's, and
+     reporting it as a success with an empty list would be the worst of both. */
+  if (!connected.length) {
+    return backToPortal('error',
+      'Facebook shared ' + usable.length + ' account(s) and none could be saved: '
+      + problems.join('; '));
   }
 
   return backToPortal('facebook',
-    (usable.length > 1
-      ? `${page.name} (chosen from ${usable.length} Pages)`
-      : page.name) + igNote);
+    connected.join(', ')
+    + (problems.length ? ' \u2014 not saved: ' + problems.join('; ') : ''));
 }
 
 /* ── the flow ─────────────────────────────────────────────────────────────── */
