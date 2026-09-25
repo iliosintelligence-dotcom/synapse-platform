@@ -134,7 +134,11 @@ function num(v: unknown): number | null {
 async function sweepMeta(limit: number, h: Record<string, string>): Promise<Record<string, unknown>> {
   const stale = new Date(Date.now() - 3600e3).toISOString();
   const q = `${SB_URL}/rest/v1/social_posts`
-    + '?select=id,platform,platform_post_id,agency_id'
+    /* `comments` is the count from the LAST sweep, and it is read so this one
+       can tell whether anything changed. `property_id` rides along so a
+       comment can be filed against the listing it was written under without
+       a second query per post. */
+    + '?select=id,platform,platform_post_id,agency_id,property_id,comments'
     + '&deleted_at=is.null&status=eq.published&provider=in.(instagram,facebook)'
     + '&platform_post_id=not.is.null'
     + `&or=(metrics_at.is.null,metrics_at.lt.${stale})`
@@ -144,54 +148,169 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
   if (!res.ok) return { looked_at: 0, updated: 0, error: `read failed ${res.status}` };
   const rows = (await res.json()) as Array<{
     id: string; platform: string; platform_post_id: string; agency_id: string;
+    property_id: string | null; comments: number | null;
   }>;
   if (!Array.isArray(rows) || !rows.length) return { looked_at: 0, updated: 0 };
 
   /* One token read per agency+platform. social_account_token is the only way
      a token may leave storage and it is service_role only -- decrypting the
      same secret once per row would be ten reads to answer one question. */
-  const tokens = new Map<string, string | null>();
-  async function tokenFor(agencyId: string, platform: string): Promise<string | null> {
+  /* THE TOKEN AND THE HOST THAT ACCEPTS IT, TOGETHER. They are one fact:
+     an Instagram account connected through Facebook Login holds the PAGE's
+     token and is addressed on graph.facebook.com, and the same account
+     connected through Instagram Login is addressed on graph.instagram.com.
+     Reading the token without reading auth_source is how this sweep came to
+     ask the wrong host and record the silence as an answer. */
+  type Account = { token: string; authSource: string };
+  const accounts = new Map<string, Account | null>();
+  async function accountFor(agencyId: string, platform: string): Promise<Account | null> {
     const key = agencyId + ':' + platform;
-    if (tokens.has(key)) return tokens.get(key) ?? null;
+    if (accounts.has(key)) return accounts.get(key) ?? null;
 
     const accRes = await fetch(
-      `${SB_URL}/rest/v1/social_accounts?select=id&agency_id=eq.${agencyId}`
+      `${SB_URL}/rest/v1/social_accounts?select=id,auth_source&agency_id=eq.${agencyId}`
       + `&platform=eq.${platform}&is_active=is.true&deleted_at=is.null&limit=1`,
       { headers: h },
     );
     const accs = accRes.ok ? await accRes.json().catch(() => []) : [];
-    const accountId = Array.isArray(accs) && accs[0] ? accs[0].id : null;
-    if (!accountId) { tokens.set(key, null); return null; }
+    const row = Array.isArray(accs) && accs[0] ? accs[0] : null;
+    if (!row?.id) { accounts.set(key, null); return null; }
 
     const tRes = await fetch(`${SB_URL}/rest/v1/rpc/social_account_token`, {
       method: 'POST', headers: h,
-      body: JSON.stringify({ p_account_id: accountId }),
+      body: JSON.stringify({ p_account_id: row.id }),
     });
     const tok = tRes.ok ? await tRes.json().catch(() => null) : null;
-    const value = (typeof tok === 'string' && tok) ? tok : null;
-    tokens.set(key, value);
+    const value: Account | null = (typeof tok === 'string' && tok)
+      ? { token: tok, authSource: row.auth_source === 'facebook_login'
+            ? 'facebook_login' : 'instagram_login' }
+      : null;
+
+    accounts.set(key, value);
     return value;
   }
 
+  /* ── the comments, read back and filed ────────────────────────────────
+     Two platforms, two field names for the same three facts, one shape out.
+     Normalised here so nothing downstream -- the upsert, the portal, a person
+     reading a log -- has to know which platform a row came from to read it.
+
+     WHAT IS TAKEN AND WHAT IS LEFT. The handle and the text, because a reply
+     is addressed to the first and about the second. Not the commenter's
+     profile id, not their picture, not anything that would let a row here be
+     joined to a row there into a record of a person who has never used
+     Synapse. The table's comment says the same thing; this is where it is
+     actually true or not.
+
+     Fifty is the cap. A property post with more than fifty comments is a
+     result worth someone's whole attention rather than a card, and paging
+     through hundreds on a background sweep spends rate limit that posts going
+     out on time need more. */
+  async function readComments(
+    row: { id: string; platform: string; platform_post_id: string;
+           agency_id: string; property_id: string | null },
+    account: Account,
+  ): Promise<number> {
+    const isIg = row.platform === 'instagram';
+    const host = isIg
+      ? (account.authSource === 'facebook_login' ? FB_GRAPH : IG_GRAPH)
+      : FB_GRAPH;
+    const fields = isIg
+      ? 'id,text,username,timestamp'
+      : 'id,message,created_time,from{name}';
+
+    const r = await fetch(
+      `${host}/${encodeURIComponent(row.platform_post_id)}/comments`
+      + `?fields=${encodeURIComponent(fields)}&limit=50`
+      + `&access_token=${encodeURIComponent(account.token)}`,
+    );
+    if (!r.ok) {
+      /* The most likely cause by far is a missing scope: comment text needs
+         instagram_manage_comments, and an account connected before that was
+         asked for holds a token that will never have it. Naming the status
+         rather than swallowing it is what makes that diagnosable from a log
+         instead of from a guess. */
+      console.error('post-metrics: comments ' + r.status + ' for post ' + row.id
+        + ' on ' + host + ' (a 403 here usually means the token predates the '
+        + 'comment scope and the account needs reconnecting)');
+      return 0;
+    }
+
+    const j = await r.json().catch(() => ({}));
+    const data = Array.isArray(j?.data) ? j.data : [];
+    if (!data.length) return 0;
+
+    const payload = data.map((c: Record<string, unknown>) => ({
+      social_post_id: row.id,
+      agency_id: row.agency_id,
+      property_id: row.property_id,
+      platform: row.platform,
+      platform_comment_id: String(c.id ?? ''),
+      author_handle: isIg
+        ? (typeof c.username === 'string' ? c.username : null)
+        : ((c.from as Record<string, unknown>)?.name as string ?? null),
+      body: isIg
+        ? (typeof c.text === 'string' ? c.text : null)
+        : (typeof c.message === 'string' ? c.message : null),
+      commented_at: (isIg ? c.timestamp : c.created_time) ?? null,
+      fetched_at: new Date().toISOString(),
+    })).filter((c: { platform_comment_id: string }) => c.platform_comment_id);
+
+    if (!payload.length) return 0;
+
+    /* merge-duplicates, keyed on the platform's own comment id. An edited
+       comment updates in place and a comment already seen does not duplicate.
+       handled_at is deliberately absent from the payload: PostgREST only
+       updates the columns it is sent, so a comment an agent has already dealt
+       with does not come back unhandled because somebody fixed a typo in it. */
+    const up = await fetch(
+      `${SB_URL}/rest/v1/social_comments`
+      + '?on_conflict=platform,platform_comment_id',
+      {
+        method: 'POST',
+        headers: { ...h, Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!up.ok) {
+      console.error('post-metrics: could not file ' + payload.length
+        + ' comments for post ' + row.id + ': ' + up.status
+        + ' ' + (await up.text().catch(() => '')));
+      return 0;
+    }
+    return payload.length;
+  }
+
   let updated = 0;
+  let filed = 0;
   const results: unknown[] = [];
 
   for (const row of rows) {
-    const token = await tokenFor(row.agency_id, row.platform);
+    const account = await accountFor(row.agency_id, row.platform);
     /* Revoked or disconnected since publishing. metrics_at is NOT moved: the
        numbers are genuinely unknown and should stay unknown, and the next
        sweep should look again in case the agency reconnects. */
-    if (!token) { results.push({ id: row.id, skipped: 'no token' }); continue; }
+    if (!account) { results.push({ id: row.id, skipped: 'no token' }); continue; }
+    const token = account.token;
 
     let likes: number | null = null;
     let comments: number | null = null;
     let shares: number | null = null;
+    /* Distinguishes "asked, and the answer was nothing" from "never got an
+       answer". Only the first is worth writing down. */
+    let read = false;
+    let why = '';
 
     try {
       if (row.platform === 'instagram') {
+        /* THE HOST COMES FROM THE ACCOUNT. Same media id, same fields --
+           only the host differs, and a Page token sent to
+           graph.instagram.com is refused with an error that never mentions
+           the host. social-publish picks its host the same way, from the
+           same column, which is the point of the column. */
+        const host = account.authSource === 'facebook_login' ? FB_GRAPH : IG_GRAPH;
         const r = await fetch(
-          `${IG_GRAPH}/${encodeURIComponent(row.platform_post_id)}`
+          `${host}/${encodeURIComponent(row.platform_post_id)}`
           + `?fields=like_count,comments_count&access_token=${encodeURIComponent(token)}`,
         );
         if (r.ok) {
@@ -201,6 +320,9 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
           /* Instagram does not expose a share count on a media object. null
              rather than 0, which would assert nobody shared it. */
           shares = null;
+          read = true;
+        } else {
+          why = 'instagram ' + r.status + ' on ' + host;
         }
       } else {
         const r = await fetch(
@@ -216,9 +338,35 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
           likes = num(j?.likes?.summary?.total_count);
           comments = num(j?.comments?.summary?.total_count);
           shares = num(j?.shares?.count);
+          read = true;
+        } else {
+          why = 'facebook ' + r.status;
         }
       }
-    } catch { /* unreachable: leave the three null and move on */ }
+    } catch (err) {
+      why = 'threw: ' + (err instanceof Error ? err.message : String(err));
+    }
+
+    /* A FAILED READ IS NOT A RESULT. Stamping metrics_at after a refused
+       request marks the post as measured, hides the failure from every
+       report, and sends the sweep round again an hour later to fail the same
+       way in the same silence. Same rule as a missing token: leave it
+       unknown, look again next time, and say so in the log. */
+    if (!read) {
+      console.error('post-metrics: ' + row.platform + ' post ' + row.id + ' not read: ' + why);
+      results.push({ id: row.id, platform: row.platform, skipped: why || 'read failed' });
+      continue;
+    }
+
+    /* THE TEXT, WHEN THERE IS NEW TEXT TO HAVE. Fetched before the count is
+       written, so a failure to file the comments leaves the OLD count on the
+       row and the next sweep tries again. Write the new count first and the
+       post looks unchanged forever after a single bad request. */
+    let got = 0;
+    if (comments !== null && comments > 0 && comments !== row.comments) {
+      got = await readComments(row, account);
+      filed += got;
+    }
 
     const patch = { likes, comments, shares, metrics_at: new Date().toISOString() };
     const up = await fetch(`${SB_URL}/rest/v1/social_posts?id=eq.${row.id}`, {
@@ -227,10 +375,10 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
       body: JSON.stringify(patch),
     });
     if (up.ok) updated++;
-    results.push({ id: row.id, platform: row.platform, ...patch, written: up.ok });
+    results.push({ id: row.id, platform: row.platform, ...patch, comments_filed: got, written: up.ok });
   }
 
-  return { looked_at: rows.length, updated, results };
+  return { looked_at: rows.length, updated, comments_filed: filed, results };
 }
 
 async function sweep(limit: number): Promise<Response> {

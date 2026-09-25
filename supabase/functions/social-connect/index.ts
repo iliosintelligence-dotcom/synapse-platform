@@ -68,7 +68,12 @@ const STATE_TTL_MS = 15 * 60 * 1000;
    over-broad requests, and every extra scope is another thing to justify.
    These are the current values for the Instagram API with Instagram Login;
    the older `business_*` names were deprecated in January 2025. */
-const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publish'];
+/* instagram_business_manage_comments is what lets us READ the comments on
+   our own posts. Instagram has no read-only comments permission -- the manage
+   scope is the only one that returns the text -- and engagement has to come
+   back to the agency somehow or publishing is a one-way street. */
+const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publish',
+                   'instagram_business_manage_comments'];
 
 /* Facebook Pages. A Page token is what actually posts, and `pages_show_list`
    is what lets us discover which Pages this person administers in order to get
@@ -93,9 +98,22 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
 
    On an app using Login for Business these must ALSO be ticked in the
    configuration: the dialog obeys the configuration and ignores this list. */
+/* instagram_manage_comments, for the same reason and with the same
+   reservation: it is the only scope that returns comment text on Instagram.
+
+   pages_manage_engagement is NOT here. Comments on a PAGE post are readable
+   with pages_read_engagement, which is already in this list, so asking for
+   the manage scope would be asking to write in public for a feature that
+   only reads. Add it the day something actually replies, and not before.
+
+   A SCOPE IS GRANTED ONCE, at the moment the token is issued. Adding one
+   later does not upgrade a live token -- the agency has to disconnect and
+   connect again. That is why this is going in before the first connection
+   rather than alongside the feature that uses it. */
 const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
                    'pages_manage_posts', 'pages_read_engagement',
-                   'instagram_basic', 'instagram_content_publish'];
+                   'instagram_basic', 'instagram_content_publish',
+                   'instagram_manage_comments'];
 
 const PLATFORMS = ['instagram', 'facebook'] as const;
 type Platform = typeof PLATFORMS[number];
