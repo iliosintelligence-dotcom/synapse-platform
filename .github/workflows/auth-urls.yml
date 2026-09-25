@@ -73,6 +73,16 @@ jobs:
           CURRENT=$(jq '{site_url, uri_allow_list}' "$TMP")
           echo "── current ──"; echo "$CURRENT"
 
+          # The password rules GoTrue enforces on sign-up and on a reset. Read
+          # because the reset page's own check (8 characters) must match them:
+          # a stricter server rule fails AFTER the person submits, with a
+          # message the page did not recognise. Rules, not secrets.
+          echo "── password policy ──"
+          jq '{password_min_length, password_required_characters,
+               password_hibp_enabled,
+               security_update_password_require_reauthentication,
+               mailer_otp_exp}' "$TMP"
+
           if [ "$MODE" = "apply" ]; then
             SITE=$(jq -r '.site_url' supabase/auth-urls.json)
             MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
