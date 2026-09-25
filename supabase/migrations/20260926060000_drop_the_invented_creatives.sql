@@ -1,0 +1,51 @@
+-- Drop campaign_creatives.
+--
+-- Asked for directly by Eden, after the portal stopped reading the table:
+-- "drop the table".
+--
+-- ── what was in it, checked before dropping ─────────────────────────────
+--
+--   rows                6
+--   campaigns touched   2
+--   rows with a CTR     0
+--   inbound foreign keys 0
+--   dependent views      0
+--
+-- And the six headlines, verbatim:
+--
+--   From N1.2M/mo on a payment plan.
+--   Room for everyone -- 7 checks passed.
+--   Schools 10 min away. Verified title.
+--   Stop renting. Start owning.
+--   The school run just got shorter.
+--   Your first home, seven checks done.
+--
+-- Every one of those is a literal from the HEADLINES pool deleted from
+-- agency.html in the previous commit. There is no agency's work in this
+-- table -- it is six strings this codebase wrote about itself, plus a `ctr`
+-- column that was never once populated and a `status` moving between
+-- 'learning' and 'scaling' that nothing ever acted on.
+--
+-- Nothing references it: no foreign keys point at it, no view reads it, and
+-- the three functions that wrote to it (createCampaign's creatives block,
+-- addCreatives, setCreativeStatus) were removed from the data layer in the
+-- same push as this migration. The code went first deliberately -- a live
+-- function pointing at a dropped table is a 404 waiting for whoever wires it
+-- back up.
+--
+-- ── this is irreversible, and that is the point ─────────────────────────
+--
+-- A soft delete would leave the rows queryable and the table in the schema,
+-- which is how "we stopped using that" becomes "somebody found it and
+-- restored it". Fabricated performance data does not deserve a tombstone it
+-- can be recovered from.
+--
+-- What replaced it is real and already live: campaign_performance() sums
+-- social_post_stats() over the posts actually filed under a campaign, and the
+-- leaderboard ranks published posts by the enquiries and taps they earned.
+--
+-- RESTRICT, not CASCADE. The audit above says nothing depends on this table;
+-- if that is somehow wrong, the right outcome is a migration that fails
+-- loudly rather than one that quietly takes something else with it.
+
+drop table if exists public.campaign_creatives restrict;
