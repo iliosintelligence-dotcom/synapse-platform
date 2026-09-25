@@ -101,10 +101,18 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
 /* instagram_manage_comments, for the same reason and with the same
    reservation: it is the only scope that returns comment text on Instagram.
 
-   pages_manage_engagement is NOT here. Comments on a PAGE post are readable
-   with pages_read_engagement, which is already in this list, so asking for
-   the manage scope would be asking to write in public for a feature that
-   only reads. Add it the day something actually replies, and not before.
+   pages_manage_engagement is NOT here: it is the power to write and
+   moderate in public, and nothing here does either. Add it the day
+   something actually replies publicly, and not before.
+
+   pages_read_user_content IS here, and an earlier version of this comment
+   said it was not needed -- that Page comments were readable with
+   pages_read_engagement. Meta's permissions reference says otherwise:
+   read_engagement covers content POSTED BY THE PAGE, and read_user_content
+   covers "comments ... by users". A comment on a listing is written by a
+   user. Worse, Meta lists read_user_content as a DEPENDENCY of
+   instagram_basic, which the whole Facebook-Login Instagram path stands on.
+   Caught while writing the App Review pack, before the first connection.
 
    A SCOPE IS GRANTED ONCE, at the moment the token is issued. Adding one
    later does not upgrade a live token -- the agency has to disconnect and
@@ -122,6 +130,7 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
    nothing sends, and social_reply_settings.enabled defaults to false. */
 const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
                    'pages_manage_posts', 'pages_read_engagement',
+                   'pages_read_user_content',
                    'instagram_basic', 'instagram_content_publish',
                    'instagram_manage_comments', 'pages_messaging'];
 
