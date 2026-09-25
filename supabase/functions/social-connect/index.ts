@@ -180,7 +180,14 @@ async function finishFacebook(
   appId: string,
   appSecret: string,
   redirectUri: string,
+  /* PASSED, NOT REACHED FOR. This function is declared at the top level and
+     fbConfigId is resolved inside the request handler, so reading it here
+     would be a ReferenceError -- the same scope mistake that made Generate
+     captions report a network fault this morning and broke Post now before
+     that. Empty string means classic Facebook Login. */
+  fbConfigId: string,
 ): Promise<Response> {
+  const usingConfig = !!fbConfigId;
   const G = 'https://graph.facebook.com/v21.0';
 
   const tokRes = await fetch(
@@ -275,11 +282,48 @@ async function finishFacebook(
     }
     console.error('social-connect: /me/accounts returned ' + list.length
       + ' page(s), ' + usable.length + ' with a token');
+
+    /* WHICH PERMISSION, NAMED. grantedScopes was read four lines above for
+       exactly this and the decision here used to ignore it -- the diagnosis
+       was computed, logged where nobody in the portal can reach it, and
+       thrown away.
+
+       These two are what /me/accounts needs to return anything at all.
+       pages_manage_metadata is the one that surprises people: Meta's own
+       reference requires it for this endpoint, and without it the call
+       SUCCEEDS and returns an empty list, which is indistinguishable from
+       administering no Pages. */
+    const needed = ['pages_show_list', 'pages_manage_metadata'];
+    const absent = needed.filter((p) => !grantedScopes.includes(p));
+
+    /* Where to grant them, which differs by product and is the next thing
+       likely to go wrong. Under Login for Business the CONFIGURATION decides
+       and the scope list in this file is ignored entirely, so "grant the
+       permission" means editing the configuration -- not re-running the
+       dialog more carefully, which is what the old message advised and which
+       cannot work. */
+    const whereToFix = usingConfig
+      ? 'Add them to Facebook Login for Business > Configurations > '
+        + 'configuration ' + fbConfigId + '. On this app the configuration '
+        + 'decides the permissions and the dialog ignores any list we send.'
+      : 'Add them in the Meta app under Facebook Login, then connect again.';
+
+    if (absent.length) {
+      return backToPortal('error',
+        'Facebook did not grant ' + absent.join(' and ')
+        + ', so it reported no Pages at all rather than an error. ' + whereToFix
+        + ' (Granted: ' + (grantedScopes.join(', ') || 'nothing') + '.)');
+    }
+
+    /* The permissions are there, so this is the operator's to fix: they were
+       asked which Pages to share and did not tick one. Only now is that
+       advice correct. */
     return backToPortal('error', list.length
       ? 'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
         + 'Reconnect and leave every permission switched on.'
-      : 'No Facebook Page came back. Reconnect and tick the Page you post from '
-        + '-- you must be an admin of it, and you need at least one Page to exist.');
+      : 'Facebook granted the permissions but shared no Page. Connect again and '
+        + 'tick the Page you post from when it asks which assets to share -- you '
+        + 'must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
   }
 
   /* One Page per agency, which is what social_accounts models (unique on
@@ -803,7 +847,7 @@ Deno.serve(async (req: Request) => {
        the callback's parameters are attacker-reachable and this one decides
        which token exchange runs and which account gets written. */
     if (claims.platform === 'facebook') {
-      return await finishFacebook(code, claims, appId, appSecret, redirectUri);
+      return await finishFacebook(code, claims, appId, appSecret, redirectUri, fbConfigId);
     }
 
     /* short-lived token */
