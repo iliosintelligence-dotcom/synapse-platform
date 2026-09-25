@@ -645,9 +645,28 @@ Deno.serve(async (req: Request) => {
          dialog was actually built is the first thing worth knowing.
          `redirectUri` is reported for the same reason: it was wrong once, in
          a way nothing downstream could see. */
+      /* THE WHOLE REQUEST, minus the one part worth withholding. "Invalid
+         request" is Meta's answer to parameters it did not like, and which
+         parameters those were is not recoverable from the portal -- you come
+         back with nothing connected and no error of ours to read.
+
+         The client id is public: it travels in the dialog URL that the
+         operator's own browser is about to display. Saying WHICH pair it came
+         from matters more than the value -- sending the Facebook app id to
+         instagram.com is a failure that looks like every other failure.
+
+         The state is deliberately not logged: it is signed and carries the
+         agency and profile id. */
       console.log('social-connect start: platform=' + platform
         + ' mode=' + (usingConfig ? 'login-for-business' : 'classic')
-        + ' redirect=' + redirectUri);
+        + ' redirect=' + redirectUri
+        + ' client_id=' + (idFor(platform) || '(unset)')
+        + ' creds=' + (platform === 'instagram'
+            ? (Deno.env.get('META_IG_APP_ID') ? 'instagram-pair' : 'facebook-pair-fallback')
+            : 'facebook-pair')
+        + (usingConfig
+            ? ' config_id=' + fbConfigId
+            : ' scope=' + scopes.join(',')));
 
       return json({
         url: auth.toString(),
