@@ -241,7 +241,17 @@ async function finishFacebook(
   const granted = permRows
     .filter((p) => p.status === 'granted')
     .map((p) => p.permission);
-  if (granted.length) grantedScopes = granted;
+  /* WAS THE GRANT ACTUALLY READ. The fallback below is fine for what it is
+     used for -- recording a scope list on the account, where the requested
+     list is a fair stand-in -- and is poison for anything that REPORTS what
+     happened. FB_SCOPES contains every permission we ask for, so a check of
+     "did Facebook grant pages_show_list" against the fallback always answers
+     yes, and says so to the operator as though it were an observation.
+
+     One flag, so the difference between knowing and assuming survives the
+     next few lines. */
+  let permsKnown = false;
+  if (granted.length) { grantedScopes = granted; permsKnown = true; }
   else console.warn('social-connect: could not read granted permissions; recording the requested list');
   console.log('social-connect: granted = [' + grantedScopes.join(', ')
     + '] declined = [' + permRows.filter((p) => p.status !== 'granted')
@@ -294,7 +304,9 @@ async function finishFacebook(
        SUCCEEDS and returns an empty list, which is indistinguishable from
        administering no Pages. */
     const needed = ['pages_show_list', 'pages_manage_metadata'];
-    const absent = needed.filter((p) => !grantedScopes.includes(p));
+    /* Only meaningful when the grant was actually read. Against the fallback
+       this is a check of our own request against itself. */
+    const absent = permsKnown ? needed.filter((p) => !grantedScopes.includes(p)) : [];
 
     /* Where to grant them, which differs by product and is the next thing
        likely to go wrong. Under Login for Business the CONFIGURATION decides
@@ -315,15 +327,42 @@ async function finishFacebook(
         + ' (Granted: ' + (grantedScopes.join(', ') || 'nothing') + '.)');
     }
 
-    /* The permissions are there, so this is the operator's to fix: they were
-       asked which Pages to share and did not tick one. Only now is that
-       advice correct. */
-    return backToPortal('error', list.length
-      ? 'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
-        + 'Reconnect and leave every permission switched on.'
-      : 'Facebook granted the permissions but shared no Page. Connect again and '
-        + 'tick the Page you post from when it asks which assets to share -- you '
-        + 'must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
+    /* SAY SO WHEN WE DO NOT KNOW. This is the branch that was asserting
+       "Facebook granted the permissions" on the strength of a list we wrote
+       ourselves. Unknown is a worse answer than a diagnosis and a better one
+       than a wrong diagnosis. */
+    if (!permsKnown) {
+      return backToPortal('error',
+        'Facebook shared no Page, and we could not read which permissions it '
+        + 'granted, so we cannot say which of the two happened. Try once more; '
+        + 'if it repeats, the function log has the reply from /me/permissions.');
+    }
+
+    if (list.length) {
+      return backToPortal('error',
+        'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
+        + 'Reconnect and leave every permission switched on.');
+    }
+
+    /* Permissions read, permissions present, no Page. Under Login for
+       Business that points at the ASSETS rather than the permissions: a
+       configuration names which asset types it asks for, and one that does
+       not ask for Pages never shows anybody a Page to tick. The permissions
+       are granted, the asset list is empty, and nothing is wrong anywhere.
+
+       Worth naming first, because "tick the Page you post from" is advice
+       nobody can follow when they were never asked. */
+    return backToPortal('error',
+      'Facebook granted the permissions but shared no Page. '
+      + (usingConfig
+          ? 'Check that configuration ' + fbConfigId + ' asks for Pages as an ASSET '
+            + '-- under Login for Business the assets are a separate list from the '
+            + 'permissions, and a configuration that does not request Pages never '
+            + 'offers one to tick. Then connect again and pick the business that '
+            + 'holds the Page. '
+          : 'Connect again and tick the Page you post from when it asks which '
+            + 'assets to share. ')
+      + 'You must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
   }
 
   /* One Page per agency, which is what social_accounts models (unique on
