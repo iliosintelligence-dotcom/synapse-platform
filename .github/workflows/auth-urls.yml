@@ -1,0 +1,92 @@
+# Read or set the two Supabase Auth URL settings that decide where emailed
+# links land: the Site URL and the Redirect URL allow-list.
+#
+# WHY THIS EXISTS. A buyer asked for a password reset and the link opened
+# localhost. The app was not at fault -- auth.js already refuses to email a
+# loopback address and asks for https://www.synapsecore.dev/app/signin.html.
+# But Supabase honours `redirectTo` only when it is on the project's allow-list;
+# otherwise it silently falls back to the Site URL, which ships as
+# http://localhost:3000. Every emailed link -- reset, confirmation, invite --
+# goes through the same fallback.
+#
+# These are dashboard settings, and dashboard settings drift without anybody
+# noticing. The intended values now live in supabase/auth-urls.json, so the
+# answer to "what should this be?" is in the repository and this workflow
+# puts it there.
+#
+# THE RESPONSE IS NEVER PRINTED WHOLE. GET /config/auth returns the entire auth
+# configuration, including SMTP and OAuth provider secrets. Only site_url and
+# uri_allow_list are ever extracted; the body is written to a runner-local temp
+# file, read by jq, and deleted.
+#
+# `show` changes nothing. `apply` MERGES the allow-list -- existing entries
+# (localhost for development, anything added by hand) are kept, and only the
+# fallback stops being localhost.
+
+name: Auth URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'show (read only) · apply (set from supabase/auth-urls.json)'
+        required: true
+        default: show
+        type: choice
+        options: [show, apply]
+
+concurrency:
+  group: auth-urls
+  cancel-in-progress: false
+
+jobs:
+  auth-urls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ${{ inputs.mode }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          REF: bhrhejpekmhbhwryjhgk
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set."; exit 1
+          fi
+          API="https://api.supabase.com/v1/projects/$REF/config/auth"
+          TMP="$(mktemp)"
+          trap 'rm -f "$TMP"' EXIT
+
+          # Only the two fields ever reach the log. An error body is printed,
+          # because it is an error message rather than configuration.
+          call() {
+            local code
+            code=$(curl -sS -o "$TMP" -w '%{http_code}' "$@")
+            if [ "${code:0:1}" != "2" ]; then
+              echo "::error::Management API returned $code"; cat "$TMP"; exit 1
+            fi
+          }
+
+          call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
+          CURRENT=$(jq '{site_url, uri_allow_list}' "$TMP")
+          echo "── current ──"; echo "$CURRENT"
+
+          if [ "$MODE" = "apply" ]; then
+            SITE=$(jq -r '.site_url' supabase/auth-urls.json)
+            MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
+              ([ ($cur.uri_allow_list // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ]
+                + $want[0].redirect_urls) | unique | join(",")')
+            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" '{site_url: $s, uri_allow_list: $u}')
+
+            call -X PATCH \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$BODY" "$API"
+
+            # Read back rather than trust the PATCH response: the proof that a
+            # setting changed is reading it after the change.
+            call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
+            echo "── after ──"; jq '{site_url, uri_allow_list}' "$TMP"
+          fi
