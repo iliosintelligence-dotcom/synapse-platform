@@ -174,6 +174,65 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
  * is why no expiry is stored for it -- inventing a 60-day one would make the
  * portal show "session expired" on a credential that still works.
  */
+/**
+ * The action button Meta renders under every post on this Page.
+ *
+ * READ ONLY, and not by choice: the endpoint that used to set it is
+ * deprecated. We report it so the agency can change it by hand, because the
+ * alternative is that the most prominent control on their own posts stays
+ * invisible to the product trying to measure those posts.
+ *
+ * Three outcomes, kept distinct:
+ *   null                  we could not read it. Nothing is written, and the
+ *                         portal says nothing rather than inventing an answer.
+ *   { type: 'NONE' }      read, and the Page has no button. A real answer.
+ *   { type: 'CALL_NOW' }  read, and here is what it is.
+ *
+ * The host is a parameter rather than a module constant so this cannot drift
+ * from the version finishFacebook addresses -- a button read at one API
+ * version and a Page connected at another is the sort of mismatch that is
+ * invisible until it matters.
+ */
+async function readPageCta(
+  graphHost: string,
+  pageId: string,
+  pageToken: string,
+): Promise<{ type: string; url: string | null } | null> {
+  try {
+    const r = await fetch(
+      `${graphHost}/${encodeURIComponent(pageId)}/call_to_actions`
+      + `?access_token=${encodeURIComponent(pageToken)}`,
+    );
+    if (!r.ok) {
+      /* Commonly a permissions answer rather than a broken one, and the
+         connection itself is unaffected either way. Logged, not raised. */
+      console.warn('social-connect: could not read the Page button for '
+        + pageId + ' (' + r.status + ')');
+      return null;
+    }
+    const j = await r.json().catch(() => null);
+    const rows = Array.isArray(j?.data) ? j.data : null;
+    if (!rows) return null;
+    if (!rows.length) return { type: 'NONE', url: null };
+
+    const first = rows[0] as Record<string, unknown>;
+    return {
+      type: typeof first.type === 'string' ? first.type : 'UNKNOWN',
+      /* web_url first: it is the one a desktop reader follows and the one
+         worth showing back to an agency. The app-specific URLs are the same
+         destination in a different wrapper. */
+      url: (typeof first.web_url === 'string' && first.web_url)
+        || (typeof first.android_url === 'string' && first.android_url)
+        || (typeof first.iphone_url === 'string' && first.iphone_url)
+        || null,
+    };
+  } catch (err) {
+    console.warn('social-connect: Page button read threw for ' + pageId + ': '
+      + (err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+}
+
 async function finishFacebook(
   code: string,
   claims: Record<string, unknown>,
@@ -384,7 +443,7 @@ async function finishFacebook(
   const problems: string[] = [];
 
   for (const pg of usable) {
-    const { error: connErr } = await admin.rpc('connect_social_account', {
+    const { data: acctId, error: connErr } = await admin.rpc('connect_social_account', {
       p_agency_id: claims.agency_id as string,
       p_platform: 'facebook',
       p_account_id: pg.id,
@@ -411,6 +470,33 @@ async function finishFacebook(
       continue;
     }
     connected.push(pg.name || pg.id);
+
+    /* ── the button that competes with every post on this Page ─────────
+       Written straight to the row rather than through connect_social_account.
+       That function is security definer and carries the vault handling and
+       the membership guard; it has been reproduced in full twice this week
+       and every reproduction is a chance to drop one of them. Three
+       descriptive columns do not belong in the credential path.
+
+       A failed read writes nothing at all, leaving the columns NULL, which
+       is defined as "not known" -- so the portal stays quiet instead of
+       telling an agency their Page has no button when we simply could not
+       look. */
+    const cta = await readPageCta(G, pg.id, pg.access_token);
+    if (cta && typeof acctId === 'string') {
+      const { error: ctaErr } = await admin
+        .from('social_accounts')
+        .update({
+          page_cta_type: cta.type,
+          page_cta_url: cta.url,
+          page_cta_read_at: new Date().toISOString(),
+        })
+        .eq('id', acctId);
+      /* The Page is connected and working. Failing to record a note about its
+         button is not a reason to tell anybody the connection failed. */
+      if (ctaErr) console.error('social-connect: could not store the Page button: ' + ctaErr.message);
+      else console.log('social-connect: Page ' + pg.id + ' button = ' + cta.type);
+    }
 
     /* ── and the Instagram account that Page owns ──────────────────────
        Reached through Facebook rather than through the Instagram product, so
