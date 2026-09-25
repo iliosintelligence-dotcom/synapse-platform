@@ -91,6 +91,12 @@ verify_jwt = true
 [functions.social-reply]
 verify_jwt = true
 
+# Reads the whole platform's funnel, which belongs to no agency. Called
+# only by pg_cron via drain_growth_alerts; it checks the service role key
+# itself on top of this.
+[functions.founder-alert]
+verify_jwt = true
+
 # Closed, because it writes to every listing on the map. A signed-in agency
 # calls it right after posting; the sweep that catches import and API paths
 # calls it with the service role. It is paced at roughly one lookup a second

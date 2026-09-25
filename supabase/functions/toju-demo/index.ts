@@ -518,9 +518,37 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
     const body = (await req.json().catch(() => ({}))) as {
-      action?: string; visitorId?: string; messages?: Msg[];
+      action?: string; visitorId?: string; messages?: Msg[]; source?: string;
     };
     const visitorId = typeof body.visitorId === 'string' && UUID_RE.test(body.visitorId) ? body.visitorId : null;
+
+    /* ── COUNTED ONCE, THE FIRST TIME THEY SPEAK ────────────────────────
+       Eden asked to know when somebody arrives from social and whether they
+       go on to register. This is the moment a stranger becomes a person we
+       have seen: talking to Tayo is the first thing anybody does here that
+       needs no account.
+
+       record_arrival is ON CONFLICT DO NOTHING against a unique index on the
+       visitor id, so a returning visitor is not a new arrival and two tabs
+       opening at once do not both count -- which a check-then-insert here
+       would allow.
+
+       FIRE AND FORGET, deliberately. This is analytics; a chat must not fail
+       or wait because a counter did. The catch swallows on purpose and logs,
+       because the alternative is an outage in the funnel becoming an outage
+       in the product. */
+    if (visitorId) {
+      const src = typeof body.source === 'string' ? body.source.slice(0, 60) : null;
+      fetch(`${Deno.env.get('SUPABASE_URL')}/rest/v1/rpc/record_arrival`, {
+        method: 'POST',
+        headers: {
+          apikey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+          Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ p_visitor_id: visitorId, p_source: src }),
+      }).catch((e) => console.error('record_arrival failed (ignored): ' + e));
+    }
 
     // ── memory endpoints ──
     if (body.action === 'matches') {
