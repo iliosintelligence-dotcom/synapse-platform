@@ -82,7 +82,7 @@ jobs:
             START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
             END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS" \
-              --data-urlencode "sql=select timestamp, event_message from auth_logs order by timestamp desc limit 300" \
+              --data-urlencode "sql=SELECT timestamp, source_name, event_message FROM logs WHERE source_name ILIKE '%auth%' ORDER BY timestamp DESC LIMIT 300" \
               --data-urlencode "iso_timestamp_start=$START" \
               --data-urlencode "iso_timestamp_end=$END"
             # Shape first, as field NAMES only -- the filter below is useless
@@ -94,6 +94,7 @@ jobs:
             # exactly like an empty log.
             jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
             jq -r '"rows: \((.result // []) | length)",
+                   "sources: \([(.result // [])[] | .source_name] | unique | join(", "))",
                    "top-level keys: \(keys | join(", "))",
                    "row keys: \(((.result // [])[0] // {}) | keys | join(", "))",
                    "event keys: \([(.result // [])[:50][] | (.event_message | fromjson? // {}) | keys[]] | unique | join(", "))",
