@@ -110,10 +110,20 @@ const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publi
    later does not upgrade a live token -- the agency has to disconnect and
    connect again. That is why this is going in before the first connection
    rather than alongside the feature that uses it. */
+/* pages_messaging is what sends a PRIVATE REPLY -- one direct message to
+   somebody who commented, carrying the listing's link. It is the only route
+   out of an Instagram caption, which never linkifies.
+
+   Not instagram_manage_messages: that belongs to the Instagram Login flow,
+   and accounts reached this way hold a PAGE token. Meta's private-reply
+   reference lists pages_messaging beside instagram_manage_comments, and the
+   Page token must carry the MESSAGING task. Production also needs Advanced
+   Access and the Human Agent feature, which is App Review -- until then
+   nothing sends, and social_reply_settings.enabled defaults to false. */
 const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
                    'pages_manage_posts', 'pages_read_engagement',
                    'instagram_basic', 'instagram_content_publish',
-                   'instagram_manage_comments'];
+                   'instagram_manage_comments', 'pages_messaging'];
 
 const PLATFORMS = ['instagram', 'facebook'] as const;
 type Platform = typeof PLATFORMS[number];
@@ -513,7 +523,7 @@ async function finishFacebook(
       console.log('social-connect: no instagram_business_account on Page ' + pg.id);
       continue;
     }
-    const { error: igErr } = await admin.rpc('connect_social_account', {
+    const { data: igAcctId, error: igErr } = await admin.rpc('connect_social_account', {
       p_agency_id: claims.agency_id as string,
       p_platform: 'instagram',
       p_account_id: ig.id,
@@ -533,6 +543,30 @@ async function finishFacebook(
       problems.push('Instagram @' + (ig.username || ig.id) + ': ' + igErr.message);
     } else {
       connected.push('Instagram @' + (ig.username || ig.id));
+
+      /* WHICH PAGE OWNS IT. A private reply is POST /{page-id}/messages, so
+         answering a comment needs the Page, not the Instagram account. While
+         an agency had one Page this could be inferred; with two it cannot,
+         and the wrong inference answers a comment on one brand's post from
+         another brand's Page.
+
+         A direct update rather than another argument on
+         connect_social_account: that function is security definer and holds
+         the vault handling and the membership guard, and this is one
+         descriptive column. */
+      if (typeof igAcctId === 'string') {
+        const { error: linkErr } = await admin
+          .from('social_accounts')
+          .update({ parent_account_id: pg.id })
+          .eq('id', igAcctId);
+        /* The account is connected and can publish. Failing to record its
+           Page costs private replies, not posting, and is not a reason to
+           report the connection as failed. */
+        if (linkErr) {
+          console.error('social-connect: could not record the owning Page for '
+            + ig.id + ': ' + linkErr.message);
+        }
+      }
     }
   }
 
