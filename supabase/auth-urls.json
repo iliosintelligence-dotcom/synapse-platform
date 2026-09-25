@@ -1,8 +1,9 @@
 {
-  "_note": "Supabase Auth URL settings, applied by .github/workflows/auth-urls.yml. site_url is where Supabase sends a person when a redirect it was asked for is NOT on the allow-list -- it defaults to http://localhost:3000, which is how password-reset emails came to open localhost on a real person's phone. The live site is www.synapsecore.dev; the bare domain 308s to it. Both are allowed so a link built on either host is honoured. Existing allow-list entries are kept, not replaced -- localhost stays allowed for development, it just stops being the fallback.",
+  "_note": "Supabase Auth URL settings, applied by .github/workflows/auth-urls.yml. site_url is where Supabase sends a person when a redirect it was asked for is NOT on the allow-list. Read live on 2026-09-25 it was http://localhost:3000 with an EMPTY allow-list -- so every redirect the app ever asked for was discarded, and every emailed link (reset, confirmation, invite) opened localhost on a real person's phone. The live site is www.synapsecore.dev; the bare domain 308s to it, so both are allowed. localhost is listed explicitly: it previously worked only BY BEING the fallback, and moving the fallback without listing it would silently break local development. It is an allowed destination, never again the default one.",
   "site_url": "https://www.synapsecore.dev",
   "redirect_urls": [
     "https://www.synapsecore.dev/**",
-    "https://synapsecore.dev/**"
+    "https://synapsecore.dev/**",
+    "http://localhost:3000/**"
   ]
 }
