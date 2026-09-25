@@ -85,6 +85,16 @@ jobs:
               --data-urlencode "sql=select timestamp, event_message from auth_logs order by timestamp desc limit 300" \
               --data-urlencode "iso_timestamp_start=$START" \
               --data-urlencode "iso_timestamp_end=$END"
+            # Shape first, as field NAMES only -- the filter below is useless
+            # if the rows are not shaped the way it assumes, and it should say
+            # so rather than print nothing and look like "no errors".
+            echo "── shape ──"
+            jq -r '"rows: \((.result // []) | length)",
+                   "top-level keys: \(keys | join(", "))",
+                   "row keys: \(((.result // [])[0] // {}) | keys | join(", "))",
+                   "event keys: \([(.result // [])[:50][] | (.event_message | fromjson? // {}) | keys[]] | unique | join(", "))",
+                   "rows mentioning /user: \([(.result // [])[] | select((.event_message // "") | test("/user"))] | length)",
+                   "rows mentioning /verify: \([(.result // [])[] | select((.event_message // "") | test("/verify"))] | length)"' "$TMP"
             echo "── failed or erroring auth requests, newest first ──"
             jq -r '
               (.result // [])[]
