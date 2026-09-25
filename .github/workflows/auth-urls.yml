@@ -89,6 +89,10 @@ jobs:
             # if the rows are not shaped the way it assumes, and it should say
             # so rather than print nothing and look like "no errors".
             echo "── shape ──"
+            # A query error comes back as 200 with an `error` key, not as a
+            # failed request -- so it is printed, or a rejected query reads
+            # exactly like an empty log.
+            jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
             jq -r '"rows: \((.result // []) | length)",
                    "top-level keys: \(keys | join(", "))",
                    "row keys: \(((.result // [])[0] // {}) | keys | join(", "))",
