@@ -82,7 +82,7 @@ jobs:
             START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
             END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS" \
-              --data-urlencode "sql=SELECT timestamp, source_name, event_message FROM logs WHERE source_name ILIKE '%auth%' ORDER BY timestamp DESC LIMIT 300" \
+              --data-urlencode "sql=SELECT * FROM logs ORDER BY timestamp DESC LIMIT 300" \
               --data-urlencode "iso_timestamp_start=$START" \
               --data-urlencode "iso_timestamp_end=$END"
             # Shape first, as field NAMES only -- the filter below is useless
