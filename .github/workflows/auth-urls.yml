@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'show (read only) · apply (set from supabase/auth-urls.json)'
+        description: 'show (read only) · apply (set from supabase/auth-urls.json) · errors (recent failed auth requests, no personal data)'
         required: true
         default: show
         type: choice
-        options: [show, apply]
+        options: [show, apply, errors]
 
 concurrency:
   group: auth-urls
@@ -68,6 +68,35 @@ jobs:
               echo "::error::Management API returned $code"; cat "$TMP"; exit 1
             fi
           }
+
+          # ── errors: what the auth server actually said ──────────────────
+          # Built after the reset page showed its catch-all "Something went
+          # wrong": the page had swallowed the real message. This reads the
+          # auth server's own log of failed requests for the last 24 hours.
+          #
+          # NO PERSONAL DATA. Auth log lines can carry the email, IP and
+          # referrer; only method, path, status, error code and message are
+          # ever printed.
+          if [ "$MODE" = "errors" ]; then
+            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs.all"
+            START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+            END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS" \
+              --data-urlencode "sql=select timestamp, event_message from auth_logs order by timestamp desc limit 300" \
+              --data-urlencode "iso_timestamp_start=$START" \
+              --data-urlencode "iso_timestamp_end=$END"
+            echo "── failed or erroring auth requests, newest first ──"
+            jq -r '
+              (.result // [])[]
+              | . as $row
+              | ($row.event_message | fromjson? // {msg: $row.event_message}) as $e
+              | select((($e.status // 0) | tonumber? // 0) >= 400 or ($e.error // $e.error_code // "") != "")
+              | [ ($row.timestamp | tostring),
+                  ($e.method // "-"), ($e.path // "-"), (($e.status // "-") | tostring),
+                  ($e.error_code // "-"), ($e.error // $e.msg // "-") ]
+              | join("  |  ")' "$TMP" | head -40
+            exit 0
+          fi
 
           call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
           CURRENT=$(jq '{site_url, uri_allow_list}' "$TMP")
