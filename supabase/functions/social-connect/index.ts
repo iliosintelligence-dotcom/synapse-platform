@@ -711,6 +711,12 @@ Deno.serve(async (req: Request) => {
      answers where the question was going unanswered -- which, on this
      project, is everywhere, and is why every Facebook dialog so far has gone
      out in classic mode against an app that is not classic. */
+  /* ONE BOT FOR EVERY AGENCY. A per-agency bot would mean each of them
+     spending five minutes with BotFather and us storing their credential;
+     this way nobody outside Synapse ever holds a token. Genuinely secret,
+     unlike the Facebook config id, so it stays in the secrets store. */
+  const tgBotToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+
   let fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
   if (!fbConfigId) fbConfigId = await settingText('meta_fb_config_id');
   /* Both spellings are still read below. META_REDIRECT_URI is canonical;
@@ -796,7 +802,123 @@ Deno.serve(async (req: Request) => {
             mode: fbConfigId ? 'login-for-business' : 'classic',
           },
           instagram: { ready: Boolean(igAppId && igAppSecret) },
+          /* Reported like the others so the portal can decline to offer a
+             control it cannot deliver. `form` because the portal renders
+             something different for it: there is no redirect to send anybody
+             to, only a field to fill in. */
+          telegram: { ready: Boolean(tgBotToken), mode: 'form' },
         },
+      });
+    }
+
+    /* ── telegram: a form, not a redirect ─────────────────────────────────
+       There is nowhere to send the operator. The bot is added to the channel
+       inside Telegram, and all that reaches us is a channel name -- which is
+       exactly why everything below is verified against Telegram rather than
+       taken on trust. */
+    if (url.searchParams.get('action') === 'telegram') {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      if (req.method !== 'POST') return json({ error: 'POST a channel to connect it' }, 405);
+
+      const authHeader = req.headers.get('Authorization') ?? '';
+      if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+
+      /* Read from the environment rather than from supaUrl: that name is
+         declared inside the `start` block further down, so reaching for it
+         here is the same scope mistake that broke Generate captions this
+         morning -- caught by deno check this time instead of by a user. */
+      const supaHost = Deno.env.get('SUPABASE_URL') ?? '';
+      const anon = createClient(supaHost, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await anon.auth.getUser();
+      if (!user) return json({ error: 'Not authenticated' }, 401);
+
+      const admin = createClient(supaHost, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+      }
+
+      const body = await req.json().catch(() => ({}));
+      /* FOUR SHAPES, ALL ACCEPTED. @channel, t.me/channel, the full https
+         link, and a numeric -100... id are each what a reasonable person
+         would try. Rejecting three of them to be strict would be rejecting
+         them for being right in a way we failed to anticipate. */
+      let chat = String(body?.channel ?? '').trim();
+      chat = chat.replace(/^https?:\/\//i, '').replace(/^t\.me\//i, '').replace(/^\/+/, '');
+      if (!chat) return json({ error: 'Give the channel’s @name or link' }, 400);
+      if (!/^-?\d+$/.test(chat) && !chat.startsWith('@')) chat = '@' + chat;
+
+      const tg = async (method: string, params: Record<string, string>) => {
+        const q = new URLSearchParams(params).toString();
+        const r = await fetch(`https://api.telegram.org/bot${tgBotToken}/${method}?${q}`);
+        return await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
+      };
+
+      /* Does it exist, and what is it called. */
+      const chatRes = await tg('getChat', { chat_id: chat });
+      if (!chatRes?.ok) {
+        return json({ error: 'Telegram could not find ' + chat + '. '
+          + (chatRes?.description ?? '')
+          + ' Check the @name, and make sure the bot has been added to the channel '
+          + 'first — Telegram hides a private channel from a bot that is not in it.' }, 400);
+      }
+      const info = chatRes.result ?? {};
+
+      /* Which bot are we. Asked rather than configured: the id belongs to the
+         token, and a configured id that drifts from a rotated token would
+         check the wrong account's membership and pass. */
+      const meRes = await tg('getMe', {});
+      const botId = meRes?.ok ? String(meRes.result?.id ?? '') : '';
+      if (!botId) return json({ error: 'Telegram did not recognise our bot. '
+        + (meRes?.description ?? '') }, 502);
+
+      /* THE QUESTION THAT MATTERS. "I added the bot" and "I added the bot
+         with permission to post" feel identical to do and are completely
+         different afterwards -- and the difference only shows up at the first
+         scheduled post, in a queue, days later. */
+      const memberRes = await tg('getChatMember', { chat_id: chat, user_id: botId });
+      const member = memberRes?.ok ? memberRes.result : null;
+      const status = member?.status ?? '';
+      if (status !== 'administrator' && status !== 'creator') {
+        return json({ error: 'The bot is in ' + (info.title ?? chat)
+          + ' but is not an administrator, so it cannot post. Open the channel in '
+          + 'Telegram → Administrators → add the bot, and allow Post Messages.' }, 400);
+      }
+      /* creator is never restricted; administrator carries the flag. */
+      if (status === 'administrator' && member?.can_post_messages === false) {
+        return json({ error: 'The bot is an administrator of ' + (info.title ?? chat)
+          + ' but Post Messages is switched off for it. Turn that on in the '
+          + 'channel’s Administrators screen.' }, 400);
+      }
+
+      const { data: acctId, error: connErr } = await admin.rpc('connect_telegram_channel', {
+        p_agency_id: membership.agency_id,
+        p_chat_id: String(info.id ?? ''),
+        p_title: String(info.title ?? ''),
+        p_username: info.username ? '@' + info.username : '',
+        p_bot_token: tgBotToken,
+        p_connected_by: user.id,
+      });
+      if (connErr) return json({ error: connErr.message }, 400);
+
+      console.log('social-connect: telegram channel ' + info.id + ' connected for agency '
+        + membership.agency_id);
+      return json({
+        ok: true,
+        id: acctId,
+        channel: info.username ? '@' + info.username : (info.title ?? chat),
       });
     }
 

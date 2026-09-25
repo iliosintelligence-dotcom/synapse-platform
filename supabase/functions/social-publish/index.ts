@@ -678,9 +678,132 @@ const trypostAdapter: Adapter = async (post, conn) => {
 /* Platforms this file publishes itself, for an AGENCY. Kept separate from the
    lookup below so viaTrypost() has something to ask, and so "native" is stated
    once. */
+/* ── Telegram ────────────────────────────────────────────────────────────
+   The one channel where getting somebody from a post to a listing needs no
+   workaround. A message carries a real inline button: one tap, no "See more"
+   fold to fall below, no Page action button outranking it, and captions that
+   linkify. Everything docs/SOCIAL_TO_PLATFORM_ROUTING.md exists to route
+   around simply is not here.
+
+   The credential is OUR bot token, one for every agency, stored per account
+   by connect_telegram_channel so the publisher reads it exactly as it reads
+   every other token. The account id is the numeric chat id, never the
+   @username -- a channel can be renamed and its username reassigned. */
+const TG_API = 'https://api.telegram.org';
+/* Telegram rejects a media caption over 1024 characters outright rather than
+   trimming it, so the cut happens here. On a word boundary: a caption ending
+   mid-word reads as a bug in the listing, not a limit in the platform. */
+const TG_CAPTION_MAX = 1024;
+
+function tgCaption(text: string): string {
+  const t = (text ?? '').trim();
+  if (t.length <= TG_CAPTION_MAX) return t;
+  const cut = t.slice(0, TG_CAPTION_MAX - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > TG_CAPTION_MAX - 200 ? cut.slice(0, lastSpace) : cut).trimEnd() + '\u2026';
+}
+
+/* THE LINK COMES OUT OF THE CAPTION, rather than being passed in alongside
+   it. caption_with_link has already put it there, and reading it back means
+   the button and the caption can never disagree -- which they eventually
+   would if the adapter were handed the URL by a second route. */
+function tgLink(caption: string): string | null {
+  const m = (caption ?? '').match(/https?:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/);
+  return m ? m[0] : null;
+}
+
+const telegramAdapter: Adapter = async (post, conn) => {
+  const payload: Record<string, unknown> = {
+    ...buildPayload(post), account: conn.username, chat_id: conn.platformAccountId,
+  };
+  const bad = checkMedia(post, { max: 10, mixed: true, maxVideos: 10, who: 'Telegram' });
+  if (bad) return { ok: false, postId: null, provider: 'telegram', error: bad, payload };
+
+  const base = `${TG_API}/bot${conn.token}`;
+  const caption = tgCaption(post.caption ?? '');
+  const link = tgLink(post.caption ?? '');
+
+  const call = async (method: string, body: Record<string, unknown>) => {
+    const r = await fetch(`${base}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
+    if (!j?.ok) {
+      /* Telegram's description is the useful half and is written for a
+         person: "chat not found", "not enough rights to send photos". Carried
+         through rather than replaced with a status code. */
+      throw new Error(j?.description ?? ('Telegram refused ' + method));
+    }
+    return j.result;
+  };
+
+  try {
+    const media = post.media_urls ?? [];
+    let result: Record<string, unknown>;
+
+    if (media.length === 0) {
+      /* No photograph. Telegram is the only platform here that will take a
+         listing as text, and a text post with a button is still a route to
+         the listing -- better than refusing to post at all. */
+      result = await call('sendMessage', {
+        chat_id: conn.platformAccountId,
+        text: caption,
+        ...(link ? { reply_markup: { inline_keyboard: [[{ text: 'View this home', url: link }]] } } : {}),
+      });
+    } else if (media.length === 1) {
+      const only = media[0];
+      /* THE BUTTON, which is the whole point and is only available on a
+         single item -- Telegram refuses reply_markup on a media group. */
+      result = await call(isVideoUrl(only) ? 'sendVideo' : 'sendPhoto', {
+        chat_id: conn.platformAccountId,
+        [isVideoUrl(only) ? 'video' : 'photo']: only,
+        caption,
+        ...(link ? { reply_markup: { inline_keyboard: [[{ text: 'View this home', url: link }]] } } : {}),
+      });
+    } else {
+      /* An album. No button available, so the caption carries the link --
+         which Telegram linkifies, so it is still one tap. The caption goes on
+         the FIRST item only: repeated on every item it renders once and
+         counts against the limit ten times. */
+      const group = media.slice(0, 10).map((url, i) => ({
+        type: isVideoUrl(url) ? 'video' : 'photo',
+        media: url,
+        ...(i === 0 ? { caption } : {}),
+      }));
+      const sent = await call('sendMediaGroup', {
+        chat_id: conn.platformAccountId,
+        media: group,
+      });
+      /* An album returns an array of messages. The first is the one the
+         caption and any reply belong to, and the one a metrics read would
+         ask about. */
+      result = Array.isArray(sent) ? sent[0] : sent;
+      payload.album = group.length;
+    }
+
+    const messageId = result?.message_id;
+    return {
+      ok: true,
+      postId: messageId != null ? String(messageId) : null,
+      provider: 'telegram',
+      error: '',
+      payload: { ...payload, had_button: Boolean(link) && media.length <= 1 },
+    };
+  } catch (err) {
+    return {
+      ok: false, postId: null, provider: 'telegram',
+      error: err instanceof Error ? err.message : String(err),
+      payload,
+    };
+  }
+};
+
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
+  telegram: telegramAdapter,
 };
 
 const ADAPTERS: Record<string, Adapter> = {
