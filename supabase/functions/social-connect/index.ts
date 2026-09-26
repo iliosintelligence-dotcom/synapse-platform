@@ -631,6 +631,25 @@ function backToPortal(status: string, detail?: string): Response {
   return new Response(null, { status: 302, headers: { ...corsHeaders, Location: target } });
 }
 
+/* The bot's public @handle, from the token. Public by design -- every agency
+   has to type it into Telegram -- and cached per instance, since it can only
+   change with the token. Null when Telegram does not answer; the portal then
+   keeps the handle it already shows. */
+let TG_HANDLE: { token: string; handle: string | null } | null = null;
+async function telegramBotHandle(token: string): Promise<string | null> {
+  if (TG_HANDLE && TG_HANDLE.token === token) return TG_HANDLE.handle;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const d = await r.json().catch(() => null);
+    const u = d && d.ok && d.result && typeof d.result.username === 'string' ? d.result.username : '';
+    const handle = u ? '@' + u : null;
+    if (handle) TG_HANDLE = { token, handle };
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
 /* A server-side switch, read with the service role. platform_settings has
    RLS on and no policy at all, so it is unreachable through the API and this
    is the only way in.
@@ -799,6 +818,7 @@ Deno.serve(async (req: Request) => {
        reading the answer. No agency is named in the question and no user data
        is in the reply, so it needs no session. */
     if (url.searchParams.get('action') === 'status') {
+      const tgBot = tgBotToken ? await telegramBotHandle(tgBotToken) : null;
       return json({
         platforms: {
           /* `mode` is reported because ready:true is not the whole story on
@@ -815,7 +835,11 @@ Deno.serve(async (req: Request) => {
              control it cannot deliver. `form` because the portal renders
              something different for it: there is no redirect to send anybody
              to, only a field to fill in. */
-          telegram: { ready: Boolean(tgBotToken), mode: 'form' },
+          /* `bot` is the handle agencies must add to their channel, asked
+             of Telegram rather than written into the portal: the portal
+             named a bot before one existed, and a handle that drifts from
+             the token has every agency adding an account that is not ours. */
+          telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
         },
       });
     }
