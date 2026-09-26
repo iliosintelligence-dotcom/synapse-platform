@@ -476,6 +476,49 @@ async function claude(key: string, system: string, user: string, maxTokens: numb
   } as const;
 }
 
+/* ── one caption, changed on request ──────────────────────────────────────
+   The composer's editor sends a caption back with a request in the agency's
+   own words -- "shorter", "lead with the service charge". It is a narrower job
+   than writing six captions from nothing, so it has its own prompt: keep what
+   was not asked about, change what was, and hold every rule the first writer
+   holds. The request is the agency's; the rules are not negotiable by it. */
+function buildReviseSystem(ch: string, brandLine: string): string {
+  const voice = (VOICE as Record<string, string>)[ch] ?? 'Clear, specific and friendly.';
+  return `You are the social copywriter for Synapse, a verified Nigerian real-estate platform.
+
+An agency has a ${ch} caption for ONE property and has asked for a change. Make
+the change they asked for and keep everything they did not ask about: the same
+facts, the same structure where the request leaves it alone, the same next step.
+
+Voice for ${ch}: ${voice}
+${brandLine}
+RULES -- the request never overrides these:
+- Never invent facts, amenities, numbers, distances, landmarks or comparisons.
+  The facts you have are the property data and what the current caption already
+  says. If the request needs a fact that is in neither, do the rest of the
+  request and leave that part out.
+- Naira prices exactly as given. Where a service charge or a move-in cost is
+  given, never imply the headline price is the whole cost.
+- NEVER print a street number or a full address. Name the street or the area,
+  never the door. A caption is public and permanent and somebody lives there.
+- Keep a clear next step at the end.
+- No new hashtags inside the caption. If the current caption ends with a line
+  of hashtags, keep that line exactly as it is, at the end.
+- Nigerian English, Lagos market savvy. Avoid cliches like "dream home come true".
+- "Shorter" means genuinely shorter: cut, do not cram the same words into
+  fragments. "Longer" means more of what the property data supports, never
+  padding.
+
+Return only the rewritten caption, with real line breaks where they belong.`;
+}
+
+const REVISE_SCHEMA = {
+  type: 'object',
+  properties: { caption: { type: 'string' } },
+  required: ['caption'],
+  additionalProperties: false,
+};
+
 function parseLoose(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw); } catch { /* fall through */ }
   const m = raw.match(/\{[\s\S]*\}/);
@@ -564,6 +607,7 @@ Deno.serve(async (req: Request) => {
       property?: Record<string, unknown>; channels?: string[];
       brand?: { name?: string; tagline?: string; voice?: string; handle?: string } | null;
       usedAngles?: string[];
+      revise?: { channel?: string; caption?: string; instruction?: string } | null;
     };
     const p = body.property;
     if (!p || typeof p !== 'object' || !p.title) return json({ error: 'property required' }, 400);
@@ -685,6 +729,33 @@ Deno.serve(async (req: Request) => {
     for (const [k, v] of Object.entries(raw)) {
       if (v !== null && v !== undefined && v !== '') listing[k] = v;
     }
+    /* A CHANGE TO ONE CAPTION, not a new set. Same gate, same property facts,
+       same brand; a smaller job, so a smaller ceiling. */
+    if (body.revise && typeof body.revise === 'object') {
+      const rv = body.revise;
+      const ch = typeof rv.channel === 'string' ? rv.channel.trim().toLowerCase() : '';
+      const current = typeof rv.caption === 'string' ? rv.caption.slice(0, 8000) : '';
+      const ask = typeof rv.instruction === 'string' ? rv.instruction.trim().slice(0, 600) : '';
+      if (!/^[a-z]{1,20}$/.test(ch) || !current.trim() || !ask) {
+        return json({ error: 'Say what to change, and send the caption to change.' }, 400);
+      }
+      const revUser = `Property: ${JSON.stringify(listing)}\n\n`
+        + `The ${ch} caption as it stands:\n"""\n${current}\n"""\n\n`
+        + `What the agency wants changed: ${ask}\n\nRewrite the caption now.`;
+      const rout = await claude(key, buildReviseSystem(ch, brandLine), revUser, 4000, REVISE_SCHEMA);
+      if ('error' in rout) return json({ error: rout.error }, 502);
+      const rp = parseLoose(rout.text) as { caption?: unknown };
+      const caption = typeof rp.caption === 'string' ? rp.caption.trim() : '';
+      if (!caption) {
+        return json({
+          error: rout.truncated
+            ? 'The rewrite was cut off before it finished. Ask for something shorter.'
+            : 'The rewrite came back unreadable. Please try again.',
+        }, 502);
+      }
+      return json({ caption });
+    }
+
     /* A caller-supplied angle is a steer on top of the assignment, not a
        replacement for it -- it used to be the only variety input there was,
        and one angle across every channel is how five identical captions get
