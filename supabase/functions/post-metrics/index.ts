@@ -431,8 +431,8 @@ function pickField(o: Record<string, unknown> | null | undefined, ...keys: strin
   return null;
 }
 
-async function confirmDelivery(limit: number, h: Record<string, string>) {
-  const since = new Date(Date.now() - 3 * 86400e3).toISOString();
+async function confirmDelivery(limit: number, h: Record<string, string>, days = 3) {
+  const since = new Date(Date.now() - days * 86400e3).toISOString();
   const q = `${SB_URL}/rest/v1/social_posts`
     + '?select=id,platform,platform_post_id,published_at,payload'
     + '&deleted_at=is.null&status=eq.published&provider=eq.trypost'
@@ -509,7 +509,11 @@ async function confirmDelivery(limit: number, h: Record<string, string>) {
           failure_reason: 'TryPost accepted this but could not post it to '
             + (PLATFORM_LABEL[row.platform] ?? row.platform)
             + (err ? ': ' + err : '.') + ' Nothing went out.',
-          payload: { ...base, delivery: 'failed', delivery_error: err || null },
+          /* TryPost's whole record for the platform, kept on a failure: its
+             error_message can be as bare as "An unexpected error occurred",
+             and the rest of the entry is the only other clue there is. */
+          payload: { ...base, delivery: 'failed', delivery_error: err || null,
+                     trypost_detail: entry ? JSON.stringify(entry).slice(0, 2000) : null },
         };
       } else {
         patch = { payload: { ...base, delivery: 'pending' } };
@@ -657,8 +661,10 @@ Deno.serve(async (req) => {
     }
     if (!SB_URL) return json({ error: 'Server misconfigured' }, 500);
     const limit = Math.min(Math.max(Number(body.limit) || 30, 1), 60);
+    /* days widens the look-back for a one-off backfill; the schedule uses 3. */
+    const days = Math.min(Math.max(Number(body.days) || 3, 1), 60);
     const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
-    return json(await confirmDelivery(limit, h));
+    return json(await confirmDelivery(limit, h, days));
   }
 
   const ids = Array.isArray(body.postIds)
