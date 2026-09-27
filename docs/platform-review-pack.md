@@ -250,10 +250,10 @@ Meta reads the page. It must say, in words a reviewer can find:
 - how to request deletion: `/your-data`.
 
 **Done 2026-09-27:** `privacy.html` now covers all five points in "Social
-accounts an agency connects". Still open: the page is headed "Draft" with a
-"not a reviewed legal document" banner and visible `[NEEDS LEGAL]` placeholders
-(company name, data region, DPO contact). A reviewer can read those as "no
-final policy"; whether to change that before submitting is the founder's call.
+accounts an agency connects". The "Draft" label and "not a reviewed legal
+document" banner were removed the same day at the founder's decision. Still
+visible: three `[NEEDS LEGAL]` placeholders (company name and address, data
+region and cross-border notice, privacy contact).
 
 ---
 
