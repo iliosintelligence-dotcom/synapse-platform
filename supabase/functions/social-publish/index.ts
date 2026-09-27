@@ -580,6 +580,18 @@ const TRYPOST_CONTENT_TYPE: Record<string, string> = {
   facebook: 'facebook_post',
 };
 
+/* X GOES OUT ON SYNAPSE'S ACCOUNT, whoever wrote the post. Agencies cannot
+   connect an X account -- there is no X connect flow, and X's own API charges
+   per post -- so Eden decided on 2026-09-28: "to synapse X". An agency that
+   picks X in the composer is published on Synapse's X through trypost, while
+   the row stays the agency's: its short link, and so every tap and enquiry it
+   brings, is still credited to them. When agencies can connect X, take it out
+   of this set. */
+const SYNAPSE_ACCOUNT_ONLY = new Set(['x']);
+function onSynapseAccount(p: QueuedPost): boolean {
+  return p.leg === 'synapse' || (SYNAPSE_ACCOUNT_ONLY.has(p.platform) && !p.city_channel_id);
+}
+
 /** True when this platform should go out through trypost ON THE AGENCY LEG:
  *  it is configured, we have no native adapter, and trypost has a content type
  *  for it. The Synapse leg does not ask this -- see adapterFor. */
@@ -663,6 +675,9 @@ const trypostAdapter: Adapter = async (post, conn) => {
     ...buildPayload(post),
     via: 'trypost',
     leg: post.leg,
+    /* Whose account it went out on. Differs from leg for an agency's X post,
+       which is published on Synapse's X (SYNAPSE_ACCOUNT_ONLY). */
+    account: onSynapseAccount(post) ? 'synapse' : 'agency',
     content_type: contentType,
     social_account_id: accountId,
     host: TRYPOST_URL,
@@ -1150,8 +1165,10 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
      the trypost workspace -- including our Instagram, which an agency would
      have published natively. Deciding on the platform alone would have sent a
      synapse-leg Instagram post to the Meta adapter, which would then look for
-     an OAuth token in social_accounts that does not and should not exist. */
-  if (post.leg === 'synapse') {
+     an OAuth token in social_accounts that does not and should not exist.
+     onSynapseAccount also brings an agency's X post here: see
+     SYNAPSE_ACCOUNT_ONLY. */
+  if (onSynapseAccount(post)) {
     /* Synapse on Telegram is our own bot, not trypost: a city channel is a
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
@@ -1459,7 +1476,7 @@ Deno.serve(async (req: Request) => {
        Synapse's channels are global, so this is not keyed by agency -- but a
        batch of nothing but agency posts should still not read the table. */
     let synapseChannels: Record<string, Connection> = {};
-    if (live && rows.some((r) => !r.dry_run && r.leg === 'synapse' && !r.city_channel_id)) {
+    if (live && rows.some((r) => !r.dry_run && onSynapseAccount(r) && !r.city_channel_id)) {
       synapseChannels = await loadSynapseChannels(admin);
     }
     let cityChannels: Record<string, Connection> = {};
@@ -1490,7 +1507,7 @@ Deno.serve(async (req: Request) => {
          disconnected is the one outcome nobody asked for. */
       const conn = rehearsal
         ? NO_CONNECTION
-        : post.leg === 'synapse'
+        : onSynapseAccount(post)
           ? (post.city_channel_id ? cityChannels[post.city_channel_id] : synapseChannels[post.platform])
           : (connByAgency[post.agency_id] ?? {})[post.social_account_id || post.platform];
 
@@ -1499,7 +1516,7 @@ Deno.serve(async (req: Request) => {
          is reported without an attempt, so a missing connection never burns a
          retry or waits out a backoff. viaTrypost and the synapse leg are
          included for the same reason. */
-      const needsAccount = post.leg === 'synapse'
+      const needsAccount = onSynapseAccount(post)
         || Boolean(NATIVE_ADAPTERS[post.platform])
         || viaTrypost(post.platform);
       const result: PublishResult = (!rehearsal && !conn && needsAccount)
@@ -1508,7 +1525,7 @@ Deno.serve(async (req: Request) => {
             /* A missing Synapse channel is OUR configuration problem, not the
                agency's. Telling them to go and connect an account they do not
                own would be a dead end and would read as their fault. */
-            error: post.leg === 'synapse'
+            error: onSynapseAccount(post)
               ? (post.city_channel_id
                   ? 'This Synapse city channel is not active: the bot is not a posting '
                     + 'admin of it, or it has no chat id yet (city_channels).'
