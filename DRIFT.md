@@ -119,7 +119,8 @@ Postgres makes it writable, and writes through it reach `profiles` as `postgres`
 (BYPASSRLS). The anon key could delete every profile with one REST call.
 `20260928001207` cuts it and `listing_agent_cards` back to SELECT, which is all
 the clients use; no auth account was missing its profile afterwards, so there is
-no sign it was used. `geography_columns` and `geometry_columns` carry the grant
+no sign it was used. The view also listed every account's id, buyers included;
+since `20260928002419` it lists agents only, as `listing_agent_cards` does. `geography_columns` and `geometry_columns` carry the grant
 too but belong to PostGIS and are left alone. **Every new view in `public` gets
 this grant again** — a view needs its own `revoke all … from anon,
 authenticated` before any `grant select`.
