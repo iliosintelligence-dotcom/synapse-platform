@@ -695,7 +695,14 @@ the one they asked for.`
     // Ground in the digital twin + rewrite the reply lifestyle-cost style.
     let matches: Match[] = [];
     if (showMatches) {
-      const found = await fetchMatchesRelaxed(criteria);
+      let found: { matches: Match[]; note: string | null } = { matches: [], note: null };
+      let searchFailed = false;
+      try {
+        found = await fetchMatchesRelaxed(criteria);
+      } catch (e) {
+        searchFailed = true;
+        console.error('listing search failed for ' + JSON.stringify(criteria.city ?? null) + ': ' + (e instanceof Error ? e.message : e));
+      }
       matches = found.matches;
       if (matches.length > 0) {
         // [STAGED: give the advisor pass the price anchors + dream-board taste
@@ -738,6 +745,9 @@ the one they asked for.`
           const whys = adv.why ?? salvageWhys(second.text);
           if (whys) matches = matches.map((m) => ({ ...m, why: whys[m.id] ?? null }));
         }
+      } else if (searchFailed) {
+        // We did not look, so we cannot say nothing fits. Say that instead.
+        reply = `${reply}\n\nOne honest note — I couldn't reach our listings just now, so I haven't checked yet. Ask me again in a moment and I'll pull them up.`;
       } else if (criteria.city) {
         // Honest zero-state: never show homes from a different city or deal type.
         const dt = criteria.dealType === 'rent' ? 'rentals' : criteria.dealType === 'shared' ? 'shared homes' : 'homes for sale';
@@ -929,6 +939,7 @@ interface Match {
 /**
  * Progressive relaxation — Tayo must always have SOMETHING honest to show:
  *  1. exact brief → 2. relax size → 3. relax budget (same city)
+ *  3b. "Agbowo, <somewhere no listing names>" — drop the part we cannot check
  *  4. the named place may be an AREA, not a city (e.g. "Lekki", "Wuse") —
  *     resolve it against neighbourhoods and retry with the real city
  * The DEAL TYPE never relaxes, and neither does the CITY.
@@ -937,12 +948,31 @@ async function fetchMatchesRelaxed(c: Criteria): Promise<{ matches: Match[]; not
   const r = await relaxWithinCity(c);
   if (r.matches.length > 0) return r;
 
-  if (c.city) {
-    const realCity = await resolveAreaToCity(c.city);
-    if (realCity && realCity.toLowerCase() !== c.city.trim().toLowerCase()) {
+  const place = parsePlace(c.city);
+  if (place) {
+    /* A containing place that no live listing names at all ("Agbowo,
+       University of Ibadan", "Bodija, Ibadan North") cannot tell one listing
+       from another; it can only rule every one of them out. Search without
+       it. One that DOES name listings stays binding: nothing in "GRA, Ibadan"
+       is the answer, not Ikeja GRA. A count that fails keeps it binding. */
+    const counts = await Promise.all(
+      place.within.map((w) => countBy([...freshLiveConds(), `and=(${anyOf(WITHIN_COLS, w)})`])));
+    const known = place.within.filter((_, i) => counts[i] !== 0);
+    if (known.length < place.within.length) {
+      const unknown = place.within.filter((_, i) => counts[i] === 0);
+      const r1 = await relaxWithinCity({ ...c, city: [place.name, ...known].join(', ') });
+      if (r1.matches.length > 0) {
+        return { matches: r1.matches, note: `no listing names "${unknown.join(', ')}", so this is ${place.name} without it${r1.note ? '; ' + r1.note : ''}` };
+      }
+    }
+
+    const realCity = await resolveAreaToCity(place.name);
+    if (realCity && realCity.toLowerCase() !== place.name.toLowerCase()
+        // If they named the city themselves, that is the only one it may be.
+        && (!known.length || known.some((w) => w.toLowerCase().includes(realCity.toLowerCase())))) {
       const r2 = await relaxWithinCity({ ...c, city: realCity });
       if (r2.matches.length > 0) {
-        return { matches: r2.matches, note: `"${c.city}" is an area in ${realCity}${r2.note ? '; ' + r2.note : ''}` };
+        return { matches: r2.matches, note: `"${place.name}" is an area in ${realCity}${r2.note ? '; ' + r2.note : ''}` };
       }
     }
     // No cross-city stage. Dropping the city filter used to return homes from
@@ -1146,6 +1176,45 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): nu
   return Math.round(2 * R * Math.asin(Math.sqrt(h)) * 10) / 10;
 }
 
+/* A PLACE CAN ARRIVE WITH ITS CITY ATTACHED. The model copies the place the
+   way it was said, so "Agbowo, Ibadan" came through whole and was pasted
+   into an or=(...) filter, where PostgREST reads a comma as the start of the
+   next condition: 400, "failed to parse logic tree". The search read that as
+   no rows, and Tayo said nothing in Agbowo fits while "1 bedroom student
+   apartment, Agbowo" was live. Asking for "Agbowo" alone found it.
+
+   So read it the way people write it: most specific first, then what
+   contains it. The first part is the place, matched as before. Every later
+   part has to appear on the row too, so "GRA, Ibadan" cannot come back as
+   Ikeja GRA. Nothing reaches a filter except letters, digits, spaces,
+   hyphens, apostrophes and full stops. A comma or a bracket is PostgREST
+   grammar, and * % _ are wildcards; none of them is part of a place name. */
+interface Place { name: string; within: string[]; }
+
+function parsePlace(raw?: string | null): Place | null {
+  if (typeof raw !== 'string') return null;
+  const parts = raw.split(/[,/;|]/)
+    .map((p) => p.replace(/[^\p{L}\p{M}\p{N}\s'.-]/gu, ' ').replace(/\s+/g, ' ').trim()
+      // "Oyo State" -> "Oyo", which the state column contains however it spells it.
+      .replace(/\s+state$/i, ''))
+    // Every listing is in Nigeria, so naming it narrows nothing.
+    .filter((p) => /[\p{L}\p{N}]/u.test(p) && !/^nigeria$/i.test(p));
+  return parts.length ? { name: parts[0], within: parts.slice(1) } : null;
+}
+
+/* Where a place's name can be written on a listing. A containing place may
+   also be the state: "Agbowo, Oyo State". */
+const PLACE_COLS = ['city', 'area_name', 'address', 'title'];
+const WITHIN_COLS = [...PLACE_COLS, 'state'];
+
+const anyOf = (cols: string[], term: string) =>
+  `or(${cols.map((col) => `${col}.ilike.*${encodeURIComponent(term)}*`).join(',')})`;
+
+/** One filter: the place, and each place containing it, somewhere on the row. */
+function placeCond(p: Place): string {
+  return `and=(${[anyOf(PLACE_COLS, p.name), ...p.within.map((w) => anyOf(WITHIN_COLS, w))].join(',')})`;
+}
+
 /** Live listings + enrichment + the neighbourhood NAME. */
 async function fetchMatches(c: Criteria): Promise<Match[]> {
   const s = sb();
@@ -1180,10 +1249,8 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      the term still has to appear on the row. The rule this protects -- never
      show a place they did not ask for -- is kept. area_name is the fourth:
      the Area field the agent fills in, stored since 20260927160000. */
-  if (c.city && typeof c.city === 'string') {
-    const term = encodeURIComponent(c.city.trim());
-    conds.push(`or=(city.ilike.*${term}*,area_name.ilike.*${term}*,address.ilike.*${term}*,title.ilike.*${term}*)`);
-  }
+  const place = parsePlace(c.city);
+  if (place) conds.push(placeCond(place));
   if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
   if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
@@ -1232,14 +1299,19 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      every row sorts null and the whole thing collapses to trust_score. The
      "fit score" ranking is not ranking anything yet. Distance is the first
      signal here that is both present and asked for. */
-  const anchor = await resolveAnchor(c.anchor, c.city);
+  // The city filter there means the city: the most general part of the place.
+  const anchor = await resolveAnchor(c.anchor, place ? (place.within[place.within.length - 1] ?? place.name) : null);
   const wanted = anchor ? 60 : MAX_MATCHES;
   const q =
     `${s.url}/rest/v1/properties?select=${select}&${conds.join('&')}` +
     `&order=property_enrichment(${fitCol}).desc.nullslast,trust_score.desc&limit=${wanted}`;
 
   const res = await fetch(q, { headers: s.headers });
-  if (!res.ok) return [];
+  /* A SEARCH THAT FAILED HAS NOT LOOKED. This returned [] on any error, so a
+     400 went on through every relaxation stage and came out as "nothing fits
+     that brief yet": a claim about the inventory, made without reading it.
+     Throw instead, and let the handler say what actually happened. */
+  if (!res.ok) throw new Error(`properties search ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`);
   const rows = (await res.json()) as Array<Record<string, unknown>>;
   if (!Array.isArray(rows)) return [];
 
