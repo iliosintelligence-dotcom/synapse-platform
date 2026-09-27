@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapse Pulse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Synapse's own palette: warm off-white ground, graphite ink, and the orange
+     that FILLS (bars, lines, the active choice) but never carries text. */
+  :root {
+    --ground: #F4F3EF; --surface: #FCFBF9; --raised: #FFFFFF;
+    --ink: #1C1C1E; --muted: #55555B; --dim: #8A8A90;
+    --line: rgba(28,28,30,0.10); --line-strong: rgba(28,28,30,0.18);
+    --action: #FF8A2D; --action-soft: rgba(255,138,45,0.16);
+    --good: #2E7D4F; --good-soft: rgba(46,125,79,0.12);
+    --bad: #A8402B; --bad-soft: rgba(168,64,43,0.12);
+    --info: #3E5C86; --info-soft: rgba(62,92,134,0.12);
+    --f-brand: 'Josefin Sans', 'Segoe UI', system-ui, sans-serif;
+    --f-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+    --f-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #121214; --surface: #1A1A1D; --raised: #202024;
+      --ink: #EDEDEF; --muted: #A6A6AD; --dim: #75757C;
+      --line: rgba(255,255,255,0.09); --line-strong: rgba(255,255,255,0.16);
+      --action-soft: rgba(255,138,45,0.20);
+      --good: #62C28B; --good-soft: rgba(98,194,139,0.14);
+      --bad: #E58A72; --bad-soft: rgba(229,138,114,0.14);
+      --info: #8FAEDB; --info-soft: rgba(143,174,219,0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #121214; --surface: #1A1A1D; --raised: #202024;
+    --ink: #EDEDEF; --muted: #A6A6AD; --dim: #75757C;
+    --line: rgba(255,255,255,0.09); --line-strong: rgba(255,255,255,0.16);
+    --action-soft: rgba(255,138,45,0.20);
+    --good: #62C28B; --good-soft: rgba(98,194,139,0.14);
+    --bad: #E58A72; --bad-soft: rgba(229,138,114,0.14);
+    --info: #8FAEDB; --info-soft: rgba(143,174,219,0.14);
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--f-body);
+    -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 22px; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* header */
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
+  .brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+  .brand h1 { margin: 0; font: 700 22px/1 var(--f-brand); letter-spacing: -0.01em; }
+  .brand span { font: 600 11px var(--f-brand); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 3px; }
+  .seg button { border: 0; background: none; color: var(--muted); font: 600 13px var(--f-body); padding: 7px 12px;
+    border-radius: 8px; cursor: pointer; min-height: 34px; }
+  .seg button[aria-pressed="true"] { background: var(--action-soft); color: var(--ink); }
+  .status { font-size: 12.5px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+  .dot.stale { background: var(--dim); } .dot.err { background: var(--bad); }
+  .btn { border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: 10px;
+    font: 600 13px var(--f-body); padding: 7px 13px; min-height: 36px; cursor: pointer; }
+  .btn:hover { background: var(--raised); }
+  .badge { font: 600 11px var(--f-body); padding: 3px 9px; border-radius: 100px; background: var(--action-soft); color: var(--ink); }
+  button:focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+
+  /* groups of figures */
+  .group h2, .panel h2 { margin: 0 0 10px; font: 700 12px var(--f-brand); letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .kpi { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 12px;
+    display: grid; gap: 4px; min-width: 0; }
+  .kpi .lbl { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+  .kpi .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .kpi .val { font: 600 30px/1.1 var(--f-body); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .delta { font: 600 11.5px var(--f-body); padding: 2px 8px; border-radius: 100px; white-space: nowrap; }
+  .delta.up { color: var(--good); background: var(--good-soft); }
+  .delta.down { color: var(--bad); background: var(--bad-soft); }
+  .delta.flat { color: var(--dim); background: var(--line); }
+  .kpi .sub { font-size: 12px; color: var(--dim); min-height: 18px; overflow-wrap: anywhere; }
+  .spark { width: 100%; height: 34px; display: block; margin-top: 4px; }
+
+  /* panels */
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; min-width: 0; }
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .panel-head h2 { margin: 0; }
+  .note { font-size: 12px; color: var(--dim); margin: 8px 0 0; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 100px;
+    font: 600 12px var(--f-body); padding: 5px 11px; cursor: pointer; min-height: 32px; }
+  .chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+
+  .chart { width: 100%; height: 210px; display: block; }
+  .chart text { font: 11px var(--f-body); fill: var(--dim); }
+
+  /* funnel */
+  .funnel { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .step { position: relative; padding: 12px 14px; border-radius: 12px; background: var(--raised); border: 1px solid var(--line); }
+  .step .n { font: 600 24px var(--f-body); font-variant-numeric: tabular-nums; }
+  .step .t { font-size: 12.5px; color: var(--muted); }
+  .step .c { font-size: 11.5px; color: var(--dim); margin-top: 4px; }
+  .bar-bg { height: 6px; border-radius: 3px; background: var(--line); margin-top: 8px; overflow: hidden; }
+  .bar-fg { height: 100%; background: var(--action); border-radius: 3px; }
+
+  /* bars + tables */
+  .hbars { display: grid; gap: 8px; }
+  .hbar { display: grid; grid-template-columns: 110px minmax(0, 1fr) 44px; align-items: center; gap: 10px; font-size: 13px; }
+  .hbar .track { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+  .hbar .fill { height: 100%; background: var(--action); border-radius: 5px; }
+  .hbar .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .tbl-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font: 600 11.5px var(--f-body); color: var(--dim); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  td .s { display: block; font-size: 11.5px; color: var(--dim); }
+
+  /* the log */
+  .log { display: grid; }
+  .ev { display: grid; grid-template-columns: 92px 104px minmax(0, 1fr); gap: 12px; align-items: baseline;
+    padding: 9px 2px; border-bottom: 1px solid var(--line); }
+  .ev:last-child { border-bottom: 0; }
+  .ev time { font: 12px var(--f-mono); color: var(--dim); white-space: nowrap; }
+  .tag { justify-self: start; font: 600 11px var(--f-body); padding: 2px 9px; border-radius: 100px; white-space: nowrap; }
+  .tag.account, .tag.agency { color: var(--info); background: var(--info-soft); }
+  .tag.tayo, .tag.search { color: var(--ink); background: var(--action-soft); }
+  .tag.lead, .tag.inspection { color: var(--good); background: var(--good-soft); }
+  .tag.listing, .tag.post { color: var(--muted); background: var(--line); }
+  .tag.post_failed { color: var(--bad); background: var(--bad-soft); }
+  .ev .txt { overflow-wrap: anywhere; }
+  .more { margin-top: 10px; }
+
+  /* health */
+  .alerts { display: grid; gap: 8px; }
+  .alert { border-left: 3px solid var(--bad); background: var(--bad-soft); border-radius: 0 10px 10px 0; padding: 9px 12px; font-size: 13px; }
+  .alert b { font-weight: 600; }
+  .alert .d { color: var(--muted); font-size: 12px; margin-top: 2px; font-family: var(--f-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ok-line { color: var(--good); font-size: 13px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .facts b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .setup { max-width: 640px; }
+  .setup ol { padding-left: 20px; line-height: 1.7; }
+  .setup code { font: 12.5px var(--f-mono); background: var(--line); padding: 1px 6px; border-radius: 5px; }
+  .err-msg { color: var(--bad); font-weight: 600; }
+
+  @media (max-width: 900px) {
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .two { grid-template-columns: minmax(0, 1fr); }
+    .funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .ev { grid-template-columns: 1fr; gap: 3px; }
+    .hbar { grid-template-columns: 88px minmax(0, 1fr) 36px; }
+    .kpi .val { font-size: 26px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><h1>Synapse Pulse</h1><span>Usage &amp; performance</span></div>
+    <div class="seg" role="group" aria-label="Period">
+      <button type="button" data-days="1">Today</button>
+      <button type="button" data-days="7">7 days</button>
+      <button type="button" data-days="30" aria-pressed="true">30 days</button>
+      <button type="button" data-days="90">90 days</button>
+    </div>
+    <div class="status" id="status" role="status"><span class="dot stale"></span><span>Loading…</span></div>
+    <button type="button" class="btn" id="refresh">Refresh</button>
+  </header>
+
+  <main id="main" style="display:grid;gap:22px"></main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmt = (n) => Number(n || 0).toLocaleString('en-NG');
+
+  const CHANNEL = {
+    facebook: 'Facebook', instagram: 'Instagram', telegram: 'Telegram', tiktok: 'TikTok', x: 'X',
+    whatsapp_campaign: 'WhatsApp', whatsapp: 'WhatsApp', referral: 'Shared by agents', organic: 'Direct / unknown',
+    website: 'Website', direct_search: 'Direct', ai_recommendation: 'Tayo', proximity_alert: 'Proximity',
+    toju_chat: 'Tayo chat', direct: 'Direct', bio: 'Bio link',
+  };
+  const TYPE = {
+    account: 'Account', agency: 'Agency', listing: 'Listing', tayo: 'Tayo chat', search: 'Search',
+    lead: 'Lead', inspection: 'Inspection', post: 'Post', post_failed: 'Post failed',
+  };
+  const FEED_FILTERS = [
+    ['all', 'All'], ['account', 'Accounts'], ['tayo', 'Tayo'], ['listing', 'Listings'],
+    ['lead', 'Leads'], ['post', 'Posts'], ['post_failed', 'Failures'],
+  ];
+
+  let DAYS = 30, DATA = null, METRIC = 'tayo', FEED = 'all', SHOWN = 25, timer = null;
+  try { const s = localStorage.getItem('pulse_days'); if (s) DAYS = +s || 30; } catch (e) {}
+
+  /* ── fetching ─────────────────────────────────────────────────────── */
+  async function load() {
+    setStatus('stale', 'Loading…');
+    try {
+      const r = await fetch('/api/report?days=' + DAYS, { cache: 'no-store' });
+      const j = await r.json().catch(() => ({ error: 'The local server returned something unreadable.' }));
+      if (!r.ok || j.error) { renderSetup(j.error || ('Error ' + r.status)); setStatus('err', 'Not connected'); return; }
+      DATA = j;
+      render();
+      const at = new Date(j.generated_at);
+      setStatus('ok', (j.sample ? 'Sample data' : 'Live') + ' · updated ' + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    } catch (e) {
+      setStatus('err', 'The local server is not running');
+      renderSetup('Could not reach the local server. Start it with: node tools/pulse/server.mjs');
+    }
+  }
+  function setStatus(kind, text) {
+    $('status').innerHTML = '<span class="dot ' + (kind === 'ok' ? '' : kind) + '"></span><span>' + esc(text) + '</span>'
+      + (DATA && DATA.sample ? ' <span class="badge">Sample</span>' : '');
+  }
+
+  /* ── pieces ───────────────────────────────────────────────────────── */
+  function delta(now, prev) {
+    now = +now || 0; prev = +prev || 0;
+    const label = DAYS === 1 ? 'vs yesterday' : 'vs previous ' + DAYS + ' days';
+    if (!prev && !now) return '<span class="delta flat" title="' + label + '">—</span>';
+    if (!prev) return '<span class="delta up" title="' + label + '">new</span>';
+    const pct = Math.round((now - prev) / prev * 100);
+    if (pct === 0) return '<span class="delta flat" title="' + label + '">0%</span>';
+    return '<span class="delta ' + (pct > 0 ? 'up' : 'down') + '" title="' + label + '">'
+      + (pct > 0 ? '▲ ' : '▼ ') + Math.abs(pct) + '%</span>';
+  }
+
+  function spark(key) {
+    const s = (DATA.daily || []).map((d) => +d[key] || 0);
+    if (s.length < 2 || !s.some(Boolean)) return '';
+    const w = 200, h = 34, max = Math.max(...s), step = w / (s.length - 1);
+    const pts = s.map((v, i) => [i * step, h - 3 - (v / max) * (h - 6)]);
+    const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+    const last = pts[pts.length - 1];
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true">'
+      + '<path d="' + line + ' L' + w + ' ' + h + ' L0 ' + h + ' Z" fill="var(--action-soft)"/>'
+      + '<path d="' + line + '" fill="none" stroke="var(--action)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>'
+      + '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.4" fill="var(--action)"/></svg>';
+  }
+
+  function kpi(label, pair, sub, sparkKey) {
+    pair = pair || {};
+    return '<div class="kpi"><div class="lbl">' + esc(label) + '</div>'
+      + '<div class="row"><div class="val num">' + fmt(pair.now) + '</div>' + delta(pair.now, pair.prev) + '</div>'
+      + '<div class="sub">' + (sub || '') + '</div>'
+      + (sparkKey ? spark(sparkKey) : '') + '</div>';
+  }
+
+  function rolesLine() {
+    const r = DATA.new_accounts_by_role || {};
+    const name = { consumer: 'buyer', agent: 'agent', agency_owner: 'agency owner', agency_admin: 'agency admin', platform_admin: 'admin' };
+    const parts = Object.keys(r).sort((a, b) => r[b] - r[a]).map((k) => r[k] + ' ' + (name[k] || k) + (r[k] === 1 ? '' : 's'));
+    return parts.length ? esc(parts.join(' · ')) : 'No sign-ups in this period';
+  }
+
+  /* ── the page ─────────────────────────────────────────────────────── */
+  function render() {
+    const k = DATA.kpis || {};
+    const per = DAYS === 1 ? 'today' : 'in ' + DAYS + ' days';
+    let h = '';
+
+    h += '<section class="group" aria-labelledby="g1"><h2 id="g1">Growth</h2><div class="kpis">'
+      + kpi('New accounts', k.accounts, rolesLine(), 'accounts')
+      + kpi('Active users', k.active_users, 'signed in ' + per)
+      + kpi('New agencies', k.agencies, fmt((k.agencies || {}).total) + ' agencies in all')
+      + kpi('New listings', k.listings, fmt((k.listings || {}).live) + ' live now')
+      + '</div></section>';
+
+    h += '<section class="group" aria-labelledby="g2"><h2 id="g2">Engagement</h2><div class="kpis">'
+      + kpi('Tayo conversations', k.tayo_chats, fmt((k.tayo_messages || {}).now) + ' messages from people', 'tayo')
+      + kpi('Listing visits', k.visits, 'listing pages opened from a tracked channel', 'visits')
+      + kpi('Link clicks', k.clicks, 'people, not link-preview bots', 'clicks')
+      + kpi('Searches', k.searches, 'searches on Browse', 'searches')
+      + '</div></section>';
+
+    h += '<section class="group" aria-labelledby="g3"><h2 id="g3">Outcomes</h2><div class="kpis">'
+      + kpi('Leads', k.leads, fmt((k.leads || {}).total) + ' leads in all', 'leads')
+      + kpi('Inspections booked', k.inspections, '')
+      + kpi('Posts published', k.posts, ((k.posts || {}).failed ? '<span style="color:var(--bad)">' + fmt(k.posts.failed) + ' failed</span>' : 'none failed'), 'posts')
+      + kpi('Arrivals tracked', k.arrivals, fmt((k.registrations || {}).now) + ' went on to register')
+      + '</div></section>';
+
+    h += chartPanel();
+    h += funnelPanel();
+    h += '<div class="two">' + sourcesPanel() + topPanel() + '</div>';
+    h += feedPanel();
+    h += healthPanel();
+
+    $('main').innerHTML = h;
+    wire();
+  }
+
+  function chartPanel() {
+    const metrics = [['tayo', 'Tayo chats'], ['accounts', 'Accounts'], ['visits', 'Visits'], ['clicks', 'Clicks'], ['leads', 'Leads'], ['posts', 'Posts']];
+    return '<section class="panel" aria-labelledby="c1"><div class="panel-head"><h2 id="c1">Day by day</h2>'
+      + '<div class="chips" role="group" aria-label="Metric">' + metrics.map((m) =>
+          '<button type="button" class="chip" data-metric="' + m[0] + '" aria-pressed="' + (METRIC === m[0]) + '">' + m[1] + '</button>').join('')
+      + '</div></div>' + chartSvg() + '</section>';
+  }
+
+  function chartSvg() {
+    const days = DATA.daily || [];
+    if (!days.length) return '<p class="note">No days in this period.</p>';
+    const vals = days.map((d) => +d[METRIC] || 0);
+    const max = Math.max(1, ...vals);
+    const W = 1000, H = 210, L = 34, B = 24, T = 10, R = 8;
+    const bw = (W - L - R) / days.length;
+    const y = (v) => T + (H - T - B) * (1 - v / max);
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="'
+      + esc(METRIC) + ' per day">';
+    [0, 0.5, 1].forEach((f) => {
+      const v = Math.round(max * f), yy = y(v);
+      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="var(--line)"/>'
+        + '<text x="' + (L - 6) + '" y="' + (yy + 4) + '" text-anchor="end">' + v + '</text>';
+    });
+    days.forEach((d, i) => {
+      const v = vals[i], x = L + i * bw + bw * 0.15, w = Math.max(1, bw * 0.7), yy = y(v);
+      s += '<rect x="' + x.toFixed(1) + '" y="' + yy.toFixed(1) + '" width="' + w.toFixed(1) + '" height="' + (H - B - yy).toFixed(1)
+        + '" rx="2" fill="' + (v ? 'var(--action)' : 'var(--line)') + '"><title>' + esc(d.day) + ': ' + v + '</title></rect>';
+    });
+    const lbl = (d) => new Date(d + 'T12:00:00').toLocaleDateString([], { day: 'numeric', month: 'short' });
+    s += '<text x="' + L + '" y="' + (H - 6) + '">' + esc(lbl(days[0].day)) + '</text>'
+      + '<text x="' + (W - R) + '" y="' + (H - 6) + '" text-anchor="end">' + esc(lbl(days[days.length - 1].day)) + '</text>';
+    return s + '</svg>';
+  }
+
+  function funnelPanel() {
+    const k = DATA.kpis || {};
+    const steps = [
+      ['Listing visits', +(k.visits || {}).now || 0],
+      ['Tayo conversations', +(k.tayo_chats || {}).now || 0],
+      ['New accounts', +(k.accounts || {}).now || 0],
+      ['Leads', +(k.leads || {}).now || 0],
+    ];
+    const top = Math.max(1, steps[0][1]);
+    return '<section class="panel" aria-labelledby="f1"><div class="panel-head"><h2 id="f1">From visit to lead</h2></div>'
+      + '<div class="funnel">' + steps.map((st, i) => {
+          const prev = i ? steps[i - 1][1] : 0;
+          const conv = i && prev ? Math.round(st[1] / prev * 100) + '% of the step before' : (i ? '—' : 'the starting point');
+          return '<div class="step"><div class="n">' + fmt(st[1]) + '</div><div class="t">' + st[0] + '</div>'
+            + '<div class="bar-bg"><div class="bar-fg" style="width:' + Math.min(100, st[1] / top * 100).toFixed(1) + '%"></div></div>'
+            + '<div class="c">' + conv + '</div></div>';
+        }).join('') + '</div>'
+      + '<p class="note">Counts of each step in the period, not the same people followed through — a rough shape, not a tracked journey.</p></section>';
+  }
+
+  function hbars(list, key) {
+    if (!list || !list.length) return '<p class="note">Nothing recorded in this period.</p>';
+    const max = Math.max(1, ...list.map((x) => +x.n || 0));
+    return '<div class="hbars">' + list.slice(0, 8).map((x) => {
+      const name = CHANNEL[x[key]] || x[key];
+      return '<div class="hbar"><span>' + esc(name) + '</span><div class="track"><div class="fill" style="width:'
+        + ((+x.n || 0) / max * 100).toFixed(1) + '%"></div></div><span class="v">' + fmt(x.n) + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  function sourcesPanel() {
+    const s = DATA.sources || {};
+    return '<section class="panel" aria-labelledby="s1"><div class="panel-head"><h2 id="s1">Where people came from</h2></div>'
+      + '<div class="note" style="margin:0 0 8px">Link clicks by channel</div>' + hbars(s.clicks_by_channel, 'channel')
+      + '<div class="note" style="margin:14px 0 8px">Listing visits by channel</div>' + hbars(s.visits_by_channel, 'channel')
+      + ((s.arrivals_by_source || []).length ? '<div class="note" style="margin:14px 0 8px">Arrivals by source</div>' + hbars(s.arrivals_by_source, 'source') : '')
+      + '</section>';
+  }
+
+  function topPanel() {
+    const t = DATA.top_listings || [];
+    const pp = (DATA.sources || {}).posts_by_platform || [];
+    return '<section class="panel" aria-labelledby="t1"><div class="panel-head"><h2 id="t1">Listings people looked at</h2></div>'
+      + (t.length ? '<div class="tbl-wrap"><table><thead><tr><th>Listing</th><th class="n">Visits</th><th class="n">Clicks</th><th class="n">Leads</th></tr></thead><tbody>'
+          + t.map((x) => '<tr><td>' + esc(x.title) + '<span class="s">' + esc([x.agency, x.city].filter(Boolean).join(' · ')) + '</span></td>'
+            + '<td class="n">' + fmt(x.visits) + '</td><td class="n">' + fmt(x.clicks) + '</td><td class="n">' + fmt(x.leads) + '</td></tr>').join('')
+          + '</tbody></table></div>'
+        : '<p class="note">No listing was visited through a tracked link in this period.</p>')
+      + (pp.length ? '<div class="note" style="margin:16px 0 6px">Posts by platform</div><div class="tbl-wrap"><table><thead><tr><th>Platform</th><th class="n">Published</th><th class="n">Failed</th></tr></thead><tbody>'
+          + pp.map((x) => '<tr><td>' + esc(CHANNEL[x.platform] || x.platform) + '</td><td class="n">' + fmt(x.published) + '</td><td class="n"'
+            + (x.failed ? ' style="color:var(--bad)"' : '') + '>' + fmt(x.failed) + '</td></tr>').join('') + '</tbody></table></div>' : '')
+      + '</section>';
+  }
+
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    return Math.round(s / 86400) + ' d ago';
+  }
+
+  function feedPanel() {
+    const all = DATA.feed || [];
+    const rows = all.filter((e) => FEED === 'all' || e.type === FEED);
+    return '<section class="panel" aria-labelledby="l1"><div class="panel-head"><h2 id="l1">Activity log</h2>'
+      + '<div class="chips" role="group" aria-label="Show">' + FEED_FILTERS.map((f) =>
+          '<button type="button" class="chip" data-feed="' + f[0] + '" aria-pressed="' + (FEED === f[0]) + '">' + f[1] + '</button>').join('')
+      + '</div></div>'
+      + (rows.length ? '<div class="log">' + rows.slice(0, SHOWN).map((e) =>
+          '<div class="ev"><time datetime="' + esc(e.at) + '" title="' + esc(new Date(e.at).toLocaleString()) + '">' + ago(e.at) + '</time>'
+          + '<span class="tag ' + esc(e.type) + '">' + esc(TYPE[e.type] || e.type) + '</span>'
+          + '<span class="txt">' + esc(e.text) + '</span></div>').join('') + '</div>'
+        : '<p class="note">Nothing of this kind in this period.</p>')
+      + (rows.length > SHOWN ? '<button type="button" class="btn more" id="more">Show more (' + (rows.length - SHOWN) + ')</button>' : '')
+      + '<p class="note">The latest 80 events in the period. Emails are masked; a Tayo conversation shows only its first line.</p></section>';
+  }
+
+  function healthPanel() {
+    const hl = DATA.health || {};
+    const al = hl.open_alerts || [];
+    return '<section class="panel" aria-labelledby="h1"><div class="panel-head"><h2 id="h1">Behind the scenes</h2></div>'
+      + '<div class="facts"><span><b>' + fmt(hl.failed_posts_24h) + '</b> posts failed in the last 24 hours</span>'
+      + '<span><b>' + fmt(hl.queued_posts) + '</b> posts waiting to go out</span></div>'
+      + (al.length ? '<div class="alerts">' + al.map((a) =>
+          '<div class="alert"><b>' + esc(a.job) + '</b> · ' + esc(a.kind) + ' · ' + fmt(a.times) + ' times · last ' + esc(ago(a.last))
+          + (a.detail ? '<div class="d">' + esc(a.detail) + '</div>' : '') + '</div>').join('') + '</div>'
+        : '<p class="ok-line">No background job is failing.</p>')
+      + '</section>';
+  }
+
+  function renderSetup(msg) {
+    $('main').innerHTML = '<section class="panel setup"><h2>Connect Pulse to the database</h2>'
+      + '<p class="err-msg">' + esc(msg) + '</p><ol>'
+      + '<li>In <code>synapse-platform/tools/pulse/</code>, copy <code>.env.example</code> to <code>.env</code>.</li>'
+      + '<li>Supabase dashboard → Project Settings → API Keys → copy the <b>secret</b> key (or the legacy <b>service_role</b> key).</li>'
+      + '<li>Paste it after <code>SUPABASE_SERVICE_ROLE_KEY=</code> in <code>.env</code>. It stays on this computer only.</li>'
+      + '<li>Restart: <code>node tools/pulse/server.mjs</code>, then reload this page.</li></ol></section>';
+  }
+
+  function wire() {
+    document.querySelectorAll('[data-metric]').forEach((b) => b.addEventListener('click', () => { METRIC = b.dataset.metric; render(); }));
+    document.querySelectorAll('[data-feed]').forEach((b) => b.addEventListener('click', () => { FEED = b.dataset.feed; SHOWN = 25; render(); }));
+    const more = $('more'); if (more) more.addEventListener('click', () => { SHOWN += 25; render(); });
+  }
+
+  document.querySelectorAll('.seg button').forEach((b) => {
+    b.setAttribute('aria-pressed', String(+b.dataset.days === DAYS));
+    b.addEventListener('click', () => {
+      DAYS = +b.dataset.days;
+      try { localStorage.setItem('pulse_days', String(DAYS)); } catch (e) {}
+      document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      load();
+    });
+  });
+  $('refresh').addEventListener('click', load);
+
+  /* Every minute while the tab is visible; straight away when it comes back. */
+  timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 60000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
+  load();
+})();
+</script>
+</body>
+</html>
