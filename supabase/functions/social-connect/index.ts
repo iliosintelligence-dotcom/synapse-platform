@@ -668,7 +668,7 @@ async function finishFacebook(
 
 /** Sends the operator back to the portal with a plain-language outcome rather
  *  than leaving them on a white page owned by an edge function. */
-function backToPortal(status: string, detail?: string): Response {
+async function backToPortal(status: string, detail?: string): Promise<Response> {
   /* THE DEFAULT IS ABSOLUTE, AND HAS TO BE.
      This used to fall back to the RELATIVE '/app/agency.html'. A relative
      redirect issued by an edge function resolves against the function's own
@@ -695,6 +695,25 @@ function backToPortal(status: string, detail?: string): Response {
      operator is told. This is how anyone reading the logs is told. */
   if (status === 'error') console.error('social-connect failed: ' + (detail ?? 'no detail'));
   else console.log('social-connect ' + status + ': ' + (detail ?? ''));
+  /* AND WRITE IT DOWN (2026-09-28). The log turned out to be unreadable from
+     outside the dashboard, so "Facebook still gives the same error" arrived
+     with no error attached, twice. A failed or cancelled connection is kept
+     in social_connect_failures (service role only, purged at 30 days): the
+     outcome and the platform's own words, nothing about the person. Never
+     allowed to hold up the redirect by more than a moment. */
+  if (status === 'error' || status === 'cancelled') {
+    const sbUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    if (sbUrl && key) {
+      const write = fetch(sbUrl + '/rest/v1/social_connect_failures', {
+        method: 'POST',
+        headers: { apikey: key, Authorization: 'Bearer ' + key,
+                   'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ status, detail: (detail ?? '').slice(0, 1000) || null }),
+      }).catch(() => null);
+      await Promise.race([write, new Promise((r) => setTimeout(r, 1500))]);
+    }
+  }
 
   const u = new URL(portal, 'https://placeholder.invalid');
   u.searchParams.set('connected', status);
