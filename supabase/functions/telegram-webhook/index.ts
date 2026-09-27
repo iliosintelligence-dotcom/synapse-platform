@@ -200,6 +200,73 @@ async function onMembership(m: Json) {
   }
 }
 
+/* ── "/connect CODE" posted in a channel ──────────────────────────────────
+   The portal gave a signed-in agency member the code; somebody able to post
+   in this channel has just posted it. That is the proof the channel is
+   theirs to connect. The code is claimed in one statement (single use), the
+   bot's own right to post is checked with Telegram, the channel is connected
+   to the code's agency, and the code post is deleted so followers never see
+   it. Every outcome is written to the code's row, which the portal watches. */
+async function tg(method: string, body: Record<string, unknown>) {
+  const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).catch(() => null);
+  return r ? await r.json().catch(() => ({ ok: false })) : { ok: false };
+}
+
+async function onChannelPost(p: Json) {
+  const text = String(p?.text ?? '').trim();
+  const m = text.match(/^\/connect(?:@\w+)?\s+([A-Za-z0-9]{6,12})$/);
+  if (!m || !p.chat) return;          // every other channel post, ours included
+  const code = m[1].toUpperCase();
+  const chat = p.chat;
+  const now = new Date().toISOString();
+
+  const claim = await sb(
+    'telegram_connect_codes?code=eq.' + encodeURIComponent(code)
+      + '&used_at=is.null&expires_at=gt.' + encodeURIComponent(now) + '&select=agency_id,profile_id',
+    { method: 'PATCH', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ used_at: now, chat_id: chat.id }) },
+  );
+  const rows = claim.ok ? await claim.json().catch(() => []) : [];
+  if (!Array.isArray(rows) || !rows.length) return;   // unknown, used or expired: leave the post alone
+  const { agency_id, profile_id } = rows[0];
+  const mark = (fields: Record<string, unknown>) => sb('telegram_connect_codes?code=eq.' + encodeURIComponent(code), {
+    method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(fields),
+  });
+
+  const me = await tg('getMe', {});
+  const member = me.ok ? await tg('getChatMember', { chat_id: chat.id, user_id: me.result.id }) : { ok: false };
+  const st = member.ok ? String(member.result.status) : '';
+  const canPost = st === 'creator' || (st === 'administrator' && member.result.can_post_messages !== false);
+  if (!canPost) {
+    await mark({ error: 'The bot is in ' + (chat.title ?? 'the channel') + ' but is not allowed to post. '
+      + 'In the channel: Administrators \u2192 the bot \u2192 turn on Post Messages, then post the code again.' });
+    return;
+  }
+
+  const label = chat.username ? '@' + chat.username : (chat.title ?? 'channel');
+  const conn = await sb('rpc/connect_telegram_channel', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_agency_id: agency_id, p_chat_id: String(chat.id), p_title: chat.title ?? '',
+      p_username: chat.username ? '@' + chat.username : '', p_bot_token: TG_TOKEN,
+      p_connected_by: profile_id,
+    }),
+  });
+  if (!conn.ok) {
+    const why = await conn.text();
+    console.error('telegram-webhook: connect_telegram_channel failed', conn.status, why);
+    await mark({ error: 'The channel could not be connected: ' + why.slice(0, 200) });
+    return;
+  }
+  const accountId = await conn.json().catch(() => null);
+
+  const del = await tg('deleteMessage', { chat_id: chat.id, message_id: p.message_id });
+  await mark({ account_id: accountId, channel: label, code_post_deleted: Boolean(del.ok) });
+  console.log('telegram-webhook: channel ' + chat.id + ' connected by code for agency ' + agency_id);
+}
+
 /* ── a private message: /start <code>, or anything else ──────────────────── */
 async function onMessage(msg: Json) {
   if (msg?.chat?.type !== 'private') return;          // say nothing in groups
@@ -276,6 +343,7 @@ Deno.serve(async (req: Request) => {
   const update = await req.json().catch(() => null);
   try {
     if (update?.my_chat_member) await onMembership(update.my_chat_member);
+    else if (update?.channel_post) await onChannelPost(update.channel_post);
     else if (update?.message) await onMessage(update.message);
   } catch (e) {
     console.error('telegram-webhook: update ' + (update?.update_id ?? '?') + ' failed', e);

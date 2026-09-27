@@ -744,11 +744,13 @@ const TG_PROFILE = {
     + 'with a “View this home” button.',
 };
 
-/* The rights Telegram pre-ticks when the bot is added to a CHANNEL. Posting
-   is the only thing the bot does, so it is the only thing it asks for:
-   an agency deciding whether to trust it should see one box, not eight. */
+/* The rights Telegram pre-ticks when the bot is added to a CHANNEL. Posting,
+   and deleting -- used for one thing only: removing the "/connect CODE" post
+   the agency makes to connect the channel, so its followers never see it.
+   Nothing else; an agency deciding whether to trust it should see two boxes,
+   not eight. */
 const TG_CHANNEL_RIGHTS: Record<string, boolean> = {
-  is_anonymous: false, can_manage_chat: false, can_delete_messages: false,
+  is_anonymous: false, can_manage_chat: false, can_delete_messages: true,
   can_manage_video_chats: false, can_restrict_members: false,
   can_promote_members: false, can_change_info: false, can_invite_users: false,
   can_post_stories: false, can_edit_stories: false, can_delete_stories: false,
@@ -804,7 +806,7 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
      would rewrite the rights on every call for a difference nobody chose. */
   const rr = await call('getMyDefaultAdministratorRights', { for_channels: true });
   if (!rr.ok) errors.push('read channel rights: ' + (rr.description ?? 'failed'));
-  else if (!rr.result?.can_post_messages) {
+  else if (!rr.result?.can_post_messages || !rr.result?.can_delete_messages) {
     const s = await call('setMyDefaultAdministratorRights', { rights: TG_CHANNEL_RIGHTS, for_channels: true });
     if (s.ok) changed.push('channel_rights'); else errors.push('channel rights: ' + (s.description ?? 'failed'));
   }
@@ -828,7 +830,8 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
      Telegram reports deliveries being refused -- which is what a rotated
      token looks like from here, since the secret is derived from it. */
   const hook = (Deno.env.get('SUPABASE_URL') ?? '') + '/functions/v1/telegram-webhook';
-  const wantUpdates = ['message', 'my_chat_member'];
+  /* channel_post: how a "/connect CODE" posted in a channel reaches us. */
+  const wantUpdates = ['message', 'my_chat_member', 'channel_post'];
   const info = await call('getWebhookInfo');
   const have = info.ok ? info.result ?? {} : {};
   const sameUpdates = Array.isArray(have.allowed_updates)
@@ -1139,6 +1142,56 @@ Deno.serve(async (req: Request) => {
       if (codeErr) return json({ error: 'Could not start the link: ' + codeErr.message }, 500);
       const bot = (await telegramBotHandle(tgBotToken) ?? '@SynapseListingsBot').replace(/^@/, '');
       return json({ url: 'https://t.me/' + bot + '?start=' + code, expires_in: 900 });
+    }
+
+    /* ── connect by a code posted in the channel (TryPost's method) ────────
+       A short code for this member; posting "/connect CODE" in a channel the
+       bot administers connects that channel to this agency (telegram-webhook).
+       Posting there needs the right to post there, which is the proof. Makes
+       sure the webhook listens for channel posts before handing a code out. */
+    if (tgAction === 'telegram-code') {
+      if (req.method !== 'POST') return json({ error: 'POST for a code' }, 405);
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const setup = await syncTelegramProfile(tgBotToken);
+      if (Array.isArray(setup.errors) && (setup.errors as string[]).some((e) => e.startsWith('webhook'))) {
+        return json({ error: 'Telegram did not accept our webhook, so the code could not arrive. '
+          + (setup.errors as string[]).join('; ') }, 502);
+      }
+      /* Six characters without the look-alikes (0/O, 1/I/L), so it survives
+         being read off one screen and typed on another. */
+      const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let attempt = 0; attempt < 5 && !code; attempt++) {
+        const bytes = crypto.getRandomValues(new Uint8Array(6));
+        const candidate = [...bytes].map((b) => ALPHA[b % ALPHA.length]).join('');
+        const { error: insErr } = await who.admin.from('telegram_connect_codes')
+          .insert({ code: candidate, agency_id: who.agencyId, profile_id: who.userId });
+        if (!insErr) code = candidate;
+      }
+      if (!code) return json({ error: 'Could not issue a code. Please try again.' }, 500);
+      return json({ code, command: '/connect ' + code, expires_in: 900,
+                    bot: await telegramBotHandle(tgBotToken) });
+    }
+
+    /* Has that code been posted yet, and what came of it. Only the member it
+       was issued to may ask. */
+    if (tgAction === 'telegram-code-status') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const code = (url.searchParams.get('code') ?? '').trim().toUpperCase();
+      if (!/^[A-Z0-9]{6,12}$/.test(code)) return json({ error: 'No such code' }, 400);
+      const { data: row } = await who.admin.from('telegram_connect_codes')
+        .select('used_at, expires_at, channel, account_id, code_post_deleted, error')
+        .eq('code', code).eq('profile_id', who.userId).maybeSingle();
+      if (!row) return json({ status: 'unknown' });
+      if (row.error) return json({ status: 'error', error: row.error });
+      if (row.account_id) {
+        return json({ status: 'connected', channel: row.channel, code_post_deleted: row.code_post_deleted });
+      }
+      if (row.used_at) return json({ status: 'working' });
+      if (Date.parse(row.expires_at as string) < Date.now()) return json({ status: 'expired' });
+      return json({ status: 'waiting' });
     }
 
     /* The channels this person has added the bot to, newest first, marked
