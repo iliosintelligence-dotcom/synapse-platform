@@ -29,7 +29,8 @@
  *
  * NEW MIGRATIONS: `supabase migration new <name>`, which generates the
  * timestamp. A file that follows neither scheme is refused before any network
- * call rather than ignored.
+ * call rather than ignored. So is a version two files share, and a file whose
+ * version the database already holds under another migration's name.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
@@ -142,6 +143,28 @@ function versionOf(file) {
   return m[1];
 }
 
+/* ONE VERSION, ONE FILE. Everything here keys on the version alone, so two
+   files sharing one do not both run: whichever is applied first is recorded,
+   and from then on the other reads as applied and silently never runs. That
+   happened on 27 September — two sessions each wrote a 20260927230000_ file.
+   Two ways it shows up, and both are refused: */
+
+/** Versions claimed by more than one file in the folder, with their files. */
+function duplicateVersions(files) {
+  const by = new Map();
+  for (const f of files) by.set(versionOf(f), [...(by.get(versionOf(f)) || []), f]);
+  return [...by.entries()].filter(([, fs]) => fs.length > 1);
+}
+
+/** Whether the name recorded for a version is this file. This script records
+    the whole filename; the CLI records the bare name; compare them bare. A
+    version recorded with no name cannot be checked and is taken on trust. */
+function isRecordedAs(recordedName, file) {
+  if (recordedName == null || recordedName === '') return true;
+  const bare = (n) => basename(String(n)).replace(/\.sql$/i, '').replace(TIMESTAMP, '');
+  return bare(recordedName) === bare(file);
+}
+
 /** Every .sql in the folder, split by which scheme names it. */
 function partition() {
   const all = readdirSync(DIR).filter((f) => f.endsWith('.sql'));
@@ -167,11 +190,13 @@ async function ensureTable() {
   `);
 }
 
+/** version -> the name recorded with it, so a file can be checked against the
+ *  migration that actually ran under its version. */
 async function applied() {
   const rows = await sql(
-    'select version from supabase_migrations.schema_migrations order by version;',
+    'select version, name from supabase_migrations.schema_migrations order by version;',
   );
-  return new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.version)));
+  return new Map((Array.isArray(rows) ? rows : []).map((r) => [String(r.version), r.name ?? null]));
 }
 
 /** Recorded in the same shape the CLI writes, so `db push` reads it correctly.
@@ -223,8 +248,35 @@ const { managed: files, legacy, unnamed } = partition();
     process.exit(1);
   }
 
+  /* Two files, one version, both in the checkout: also a checkout problem, and
+     also free to catch here. Neither has run yet, or only one has — either way
+     one of them would be skipped without a word. */
+  const dupes = duplicateVersions(files);
+  if (dupes.length) {
+    console.error(`Refusing to continue: ${dupes.length} version(s) are claimed by more than `
+      + 'one file, and only the first applied would ever run:\n'
+      + dupes.map(([v, fs]) => `  ${v}\n    ${fs.join('\n    ')}`).join('\n')
+      + '\nGive all but one a new version.');
+    process.exit(1);
+  }
+
   await ensureTable();
   const done = await applied();
+
+  /* The same collision after the fact: the other file already ran and is
+     recorded, and this one — renamed, or written later — carries its version.
+     Counted as applied, it would never run. Refused in plan as well as apply,
+     so it is seen before anybody assumes it went in. If this file IS the one
+     that ran, under an earlier name, give it that name back instead. */
+  const collided = files.filter((f) => done.has(versionOf(f)) && !isRecordedAs(done.get(versionOf(f)), f));
+  if (collided.length) {
+    console.error(`Refusing to continue: ${collided.length} file(s) carry a version the database `
+      + 'recorded for a different migration, so they read as applied but never ran:\n'
+      + collided.map((f) => `  ${f}\n    recorded as: ${done.get(versionOf(f))}`).join('\n')
+      + '\nGive each a new version, unused both here and in schema_migrations.');
+    process.exit(1);
+  }
+
   const pending = files.filter((f) => !done.has(versionOf(f)));
 
   console.log(`project   ${REF}`);
@@ -245,7 +297,7 @@ const { managed: files, legacy, unnamed } = partition();
   const mismatched = files.length > 0 && done.size > 0 && overlap === 0;
   if (mismatched) {
     console.log('\n!! None of the managed files match the recorded history.');
-    console.log(`   recorded: ${[...done].slice(-3).join(', ')}`);
+    console.log(`   recorded: ${[...done.keys()].slice(-3).join(', ')}`);
     console.log(`   on disk : ${files.slice(0, 3).map(versionOf).join(', ')}`);
     console.log('   If these are genuinely new, this is fine. If not, do NOT apply.');
   }
