@@ -1178,16 +1178,17 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      listing is titled "1 bedroom student apartment, Agbowo". Matching across
      all three is WIDER in what it reads and NARROWER in what it returns:
      the term still has to appear on the row. The rule this protects -- never
-     show a place they did not ask for -- is kept. */
+     show a place they did not ask for -- is kept. area_name is the fourth:
+     the Area field the agent fills in, stored since 20260927160000. */
   if (c.city && typeof c.city === 'string') {
     const term = encodeURIComponent(c.city.trim());
-    conds.push(`or=(city.ilike.*${term}*,address.ilike.*${term}*,title.ilike.*${term}*)`);
+    conds.push(`or=(city.ilike.*${term}*,area_name.ilike.*${term}*,address.ilike.*${term}*,title.ilike.*${term}*)`);
   }
   if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
   if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
-    'id,title,city,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
+    'id,title,city,area_name,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
     'verification_status,verified_at,' +
     /* Where the home actually is. Without these two the matches map had
        nothing to plot and fell back to a hardcoded city-centre table, so every
@@ -1292,8 +1293,11 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
         ? { name: ag.name, logo: ag.logo_url ?? null, color: ag.brand_color ?? null, font: ag.brand_font ?? null }
         : null,
       // Name only. The scores and the summary that used to travel with it were
-      // synthetic; passing them to the model made it state them as fact.
-      neighbourhood: n ? { name: (n.name as string) ?? null } : null,
+      // synthetic; passing them to the model made it state them as fact. The
+      // Area the agent typed comes first: no listing is linked to a zone.
+      neighbourhood: (typeof r.area_name === 'string' && r.area_name.trim())
+        ? { name: r.area_name.trim() }
+        : n ? { name: (n.name as string) ?? null } : null,
       room: rd ? {
         totalRooms: Number(rd.total_rooms ?? 0),
         housematesIn: Number(rd.housemates_in ?? 0),

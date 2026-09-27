@@ -708,7 +708,8 @@ Deno.serve(async (req: Request) => {
 
       city: pr.city,
       state: pr.state ?? null,
-      area: pr.area ?? pr.neighbourhood ?? null,
+      // `neighbourhood` from the portal, area_name from a raw properties row.
+      area: pr.area ?? pr.neighbourhood ?? pr.area_name ?? null,
       street,
 
       bedrooms: pr.bedrooms,

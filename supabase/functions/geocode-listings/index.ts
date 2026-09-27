@@ -65,6 +65,9 @@ interface Row {
   address: string | null;
   city: string | null;
   state: string | null;
+  /** The Area the agent typed. A far better rung than the linked zone, which
+   *  no listing has. */
+  area_name: string | null;
   neighbourhoods: { name: string | null } | null;
 }
 
@@ -116,7 +119,8 @@ async function askNominatim(q: string): Promise<{ lat: number; lon: number } | n
 }
 
 async function place(r: Row): Promise<{ lat: number; lon: number; how: string } | null> {
-  const rungs = geoLadder(r.address ?? '', r.neighbourhoods?.name ?? '', r.city ?? '', r.state ?? '');
+  const area = (r.area_name ?? '').trim() || (r.neighbourhoods?.name ?? '');
+  const rungs = geoLadder(r.address ?? '', area, r.city ?? '', r.state ?? '');
   for (let i = 0; i < rungs.length; i++) {
     const hit = await askNominatim(rungs[i].q);
     if (hit) return { ...hit, how: rungs[i].how };
@@ -160,7 +164,7 @@ Deno.serve(async (req: Request) => {
   if (body.id) conds.push(`id=eq.${body.id}`);
 
   const q = `${SB_URL}/rest/v1/properties`
-    + `?select=id,address,city,state,neighbourhoods(name)&${conds.join('&')}`
+    + `?select=id,address,city,state,area_name,neighbourhoods(name)&${conds.join('&')}`
     + `&order=created_at.desc&limit=${limit}`;
 
   const res = await fetch(q, { headers: h });
