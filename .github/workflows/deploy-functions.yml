@@ -63,7 +63,14 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # A PINNED version, not "latest". Resolving "latest" is an anonymous
+          # GitHub API call, and when the main and master pushes deploy at the
+          # same moment one of them gets "rate limit exceeded" and goes red —
+          # a false failure that hides real ones. A pinned version downloads
+          # straight from the release, with no API call at all. 2.118.0 is
+          # the release "latest" was installing on 27 Sep 2026, deploying
+          # these functions with this config.toml. Bump it on purpose.
+          version: 2.118.0
 
       - name: Work out which functions to deploy
         id: pick
