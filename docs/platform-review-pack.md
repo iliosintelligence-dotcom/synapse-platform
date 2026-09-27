@@ -37,17 +37,43 @@ matters more than starting perfectly.
    it is also the `[NEEDS LEGAL]` gap in the privacy policy, so both close
    together.
 2. **Privacy policy URL** — App Dashboard → Settings → Basic. Use
-   `https://www.synapsecore.dev/privacy`. It must name Facebook and Instagram
-   and what we read from each (see *Privacy policy* below).
+   `https://www.synapsecore.dev/privacy`. Since 2026-09-27 it has a
+   "Social accounts an agency connects" section naming Facebook Pages,
+   Instagram, TikTok and Telegram and what we read from each.
 3. **Data deletion instructions URL** — same screen. Use
-   `https://www.synapsecore.dev/your-data`, which exists and lets a person see,
-   export and erase what we hold.
+   `https://www.synapsecore.dev/your-data#social`. That section (added
+   2026-09-27) says how to disconnect, that tokens are deleted at once, how to
+   have everything deleted by email, and what a commenter can ask for.
 4. **App icon, category, and contact email** filled in on the same screen.
    Incomplete basic settings block submission outright.
 5. **Tick every permission below on Login for Business configuration
    `2272646810190199`.** Under Login for Business the configuration decides
    what the dialog asks for, and a permission that is not in it cannot be
    demonstrated in the screencast.
+
+6. **Access verification** may be asked for after business verification,
+   because Synapse reaches other businesses' Pages (Meta calls this being a
+   "tech provider"). It is a short form about how Synapse serves agencies; it
+   appears in the dashboard when it applies.
+
+### Make one real call with every permission first
+
+Meta's App Review page counts the API calls made with each permission and
+expects at least one successful call in the last 30 days before it accepts a
+request for Advanced Access. As of 2026-09-27 **no Facebook or Instagram
+account has ever been connected** (`social_accounts` holds only TikTok and
+Telegram rows), so every count is zero. In Development Mode the app's own
+admin can do all of this with their own Page:
+
+| Do this in the portal | Calls made | Permissions exercised |
+|---|---|---|
+| Social studio → Add channel → Facebook, tick the Page and its Instagram | `/me/accounts` with `instagram_business_account`, `/{page}/call_to_actions` (social-connect) | `pages_show_list`, `pages_manage_metadata`, `instagram_basic` |
+| New post → Facebook + Instagram → Post now | Page feed/photos publish, IG container + publish (social-publish) | `pages_manage_posts`, `instagram_content_publish` |
+| Wait for the metrics sweep | like/comment/share counts (post-metrics) | `pages_read_engagement`, `instagram_basic` |
+| Comment on both posts from a second account; wait for the sweep | `/{post}/comments` (post-metrics) | `pages_read_user_content`, `instagram_manage_comments` |
+| Switch on comment replies; comment the keyword on the IG post | private reply (social-reply) | `pages_messaging` |
+
+These are the same steps as the screencasts, so record while doing them.
 
 ### Recording the screencasts
 
@@ -223,32 +249,39 @@ Meta reads the page. It must say, in words a reviewer can find:
   (`purge-social-comments` cron);
 - how to request deletion: `/your-data`.
 
-`privacy.html` does not yet name Facebook or describe comment data. That rewrite
-is blocked on the 19 `[DECISION]` markers in `docs/POLICY_COPY_DRAFT.md` — **the
-Meta section can be written without waiting for the rest**, and should be, since
-it is on the critical path to review and the rest is not.
+**Done 2026-09-27:** `privacy.html` now covers all five points in "Social
+accounts an agency connects". Still open: the page is headed "Draft" with a
+"not a reviewed legal document" banner and visible `[NEEDS LEGAL]` placeholders
+(company name, data region, DPO contact). A reviewer can read those as "no
+final policy"; whether to change that before submitting is the founder's call.
 
 ---
 
 ## Not Meta, and needing no review
 
 - **Telegram** — a bot added as a channel administrator. No review, no app
-  mode, no permissions. Only `TELEGRAM_BOT_TOKEN` is outstanding.
-- **TikTok** — a separate app and a separate review, not started. Unaudited
-  TikTok apps can only post privately, which is enough to build against.
+  mode, no permissions. Live since 2026-09-27.
+- **TikTok** — a separate app and review, submitted 2026-09-27 (see below).
 
 ---
 
 ## Suggested order
 
-1. **Tonight:** tick all nine Facebook-leg permissions on configuration
-   `2272646810190199`, including `pages_read_user_content`, added today.
-2. **Start business verification** — it is the longest external wait here.
-3. **Write the Meta section of the privacy policy** and publish it.
-4. **Tomorrow:** add the test account as a Tester, connect, and record the
-   three screencasts while doing it.
-5. **Submit** the nine Facebook Login permissions.
-6. Afterwards: the Instagram product and its three permissions, for agencies
+Revised 2026-09-27, when review was started.
+
+1. **Start business verification** — the longest external wait, and it needs
+   the registered business name and a document proving it.
+2. **Basic settings**: privacy URL, data deletion URL (`/your-data#social`),
+   icon, category, contact email. (Privacy section: done.)
+3. **Tick all nine Facebook-leg permissions** on configuration
+   `2272646810190199`.
+4. **Connect Facebook as the app admin** (own Page, Development Mode) and do
+   the five rows under *Make one real call with every permission first*,
+   recording the screencasts as you go.
+5. **Reviewer login** — a Synapse agency account, no OTP, tested in a private
+   window.
+6. **Submit** the nine Facebook Login permissions.
+7. Afterwards: the Instagram product and its three permissions, for agencies
    with no Page.
 
 ---
