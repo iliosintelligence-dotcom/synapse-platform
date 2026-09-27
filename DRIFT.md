@@ -82,3 +82,63 @@ authenticated.
 **One function is in the repo but was never deployed:** `admin-actions`. Nothing
 in the client calls it, so this is dead code rather than a broken feature —
 decide whether it ships or goes.
+
+## Cron jobs, 27 September 2026
+
+Two jobs had been failing for weeks: `synapse-daily-snapshots` since
+4 September, and `cron-health-check`, which had reported *itself* as failing
+every 15 minutes since it was built on 19 August. Three migrations fixed them:
+
+| Migration | What it changed |
+|---|---|
+| `20260927230000_snapshots_one_row_per_agent_health_check_reads_finished_runs` | `aggregate_daily_snapshots()` takes one active membership per agent, so the agent upsert no longer sees the same `agent_id` twice; 3–26 September backfilled. `check_cron_health()` judges failure by the newest *finished* run, so it no longer flags its own run in flight. |
+| `20260927235517_cron_health_view_reads_finished_runs` | The `cron_health` view reads finished runs too; `anon` and `authenticated` lose it. |
+| `20260927235841_every_cron_job_has_an_allowed_silence` | `cron_expectations` rows for the nine jobs that had none. All 15 active jobs are now watched for going quiet. |
+
+What the fixes turned up about the gap between this repo and the database:
+
+**Live function bodies were not the repo's.** Both functions differed from
+their files (`0008`, `0063`) — in comments only; the logic was identical, and
+the `pg_temp` in their search_path comes from `0068`, which is tracked. Harmless
+this time, but it is why each fix reproduced the body from `pg_proc.prosrc`,
+checked by md5 before editing, rather than from the file. For these two the
+repo's latest definition is the database's again. Do the same for any
+`create or replace`: read the live definition first.
+
+**Grants the repo never gave.** `0063` granted `cron_health` to `service_role`
+alone, but Supabase's default privileges on `public` had already given `anon`
+and `authenticated` everything on it. On a table, RLS stands between those
+grants and the rows; a view owned by `postgres` without `security_invoker`
+bypasses it, so the public anon key could read every job's schedule and last
+error message over the REST API.
+Revoked in `20260927235517`. Only `cron_health` was checked — any other view in
+`public` created the same way will carry the same grant.
+
+**Two files, one version.** A migration from a concurrent session was also
+named `20260927230000_…`. `scripts/migrate.mjs` keys on the version alone, so
+once the snapshots fix was recorded under it, the other file read as applied and
+silently never ran. It was renumbered to `20260927234500` and applied. Check a
+new version against both this folder and `schema_migrations` before using it;
+the runner could also refuse two files sharing a version, the way it already
+refuses misnamed ones.
+
+**Snapshot rows for 3–26 September are a backfill**, written on 27 September
+by re-running the aggregation, not by the nightly job. The figures are
+date-filtered, so they match what the job would have written from the data as
+it stood on the 27th — except `assigned_leads`, which counts current
+assignment, not assignment on that day.
+
+**One agent, one agency.** `agent_daily_snapshots` keys on `(agent_id, date)`,
+so a person active in two agencies gets one row, for the most recently joined
+membership; their work in the other agency is not snapshotted. That is one
+person today. A row per agency needs the primary key changed.
+
+**Alert history before 27 September is noisy.** Besides the health check's
+3,740-occurrence alert on itself, any job caught mid-run on the quarter hour
+opened and closed a "no message" alert — about 250 a day. None of those were
+real failures.
+
+**Still to confirm:** the first nightly runs on the fixed code.
+`synapse-daily-snapshots` runs at 01:30 UTC on 28 September; its open alert
+should close at the 01:45 check. `purge-telegram-link-codes` has its first run
+ever at 03:35; its "has never run" stalled alert should close at 03:45.
