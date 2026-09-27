@@ -127,6 +127,15 @@ jobs:
                security_update_password_require_reauthentication,
                mailer_otp_exp}' "$TMP"
 
+          # The reset email. Wording and a link template, not a secret. It is
+          # managed here since 2026-09-28: the default {{ .ConfirmationURL }}
+          # link finishes with a PKCE code that only the browser which asked
+          # for the reset can redeem, so a reset opened on another device (or
+          # in a mail app's own browser) landed on a plain sign-in page.
+          echo "── reset email ──"
+          jq -r '"subject: \(.mailer_subjects_recovery // "(default)")",
+                 "template: \(if (.mailer_templates_recovery_content // "") == "" then "(default)" else .mailer_templates_recovery_content end)"' "$TMP"
+
           if [ "$MODE" = "apply" ]; then
             SITE=$(jq -r '.site_url' supabase/auth-urls.json)
             MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
