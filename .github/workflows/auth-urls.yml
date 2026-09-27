@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'show (read only) · apply (set from supabase/auth-urls.json) · errors (recent failed auth requests, no personal data)'
+        description: 'show (read only) · apply (set from supabase/auth-urls.json) · errors (recent failed auth requests, no personal data) · connect-log (what social-connect logged, 48h)'
         required: true
         default: show
         type: choice
-        options: [show, apply, errors]
+        options: [show, apply, errors, connect-log]
 
 concurrency:
   group: auth-urls
@@ -77,6 +77,21 @@ jobs:
           # NO PERSONAL DATA. Auth log lines can carry the email, IP and
           # referrer; only method, path, status, error code and message are
           # ever printed.
+          # ── connect-log: what social-connect said, last 48 hours ───────
+          # Every failed social connection is logged by the function as
+          # "social-connect failed: <reason>" (backToPortal), and the portal
+          # only flashes it in a toast. This reads those lines back. Only the
+          # message text is printed, and only lines from social-connect.
+          if [ "$MODE" = "connect-log" ]; then
+            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
+            START=$(date -u -d '-48 hours' +%Y-%m-%dT%H:%M:%SZ)
+            END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS"               --data-urlencode "sql=select timestamp, event_message from function_logs where regexp_contains(event_message, 'social-connect') order by timestamp desc limit 80"               --data-urlencode "iso_timestamp_start=$START"               --data-urlencode "iso_timestamp_end=$END"
+            jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
+            jq -r '(.result // [])[] | "\((.timestamp / 1000000 | floor | todate))  \(.event_message | gsub("[[:space:]]+"; " ") | .[0:400])"' "$TMP"
+            exit 0
+          fi
+
           if [ "$MODE" = "errors" ]; then
             LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
             START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
