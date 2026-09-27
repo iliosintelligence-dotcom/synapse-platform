@@ -826,6 +826,24 @@ function tiktokPhotoUrl(u: string): string | null {
   return TT_MEDIA_BASE + u.slice(store.length);
 }
 
+/* TikTok's fail_reason codes, in words an agent can act on. Unknown codes
+   are passed through as they are rather than guessed at. */
+function tiktokFailReason(code: string): string {
+  const c = code.toLowerCase();
+  if (c.includes('pull_failed')) {
+    return 'TikTok could not download the photos from synapsecore.dev. In the TikTok developer app, '
+      + 'check URL properties: synapsecore.dev must show as verified (for the sandbox too). (' + code + ')';
+  }
+  if (c.includes('picture_size')) return 'TikTok would not take a photo’s size. (' + code + ')';
+  if (c.includes('file_format')) return 'TikTok would not take a photo’s format. (' + code + ')';
+  if (c.includes('spam_risk')) return 'TikTok’s limit is reached: at most 5 unfinished drafts in 24 hours. Finish or delete some in TikTok. (' + code + ')';
+  if (c.includes('auth_removed')) return 'This TikTok account removed Synapse’s access. Reconnect it. (' + code + ')';
+  if (c.includes('private') || c.includes('unaudited')) {
+    return 'Until TikTok approves the app, it can only send to a private TikTok account. Set the account to private and try again. (' + code + ')';
+  }
+  return 'TikTok refused the post: ' + (code || 'no reason given') + '.';
+}
+
 const tiktokAdapter: Adapter = async (post, conn) => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, mode: 'MEDIA_UPLOAD',
@@ -864,10 +882,41 @@ const tiktokAdapter: Adapter = async (post, conn) => {
       };
     }
     const publishId = j.data && j.data.publish_id ? String(j.data.publish_id) : null;
+
+    /* ACCEPTED IS NOT DELIVERED. init only says TikTok took the request;
+       it then pulls the photos itself and can still refuse -- a photo it
+       could not download, a size it would not take, an account an unaudited
+       app may not post to. The first live test was reported "sent" and
+       nothing reached the inbox, with no way left to ask why. So the
+       outcome is asked for, briefly, and recorded in TikTok's own terms. */
+    let st: Record<string, unknown> = {};
+    for (let i = 0; publishId && i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const sr = await fetch(TT_API + '/v2/post/publish/status/fetch/', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify({ publish_id: publishId }),
+      }).catch(() => null);
+      const sj = sr ? await sr.json().catch(() => ({})) : {};
+      st = (sj && sj.data) || {};
+      if (st.status && !String(st.status).startsWith('PROCESSING')) break;
+    }
+    const status = String(st.status ?? '');
+    if (status === 'FAILED') {
+      return {
+        ok: false, postId: publishId, provider: 'tiktok',
+        payload: { ...payload, publish_id: publishId, tiktok_status: status, fail_reason: st.fail_reason ?? null },
+        error: tiktokFailReason(String(st.fail_reason ?? '')),
+      };
+    }
+    const inInbox = status === 'SEND_TO_USER_INBOX' || status === 'PUBLISH_COMPLETE';
     return {
       ok: true, postId: publishId, provider: 'tiktok', error: '',
-      payload: { ...payload, photos: photos.length, publish_id: publishId,
-                 delivered: 'inbox', note: 'In the TikTok inbox: finish and post it in the TikTok app.' },
+      payload: { ...payload, photos: photos.length, publish_id: publishId, tiktok_status: status || 'unknown',
+                 delivered: 'inbox',
+                 note: inInbox
+                   ? 'In the TikTok inbox: open TikTok, tap the notification in Inbox, add a sound and post.'
+                   : 'TikTok is still fetching the photos; the draft reaches the TikTok inbox when it finishes.' },
     };
   } catch (err) {
     return { ok: false, postId: null, provider: 'tiktok', payload,
