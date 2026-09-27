@@ -250,3 +250,43 @@ it is on the critical path to review and the rest is not.
 5. **Submit** the nine Facebook Login permissions.
 6. Afterwards: the Instagram product and its three permissions, for agencies
    with no Page.
+
+---
+
+# TikTok app review
+
+The TikTok app is **Synapse Real Estate** ("Synapse" was taken). Products: **Login Kit** (Web) and the **Content Posting API**. Built 2026-09-27; see `social-connect` (`finishTikTok`) and `social-publish` (`tiktokAdapter`).
+
+## What the integration does, in one paragraph (for the "describe your app" box)
+
+Synapse is a property-listing platform for Nigerian estate agencies. An agent connects their agency's TikTok account; when they choose to share a listing to TikTok, Synapse sends the listing's photos and caption to that account's **TikTok inbox as a draft** (Content Posting API, photo mode, `MEDIA_UPLOAD`). The agent opens TikTok, reviews the draft, adds a sound and publishes it themselves. Synapse never publishes to TikTok directly and posts nothing the agent did not choose to send.
+
+## Scopes, with justification text to paste
+
+| Scope | Justification |
+|---|---|
+| `user.info.basic` | We read the connected account's display name so the agent can confirm, on the Synapse Channels screen, that the TikTok account they connected is their agency's before anything is sent to it. |
+| `video.upload` | When an agent chooses to share a property listing to TikTok, we send its photos and caption to the agent's own TikTok inbox as a draft. The agent finishes and publishes it in the TikTok app. Nothing is posted publicly by Synapse. |
+
+Not requested: `video.publish` (direct posting). If it is ever added, TikTok requires the Direct Post UX in our composer (creator nickname, privacy choice with no default, interaction toggles, commercial-content disclosure, music-usage consent) and a new review.
+
+## Before recording: make the flow work in the Sandbox
+
+1. Developer portal → the app → **Sandbox** → create one. In it, add **Login Kit** (redirect URI `https://bhrhejpekmhbhwryjhgk.supabase.co/functions/v1/social-connect`) and the **Content Posting API** with `user.info.basic` + `video.upload`.
+2. Sandbox → **Target users** → add the TikTok account you will record with. Set that account to **private**: an unaudited app can only post to private accounts.
+3. **URL properties**: domain `synapsecore.dev` verified by DNS TXT (Vercel → Domains → synapsecore.dev → DNS Records). This covers the Terms and Privacy URLs and the photo address `https://www.synapsecore.dev/m/…` TikTok pulls from.
+4. Supabase → Edge Functions → Secrets: `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` = the **Sandbox** pair. Swap to the production pair after approval. Never paste either into chat.
+5. Check `…/functions/v1/social-connect?action=status` reports `"tiktok":{"ready":true,…}`.
+
+## The screencast — shot list (about 2–3 minutes, 1080p, browser address bar visible throughout)
+
+1. `https://www.synapsecore.dev/app/agency.html` — signed in as the test agency. Pause on the address bar.
+2. **Social → Channels → + Add channel → TikTok.** Let the note be read ("Posts arrive in that account's TikTok inbox as drafts…"). Press **Continue to TikTok**.
+3. TikTok's authorization page: the app name **Synapse Real Estate**, the two permissions listed. Press **Authorize**.
+4. Back on Synapse: the toast "TikTok connected as <name>. Posts will arrive in that account's TikTok inbox…", and the TikTok account now listed under Channels.
+5. **Listings →** a listing with photos **→ Post →** tick **TikTok** → **Generate captions** → open the TikTok caption (full-size editor) to show it → **Send for approval**.
+6. On the board: **Keep & schedule** → set the row to **TikTok** (the inbox note appears) → choose the account → **Post now**. Show the toast.
+7. The board card now reads **"In your TikTok inbox"**.
+8. On the phone (screen recording): TikTok → **Inbox** → the Synapse notification → open the draft → the listing's photos and caption → add a sound → **Post**. End on the published post.
+
+Say, or caption on screen, at step 5–6: *the agent chooses TikTok for this listing; nothing is sent to TikTok unless they do.*
