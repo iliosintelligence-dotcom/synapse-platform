@@ -669,12 +669,17 @@ const trypostAdapter: Adapter = async (post, conn) => {
       + ' -- the draft is still in trypost; a retry here will create another one.');
   }
 
+  /* ACCEPTED, NOT LIVE. trypost publishes from its own queue after this, and
+     has taken hours on Instagram. delivery 'pending' is what the pipeline
+     shows until post-metrics' delivery check hears from trypost that it went
+     live (or failed). */
   return {
     ok: true,
     postId: draftId,
     provider: 'trypost',
     error: '',
-    payload: { ...payload, dispatched: true, trypost_post_id: draftId },
+    payload: { ...payload, dispatched: true, trypost_post_id: draftId,
+               delivery: 'pending', sent_at: new Date().toISOString() },
   };
 };
 
