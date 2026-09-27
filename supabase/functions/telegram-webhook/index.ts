@@ -61,10 +61,93 @@ async function say(chatId: number | string, text: string) {
   }).catch((e) => console.error('telegram-webhook: reply failed', e));
 }
 
-const HELP = 'I post listings for estate agencies on Synapse into their Telegram channels.\n\n'
-  + 'Agencies: connect a channel from the Synapse agency portal, under Social → '
-  + 'Add channel → Telegram. It will ask you to press Start here once, to link your account.\n\n'
-  + 'Looking for a home? Talk to Tayo at https://www.synapsecore.dev';
+/* ── the handoff to Tayo ────────────────────────────────────────────────
+   Somebody who messages the bot instead of tapping a post's button is asking
+   something, and the bot is not who answers. Tayo is: Synapse's advisor, who
+   knows every listing, the full cost of each, and how to find the one that
+   fits. So every private message is answered with a button into Tayo's chat
+   that CARRIES what they said -- their question sent for them (?ask=), or the
+   very home they forwarded (?reply=<listing>) -- rather than an address to
+   type and a question to ask twice.
+
+   new=1 opens a fresh conversation; ch=telegram credits the visit to
+   Telegram. Both are read by toju.html and arrival.js. */
+const SITE = 'https://www.synapsecore.dev';
+function tayoLink(extra: Record<string, string>): string {
+  return SITE + '/app/toju.html?' + new URLSearchParams({ new: '1', ch: 'telegram', ...extra }).toString();
+}
+
+/* What somebody typed, fit to travel in a link. A URL is logged along the
+   way, and Tayo needs neither a phone number nor an email to answer about
+   homes, so both are taken out; the rest is trimmed to what Tayo reads. */
+function cleanAsk(t: string): string {
+  return t
+    .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, ' ')
+    .replace(/\+?\d[\d\s-]{6,}\d/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 280);
+}
+
+type Button = { text: string; url: string };
+async function sayWith(chatId: number | string, text: string, rows: Button[][]) {
+  await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId, text,
+      link_preview_options: { is_disabled: true },
+      reply_markup: { inline_keyboard: rows },
+    }),
+  }).catch((e) => console.error('telegram-webhook: reply failed', e));
+}
+
+const WELCOME = 'Hi \u{1F44B} I post homes to Synapse\u2019s Telegram channels.\n\n'
+  + 'To find a home, or to ask about one, talk to Tayo \u2014 Synapse\u2019s property advisor. '
+  + 'Tell Tayo what you\u2019re looking for, and Tayo will find homes that fit, with every cost shown.';
+
+/* Greetings and taps of Start: nothing to carry over, so the plain way in. */
+const GREETING = /^(\/start\b.*|hi+|hello+|hey+|hy|how far|good (morning|afternoon|evening|day)|\u{1F44B})[\s!.?]*$/iu;
+
+async function handOff(msg: Json) {
+  const chatId = msg.chat.id;
+  const text = String(msg.text ?? msg.caption ?? '').trim();
+
+  /* A POST FORWARDED FROM ONE OF OUR CHANNELS carries its listing's short
+     link in the caption. Resolved to the listing, so Tayo opens on that exact
+     home and speaks first about it. */
+  const link = text.match(/synapsecore\.dev\/s\/([A-Za-z0-9_-]{3,32})/i);
+  if (link) {
+    const r = await sb('short_links?select=property_id&limit=1&token=eq.' + encodeURIComponent(link[1]));
+    const pid = r.ok ? ((await r.json().catch(() => []))[0]?.property_id ?? null) : null;
+    if (pid) {
+      await sayWith(chatId,
+        'Tayo, Synapse\u2019s property advisor, can take you through this home \u2014 the full cost, '
+          + 'the area, and whether it fits what you need.',
+        [[{ text: 'Ask Tayo about this home', url: tayoLink({ reply: String(pid) }) }]]);
+      return;
+    }
+  }
+
+  /* A QUESTION, in their words: sent to Tayo for them, so the answer is
+     waiting when the chat opens. */
+  if (text && !GREETING.test(text)) {
+    const ask = cleanAsk(text);
+    if (ask.length >= 3) {
+      await sayWith(chatId,
+        'That\u2019s one for Tayo, Synapse\u2019s property advisor. Tayo will answer it and show you '
+          + 'homes that fit \u2014 your question goes with you.',
+        [[{ text: 'Continue with Tayo', url: tayoLink({ ask }) }]]);
+      return;
+    }
+  }
+
+  await sayWith(chatId, WELCOME, [
+    [{ text: 'Chat with Tayo', url: tayoLink({}) }],
+    [{ text: 'Browse homes', url: SITE + '/app/browse.html?ch=telegram' }],
+    [{ text: 'I\u2019m an estate agency', url: SITE + '/app/agency.html#social' }],
+  ]);
+}
 
 // deno-lint-ignore no-explicit-any
 type Json = any;
@@ -122,7 +205,7 @@ async function onMessage(msg: Json) {
   if (msg?.chat?.type !== 'private') return;          // say nothing in groups
   const text = String(msg.text ?? '').trim();
   const m = text.match(/^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{16,64})$/);
-  if (!m) { await say(msg.chat.id, HELP); return; }
+  if (!m) { await handOff(msg); return; }
 
   /* Claimed in one statement: only an unused, unexpired code matches, and
      marking it used IS the read. Two presses of the same link cannot both

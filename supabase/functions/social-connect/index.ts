@@ -653,19 +653,20 @@ async function telegramBotHandle(token: string): Promise<string | null> {
 /* What @SynapseListingsBot says about itself. Telegram's limits: 512
    characters for the description (shown in an empty chat, under "What can
    this bot do?") and 120 for the short one (the profile page and link
-   previews). It does not answer messages -- nothing listens for them -- so
-   it says so rather than letting someone wait for a reply. */
+   previews). A message to the bot is answered by telegram-webhook with a
+   button into Tayo's chat carrying the question, so the description says
+   that is what happens. */
 const TG_PROFILE = {
   description: [
     'I post property listings from estate agencies on Synapse to their own '
       + 'Telegram channels: photos, the price and the charges, and a '
       + '“View this home” button under every post.',
     '',
-    'Agencies: connect a channel from the Synapse agency portal, under Social '
-      + '→ Add channel → Telegram. It will ask you to press Start here once, '
-      + 'to link your account.',
+    'Looking for a home? Send me a message and I’ll hand you to Tayo, '
+      + 'Synapse’s property advisor — or tap “Chat with Tayo” below.',
     '',
-    'Looking for a home? Talk to Tayo at synapsecore.dev',
+    'Agencies: connect a channel from the Synapse agency portal, under Social '
+      + '→ Add channel → Telegram.',
   ].join('\n'),
   short: 'Posts Synapse agencies’ property listings to their Telegram channels, '
     + 'with a “View this home” button.',
@@ -734,6 +735,20 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
   else if (!rr.result?.can_post_messages) {
     const s = await call('setMyDefaultAdministratorRights', { rights: TG_CHANNEL_RIGHTS, for_channels: true });
     if (s.ok) changed.push('channel_rights'); else errors.push('channel rights: ' + (s.description ?? 'failed'));
+  }
+
+  /* THE MENU BUTTON beside the message box: "Chat with Tayo", opening Tayo
+     inside Telegram. It does not force a new conversation -- somebody
+     tapping it for the third time is continuing, not starting over. */
+  const tayoMenu = 'https://www.synapsecore.dev/app/toju.html?ch=telegram';
+  const mb = await call('getChatMenuButton');
+  if (!mb.ok) errors.push('read menu button: ' + (mb.description ?? 'failed'));
+  else if (mb.result?.type !== 'web_app' || mb.result?.web_app?.url !== tayoMenu
+           || mb.result?.text !== 'Chat with Tayo') {
+    const s = await call('setChatMenuButton', {
+      menu_button: { type: 'web_app', text: 'Chat with Tayo', web_app: { url: tayoMenu } },
+    });
+    if (s.ok) changed.push('menu_button'); else errors.push('menu button: ' + (s.description ?? 'failed'));
   }
 
   /* THE WEBHOOK, which is how Start presses and channel additions reach us.
