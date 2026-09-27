@@ -68,6 +68,9 @@ interface QueuedPost {
      routing. Undefined on rows queued before the column existed, which read
      as 'feed' -- which is what they are. */
   post_format?: string | null;
+  /* Set on a post the city feed queued (feed_city_channels): which Synapse
+     city channel it goes to. Only a synapse-leg post carries one. */
+  city_channel_id?: string | null;
 }
 
 interface PublishResult {
@@ -833,6 +836,9 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
      synapse-leg Instagram post to the Meta adapter, which would then look for
      an OAuth token in social_accounts that does not and should not exist. */
   if (post.leg === 'synapse') {
+    /* Synapse on Telegram is our own bot, not trypost: a city channel is a
+       chat the bot administers, and the adapter posts there directly. */
+    if (post.platform === 'telegram') return telegramAdapter;
     if (!trypostConfigured()) {
       return notConfigured('Synapse ' + post.platform
         + ' (trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY)');
@@ -882,6 +888,38 @@ async function loadSynapseChannels(
       /* A Synapse channel publishes through trypost, which holds the grant
          and addresses no Graph host of ours. The value is inert here; it is
          set rather than omitted so the shape is one thing everywhere. */
+      authSource: 'instagram_login',
+    };
+  }
+  return out;
+}
+
+/**
+ * Synapse's city channels named by this batch (feed_city_channels). A Telegram
+ * one is a chat our bot administers, so its token is the bot's own; any other
+ * platform publishes through trypost like the rest of our channels.
+ */
+async function loadCityChannels(
+  admin: ReturnType<typeof createClient>,
+  ids: string[],
+): Promise<Record<string, Connection>> {
+  const out: Record<string, Connection> = {};
+  if (!ids.length) return out;
+  const { data } = await admin
+    .from('city_channels')
+    .select('id, platform, chat_id, trypost_account_id, handle')
+    .in('id', ids)
+    .eq('is_active', true);
+  const botToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+  for (const c of (data ?? []) as Array<Record<string, string>>) {
+    const tg = c.platform === 'telegram';
+    const target = tg ? c.chat_id : c.trypost_account_id;
+    if (!target || (tg && !botToken)) continue;   // not reachable: reported as not active
+    out[c.id] = {
+      accountId: c.id,
+      platformAccountId: target,
+      username: c.handle ?? 'synapse',
+      token: tg ? botToken : '',
       authSource: 'instagram_login',
     };
   }
@@ -1095,9 +1133,14 @@ Deno.serve(async (req: Request) => {
        Synapse's channels are global, so this is not keyed by agency -- but a
        batch of nothing but agency posts should still not read the table. */
     let synapseChannels: Record<string, Connection> = {};
-    if (live && rows.some((r) => !r.dry_run && r.leg === 'synapse')) {
+    if (live && rows.some((r) => !r.dry_run && r.leg === 'synapse' && !r.city_channel_id)) {
       synapseChannels = await loadSynapseChannels(admin);
     }
+    let cityChannels: Record<string, Connection> = {};
+    const cityIds = [...new Set(rows
+      .filter((r) => live && !r.dry_run && r.city_channel_id)
+      .map((r) => r.city_channel_id as string))];
+    if (cityIds.length) cityChannels = await loadCityChannels(admin, cityIds);
 
     let published = 0;
     let failed = 0;
@@ -1122,7 +1165,7 @@ Deno.serve(async (req: Request) => {
       const conn = rehearsal
         ? NO_CONNECTION
         : post.leg === 'synapse'
-          ? synapseChannels[post.platform]
+          ? (post.city_channel_id ? cityChannels[post.city_channel_id] : synapseChannels[post.platform])
           : (connByAgency[post.agency_id] ?? {})[post.social_account_id || post.platform];
 
       /* No connected account is a different failure from a platform we cannot
@@ -1140,8 +1183,11 @@ Deno.serve(async (req: Request) => {
                agency's. Telling them to go and connect an account they do not
                own would be a dead end and would read as their fault. */
             error: post.leg === 'synapse'
-              ? 'Synapse has no active ' + post.platform + ' channel. Add it to '
-                + 'synapse_channels with its trypost social_account_id.'
+              ? (post.city_channel_id
+                  ? 'This Synapse city channel is not active: the bot is not a posting '
+                    + 'admin of it, or it has no chat id yet (city_channels).'
+                  : 'Synapse has no active ' + post.platform + ' channel. Add it to '
+                    + 'synapse_channels with its trypost social_account_id.')
               : notConnected(post.platform),
             payload: buildPayload(post),
           }

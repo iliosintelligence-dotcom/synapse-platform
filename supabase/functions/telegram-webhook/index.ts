@@ -95,6 +95,26 @@ async function onMembership(m: Json) {
   });
   if (!r.ok) console.error('telegram-webhook: could not record chat', chat.id, r.status, await r.text());
   else console.log('telegram-webhook: bot is ' + status + ' in channel ' + chat.id);
+
+  /* A SYNAPSE CITY CHANNEL switches on here. The seeded row names the @name
+     the channel must have; the bot arriving as a posting admin of a channel
+     with that name is the confirmation, and leaving (or losing the right to
+     post) switches it off. For any other channel this matches nothing. */
+  const claim = await sb('rpc/claim_city_channel', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_chat_id: chat.id,
+      p_username: chat.username ?? null,
+      p_title: chat.title ?? null,
+      p_status: status,
+      p_can_post: canPost,
+    }),
+  });
+  if (!claim.ok) console.error('telegram-webhook: claim_city_channel failed', claim.status, await claim.text());
+  else {
+    const id = await claim.json().catch(() => null);
+    if (id) console.log('telegram-webhook: city channel ' + id + ' is now ' + (canPost ? 'on' : 'off'));
+  }
 }
 
 /* ── a private message: /start <code>, or anything else ──────────────────── */
