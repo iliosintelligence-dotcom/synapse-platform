@@ -86,7 +86,7 @@ jobs:
             LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
             START=$(date -u -d '-48 hours' +%Y-%m-%dT%H:%M:%SZ)
             END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS"               --data-urlencode "sql=select timestamp, event_message from function_logs where regexp_contains(event_message, 'social-connect') order by timestamp desc limit 80"               --data-urlencode "iso_timestamp_start=$START"               --data-urlencode "iso_timestamp_end=$END"
+            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS"               --data-urlencode "sql=select timestamp, event_message from logs where regexp_contains(event_message, 'social-connect') order by timestamp desc limit 80"               --data-urlencode "iso_timestamp_start=$START"               --data-urlencode "iso_timestamp_end=$END"
             jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
             jq -r '(.result // [])[] | "\((.timestamp / 1000000 | floor | todate))  \(.event_message | gsub("[[:space:]]+"; " ") | .[0:400])"' "$TMP"
             exit 0
