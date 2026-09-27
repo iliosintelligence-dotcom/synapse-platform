@@ -418,6 +418,11 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
                  Needs attention with a retry instead of sitting in Published
    Only rows sent in the last three days are asked about; one trypost call per
    distinct trypost post. */
+const PLATFORM_LABEL: Record<string, string> = {
+  instagram: 'Instagram', facebook: 'Facebook', x: 'X', tiktok: 'TikTok', linkedin: 'LinkedIn',
+  youtube: 'YouTube', threads: 'Threads', telegram: 'Telegram', pinterest: 'Pinterest',
+};
+
 function pickField(o: Record<string, unknown> | null | undefined, ...keys: string[]): unknown {
   for (const k of keys) {
     const v = o?.[k];
@@ -501,7 +506,8 @@ async function confirmDelivery(limit: number, h: Record<string, string>) {
       } else if (status === 'failed') {
         patch = {
           status: 'failed',
-          failure_reason: 'TryPost accepted this but could not post it to ' + row.platform
+          failure_reason: 'TryPost accepted this but could not post it to '
+            + (PLATFORM_LABEL[row.platform] ?? row.platform)
             + (err ? ': ' + err : '.') + ' Nothing went out.',
           payload: { ...base, delivery: 'failed', delivery_error: err || null },
         };
