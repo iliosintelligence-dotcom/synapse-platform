@@ -269,8 +269,8 @@ region and cross-border notice, privacy contact).
 
 Revised 2026-09-27, when review was started.
 
-1. **Start business verification** — the longest external wait, and it needs
-   the registered business name and a document proving it.
+1. ~~Start business verification~~ — **done**: the founder confirmed on
+   2026-09-28 that the business is already verified.
 2. **Basic settings**: privacy URL, data deletion URL (`/your-data#social`),
    icon, category, contact email. (Privacy section: done.)
 3. **Tick all nine Facebook-leg permissions** on configuration
