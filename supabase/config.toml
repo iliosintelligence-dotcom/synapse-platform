@@ -34,6 +34,11 @@ verify_jwt = false
 [functions.social-connect]
 verify_jwt = false
 
+# Telegram calls it, with no Supabase session. It authenticates every
+# delivery by the X-Telegram-Bot-Api-Secret-Token header instead.
+[functions.telegram-webhook]
+verify_jwt = false
+
 [functions.short-link]
 verify_jwt = false
 

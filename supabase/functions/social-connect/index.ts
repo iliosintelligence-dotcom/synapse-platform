@@ -661,13 +661,11 @@ const TG_PROFILE = {
       + 'Telegram channels: photos, the price and the charges, and a '
       + '“View this home” button under every post.',
     '',
-    'Agencies: add me to your channel as an administrator with Post Messages, '
-      + 'then connect the channel in the Synapse agency portal, under Social '
-      + '→ Channels.',
+    'Agencies: connect a channel from the Synapse agency portal, under Social '
+      + '→ Add channel → Telegram. It will ask you to press Start here once, '
+      + 'to link your account.',
     '',
     'Looking for a home? Talk to Tayo at synapsecore.dev',
-    '',
-    'I don’t reply to messages here.',
   ].join('\n'),
   short: 'Posts Synapse agencies’ property listings to their Telegram channels, '
     + 'with a “View this home” button.',
@@ -683,6 +681,16 @@ const TG_CHANNEL_RIGHTS: Record<string, boolean> = {
   can_post_stories: false, can_edit_stories: false, can_delete_stories: false,
   can_post_messages: true, can_edit_messages: false, can_pin_messages: false,
 };
+
+/* MUST MATCH telegram-webhook's webhookSecret(). Telegram echoes it in the
+   X-Telegram-Bot-Api-Secret-Token header on every delivery; derived from the
+   bot token so there is no second secret to keep. */
+async function webhookSecret(token: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('synapse.telegram-webhook.v1'));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 let TG_SYNCED: { token: string; at: number; result: Record<string, unknown> } | null = null;
 async function syncTelegramProfile(token: string): Promise<Record<string, unknown>> {
@@ -726,6 +734,28 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
   else if (!rr.result?.can_post_messages) {
     const s = await call('setMyDefaultAdministratorRights', { rights: TG_CHANNEL_RIGHTS, for_channels: true });
     if (s.ok) changed.push('channel_rights'); else errors.push('channel rights: ' + (s.description ?? 'failed'));
+  }
+
+  /* THE WEBHOOK, which is how Start presses and channel additions reach us.
+     Re-registered when it points elsewhere, listens for the wrong updates, or
+     Telegram reports deliveries being refused -- which is what a rotated
+     token looks like from here, since the secret is derived from it. */
+  const hook = (Deno.env.get('SUPABASE_URL') ?? '') + '/functions/v1/telegram-webhook';
+  const wantUpdates = ['message', 'my_chat_member'];
+  const info = await call('getWebhookInfo');
+  const have = info.ok ? info.result ?? {} : {};
+  const sameUpdates = Array.isArray(have.allowed_updates)
+    && wantUpdates.every((u) => have.allowed_updates.includes(u))
+    && have.allowed_updates.length === wantUpdates.length;
+  const refused = /401|403|forbidden|unauthori/i.test(String(have.last_error_message ?? ''));
+  if (!info.ok || have.url !== hook || !sameUpdates || refused) {
+    const w = await call('setWebhook', {
+      url: hook,
+      secret_token: await webhookSecret(token),
+      allowed_updates: wantUpdates,
+      max_connections: 10,
+    });
+    if (w.ok) changed.push('webhook'); else errors.push('webhook: ' + (w.description ?? 'failed'));
   }
 
   const result: Record<string, unknown> = {
@@ -943,12 +973,120 @@ Deno.serve(async (req: Request) => {
        No input and nothing returned but our own public text, so it needs no
        session. It writes only what differs, and remembers a clean run for
        ten minutes per instance, so calling it repeatedly costs nothing. */
-    if (url.searchParams.get('action') === 'telegram-profile') {
+    const tgAction = url.searchParams.get('action') ?? '';
+    if (tgAction === 'telegram-profile' || tgAction === 'telegram-setup') {
       if (!tgBotToken) {
         return json({ error: 'Telegram is not configured on this project yet. '
           + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
       }
       return json(await syncTelegramProfile(tgBotToken));
+    }
+
+    /* ── telegram: who is asking ──────────────────────────────────────────
+       The link, link-start and channels actions are about the CALLER, so
+       they share one answer to "who, and in which agency". */
+    const telegramCaller = async (): Promise<
+      { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> => {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      const authHeader = req.headers.get('Authorization') ?? '';
+      if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+      const host = Deno.env.get('SUPABASE_URL') ?? '';
+      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await asUser.auth.getUser();
+      if (!user) return json({ error: 'Not authenticated' }, 401);
+      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+      }
+      return { userId: user.id, agencyId: membership.agency_id as string, admin };
+    };
+
+    /* Is this person's Synapse account linked to a Telegram account yet. */
+    if (tgAction === 'telegram-link') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const { data: link } = await who.admin
+        .from('telegram_links')
+        .select('telegram_username, first_name, linked_at')
+        .eq('profile_id', who.userId)
+        .maybeSingle();
+      return json({ linked: link ?? null, bot: await telegramBotHandle(tgBotToken) });
+    }
+
+    /* A one-time t.me/<bot>?start=<code> link. Pressing Start on it sends
+       "/start <code>" to telegram-webhook FROM the person's Telegram account,
+       which is the proof. Ensures the webhook is registered first, so the
+       very first link on a fresh setup has somewhere to arrive. */
+    if (tgAction === 'telegram-link-start') {
+      if (req.method !== 'POST') return json({ error: 'POST to start a link' }, 405);
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const setup = await syncTelegramProfile(tgBotToken);
+      if (Array.isArray(setup.errors) && (setup.errors as string[]).some((e) => e.startsWith('webhook'))) {
+        return json({ error: 'Telegram did not accept our webhook, so a link could not arrive. '
+          + (setup.errors as string[]).join('; ') }, 502);
+      }
+      const bytes = crypto.getRandomValues(new Uint8Array(18));
+      const code = btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const { error: codeErr } = await who.admin
+        .from('telegram_link_codes')
+        .insert({ code, profile_id: who.userId });
+      if (codeErr) return json({ error: 'Could not start the link: ' + codeErr.message }, 500);
+      const bot = (await telegramBotHandle(tgBotToken) ?? '@SynapseListingsBot').replace(/^@/, '');
+      return json({ url: 'https://t.me/' + bot + '?start=' + code, expires_in: 900 });
+    }
+
+    /* The channels this person has added the bot to, newest first, marked
+       with whether this agency already has each one. Filtered by who added
+       the bot, which Telegram reports; the connect action still checks, with
+       Telegram, that the person administers the channel. */
+    if (tgAction === 'telegram-channels') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const { data: link } = await who.admin
+        .from('telegram_links')
+        .select('telegram_user_id')
+        .eq('profile_id', who.userId)
+        .maybeSingle();
+      if (!link) return json({ linked: false, channels: [] });
+      const { data: chats } = await who.admin
+        .from('telegram_bot_chats')
+        .select('chat_id, title, username, bot_status, can_post, updated_at')
+        .eq('added_by', link.telegram_user_id)
+        .in('bot_status', ['administrator', 'creator'])
+        .order('updated_at', { ascending: false })
+        .limit(20);
+      const { data: mine } = await who.admin
+        .from('social_accounts')
+        .select('platform_account_id')
+        .eq('agency_id', who.agencyId)
+        .eq('platform', 'telegram')
+        .is('deleted_at', null);
+      const have = new Set((mine ?? []).map((r: { platform_account_id: string }) => String(r.platform_account_id)));
+      return json({
+        linked: true,
+        channels: (chats ?? []).map((c: Record<string, unknown>) => ({
+          chat_id: String(c.chat_id),
+          title: c.title ?? null,
+          username: c.username ? '@' + c.username : null,
+          can_post: c.can_post === true,
+          connected: have.has(String(c.chat_id)),
+        })),
+      });
     }
 
     /* ── telegram: a form, not a redirect ─────────────────────────────────
@@ -1041,6 +1179,30 @@ Deno.serve(async (req: Request) => {
         return json({ error: 'The bot is an administrator of ' + (info.title ?? chat)
           + ' but Post Messages is switched off for it. Turn that on in the '
           + 'channel’s Administrators screen.' }, 400);
+      }
+
+      /* THE CHANNEL IS YOURS. Everything above proves the BOT can post there,
+         which is true of every channel any agency has added it to -- so on its
+         own it let any member of any agency connect another agency's channel
+         by typing its @name. The linked Telegram account is who this person
+         is on Telegram; Telegram says whether that account administers the
+         channel. */
+      const { data: tgLink } = await admin
+        .from('telegram_links')
+        .select('telegram_user_id, telegram_username')
+        .eq('profile_id', user.id)
+        .maybeSingle();
+      if (!tgLink) {
+        return json({ error: 'Link your Telegram account first, so Telegram can confirm '
+          + 'this channel is yours.', needs_link: true }, 400);
+      }
+      const youRes = await tg('getChatMember', { chat_id: chat, user_id: String(tgLink.telegram_user_id) });
+      const youStatus = youRes?.ok ? String(youRes.result?.status ?? '') : '';
+      if (youStatus !== 'creator' && youStatus !== 'administrator') {
+        return json({ error: 'Your linked Telegram account'
+          + (tgLink.telegram_username ? ' (@' + tgLink.telegram_username + ')' : '')
+          + ' is not an administrator of ' + (info.title ?? chat) + ', so Synapse cannot '
+          + 'confirm the channel is yours. Link the Telegram account that runs it.' }, 403);
       }
 
       const { data: acctId, error: connErr } = await admin.rpc('connect_telegram_channel', {
