@@ -1315,6 +1315,29 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    /* ── TikTok: are the credentials real, not merely present? ──────────
+       status only says the two secrets are set. A key from one app and a
+       secret from another (production vs sandbox is the easy mix-up) fails
+       only after somebody has been through TikTok's dialog -- the worst
+       moment to find out, and mid-take on a review recording. A client
+       credentials grant asks TikTok to accept the pair, with no user
+       involved. Returns TikTok's verdict only; never a key, secret or token. */
+    if (url.searchParams.get('action') === 'tiktok-check') {
+      if (!ttKey || !ttSecret) return json({ ok: false, error: 'not_configured' });
+      const cr = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_key: ttKey, client_secret: ttSecret, grant_type: 'client_credentials' }),
+      });
+      const cj = await cr.json().catch(() => ({}));
+      return json({
+        ok: Boolean(cj.access_token),
+        error: cj.access_token ? null : (cj.error ?? ('HTTP ' + cr.status)),
+        error_description: cj.access_token ? null : (cj.error_description ?? null),
+        redirect_uri: redirectUri,
+      });
+    }
+
     /* ── step 1, TikTok: its own dialog and its own credentials ────────── */
     if (url.searchParams.get('action') === 'start' && url.searchParams.get('platform') === 'tiktok') {
       const missingTt = [!ttKey && 'TIKTOK_CLIENT_KEY', !ttSecret && 'TIKTOK_CLIENT_SECRET'].filter(Boolean);
