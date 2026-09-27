@@ -5,5 +5,7 @@
     "https://www.synapsecore.dev/**",
     "https://synapsecore.dev/**",
     "http://localhost:3000/**"
-  ]
+  ],
+  "recovery_subject": "Reset your Synapse password",
+  "_recovery_note": "The reset email's body is supabase/templates/recovery.html, applied with these settings. It links to /app/signin.html?type=recovery&token_hash=..., which signin.html verifies itself. The default {{ .ConfirmationURL }} finished with a PKCE code only the requesting browser could redeem, so a reset opened on another device or in a mail app's own browser landed on a plain sign-in page (2026-09-28)."
 }

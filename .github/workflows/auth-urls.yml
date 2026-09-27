@@ -141,7 +141,14 @@ jobs:
             MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
               ([ ($cur.uri_allow_list // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ]
                 + $want[0].redirect_urls) | unique | join(",")')
-            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" '{site_url: $s, uri_allow_list: $u}')
+            # The reset email travels with the URLs: its link is only right if
+            # it points at a page on the allowed site that knows the token.
+            SUBJ=$(jq -r '.recovery_subject // empty' supabase/auth-urls.json)
+            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" \
+                     --rawfile tpl supabase/templates/recovery.html '
+              {site_url: $s, uri_allow_list: $u}
+              + (if $subj != "" then {mailer_subjects_recovery: $subj} else {} end)
+              + (if ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)')
 
             call -X PATCH \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -152,4 +159,6 @@ jobs:
             # setting changed is reading it after the change.
             call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
             echo "── after ──"; jq '{site_url, uri_allow_list}' "$TMP"
+            jq -r '"reset subject: \(.mailer_subjects_recovery // "(default)")",
+                   "reset template: \(.mailer_templates_recovery_content // "(default)")"' "$TMP"
           fi
