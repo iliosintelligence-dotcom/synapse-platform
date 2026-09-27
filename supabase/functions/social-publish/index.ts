@@ -826,6 +826,86 @@ function tiktokPhotoUrl(u: string): string | null {
   return TT_MEDIA_BASE + u.slice(store.length);
 }
 
+/* ── the Telegram Story kit ──────────────────────────────────────────────
+   Telegram does not let a bot post a channel Story -- postStory exists only
+   for Business accounts (Bot API reference, checked 2026-09-27). A channel
+   Story has to be posted by a person, from the app. So the bot does the part
+   it can: the moment a listing goes out on a channel, it messages whoever
+   runs that channel a photo ready for the Story, the listing's link on a
+   one-tap Copy button (for Telegram's Link sticker, which makes the Story
+   tappable), a suggested line of text, and a button into the channel. About
+   twenty seconds of their time instead of none at all.
+
+   Who gets it: for a Synapse city channel, the founder chat
+   (platform_settings.founder_telegram_chat_id); for an agency's own channel,
+   the member who connected it, through their linked Telegram account. Nobody
+   linked, nothing sent. */
+async function sendStoryKit(admin: ReturnType<typeof createClient>, post: QueuedPost): Promise<void> {
+  const token = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+  if (!token) return;
+  const photo = (post.media_urls ?? []).find((u) => u && !isVideoUrl(u));
+  const link = tgLink(post.caption ?? '');
+  if (!photo || !link) return;
+
+  let chatId = '';
+  let channel = '';
+  if (post.city_channel_id) {
+    const { data: cc } = await admin.from('city_channels')
+      .select('handle, title').eq('id', post.city_channel_id).maybeSingle();
+    const { data: fs } = await admin.from('platform_settings')
+      .select('value').eq('key', 'founder_telegram_chat_id').maybeSingle();
+    chatId = String((fs?.value as Record<string, unknown> | null)?.id ?? '').trim();
+    channel = String(cc?.handle || cc?.title || 'the channel');
+  } else {
+    let q = admin.from('social_accounts')
+      .select('platform_username, connected_by')
+      .eq('agency_id', post.agency_id).eq('platform', 'telegram')
+      .eq('is_active', true).is('deleted_at', null)
+      .order('connected_at', { ascending: true }).limit(1);
+    if (post.social_account_id) q = q.eq('id', post.social_account_id);
+    const { data: accs } = await q;
+    const acc = (accs ?? [])[0] as { platform_username?: string; connected_by?: string } | undefined;
+    if (!acc?.connected_by) return;
+    const { data: tl } = await admin.from('telegram_links')
+      .select('telegram_user_id').eq('profile_id', acc.connected_by).maybeSingle();
+    chatId = tl?.telegram_user_id ? String(tl.telegram_user_id) : '';
+    channel = String(acc.platform_username || 'your channel');
+  }
+  if (!chatId) return;
+
+  /* The first line of the caption that is not the link: the listing, as the
+     post itself opened. */
+  const line = (post.caption ?? '').split('\n').map((l) => l.trim())
+    .find((l) => l && !/^https?:\/\//i.test(l)) ?? '';
+  const suggested = line.replace(/^\p{Extended_Pictographic}\s*/u, '').slice(0, 90);
+  const handle = channel.startsWith('@') ? channel.slice(1) : '';
+
+  const text = '\u{1F4F2} Story for ' + channel + '\n\n'
+    + 'Telegram does not let bots post Stories, so here is one ready for you:\n'
+    + '1. Save this photo.\n'
+    + '2. Open ' + channel + ', tap its photo at the top, then “Add story”, and choose it.\n'
+    + '3. Add a Link sticker and paste the listing link (tap “Copy link” below), so viewers can tap through.\n'
+    + (suggested ? '4. Suggested text: ' + suggested + '\n' : '')
+    + '\nStories on a channel unlock once it has enough boosts — Telegram’s rule, not ours.';
+
+  const rows: Array<Array<Record<string, unknown>>> = [
+    [{ text: 'Copy link', copy_text: { text: link.slice(0, 256) } }],
+  ];
+  if (handle) rows.push([{ text: 'Open ' + channel, url: 'https://t.me/' + encodeURIComponent(handle) }]);
+
+  const r = await fetch(`${TG_API}/bot${token}/sendPhoto`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId, photo, caption: text.slice(0, 1024),
+      reply_markup: { inline_keyboard: rows },
+    }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!j?.ok) console.error('social-publish: story kit not delivered for ' + post.id + ': ' + (j?.description ?? r.status));
+  else console.log('social-publish: story kit sent for ' + post.id);
+}
+
 /* TikTok's fail_reason codes, in words an agent can act on. Unknown codes
    are passed through as they are rather than guessed at. */
 function tiktokFailReason(code: string): string {
@@ -1375,6 +1455,12 @@ Deno.serve(async (req: Request) => {
           })
           .eq('id', post.id);
         published++;
+        /* A Telegram post gets its Story kit: see sendStoryKit. Never allowed
+           to fail the post it follows -- the post is already out. */
+        if (!rehearsal && post.platform === 'telegram') {
+          await sendStoryKit(admin, post)
+            .catch((e) => console.error('social-publish: story kit failed for ' + post.id, e));
+        }
         results.push({
           id: post.id, platform: post.platform, leg: post.leg, status: 'published',
           provider: result.provider, dryRun: post.dry_run, postId: result.postId,
