@@ -128,10 +128,10 @@ authenticated` before any `grant select`.
 **Two files, one version.** A migration from a concurrent session was also
 named `20260927230000_…`. `scripts/migrate.mjs` keys on the version alone, so
 once the snapshots fix was recorded under it, the other file read as applied and
-silently never ran. It was renumbered to `20260927234500` and applied. Check a
-new version against both this folder and `schema_migrations` before using it;
-the runner could also refuse two files sharing a version, the way it already
-refuses misnamed ones.
+silently never ran. It was renumbered to `20260927234500` and applied. The
+runner now refuses both halves of that: two files in this folder with one
+version, and a file whose version `schema_migrations` records under another
+migration's name.
 
 **Snapshot rows for 3–26 September are a backfill**, written on 27 September
 by re-running the aggregation, not by the nightly job. The figures are
