@@ -515,153 +515,172 @@ async function finishFacebook(
       + 'You must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
   }
 
-  /* ── EVERY PAGE THE OPERATOR SHARED ──────────────────────────────────
-     This kept usable[0] and reported which one it had picked. Facebook's
-     dialog asks which Pages to share and the operator ticks them -- that is
-     a decision, already made, and taking the first row of the answer threw
-     the rest of it away. On an account that administers the company's Page
-     and an agency's, "the first" is whichever Meta happened to order first.
-
-     The comment that defended it said social_accounts is unique on agency +
-     platform. That stopped being true this morning: an agency can hold
-     several accounts per platform and a post names which one it goes to. The
-     reader had been left behind by its own schema.
-
-     So each shared Page is stored, with the Instagram account it owns, and
-     the agent chooses per post. */
+  /* ── THE AGENCY CHOOSES (2026-09-28) ─────────────────────────────────
+     This used to connect every Page Facebook shared, to whichever agency
+     started the connection. That is how Iteriba Real Estate's Page became
+     Greenlight's Facebook, twice: Facebook reuses the earlier grant and skips
+     its own Page list (auth_type=rerequest below does not stop it), so
+     "connect again" handed back the same Page and it was attached again with
+     nobody asked. Now what Facebook shared is held for 15 minutes -- names in
+     social_connect_picks, tokens in the vault -- and the portal asks which of
+     these Pages belong to THIS agency. connectFacebookPages connects only the
+     ones ticked (action=facebook-pick). */
   const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const tokens: Record<string, string> = {};
+  const shared = usable.map((pg) => {
+    tokens[pg.id] = pg.access_token;
+    return {
+      id: pg.id,
+      name: pg.name ?? '',
+      ig_id: pg.instagram_business_account?.id ?? null,
+      ig_username: pg.instagram_business_account?.username ?? null,
+    };
+  });
+  const { data: pickId, error: stashErr } = await admin.rpc('stash_connect_pick', {
+    p_agency_id: claims.agency_id as string,
+    p_profile_id: claims.profile_id as string,
+    p_pages: shared,
+    p_tokens: tokens,
+    p_scopes: grantedScopes,
+  });
+  if (stashErr || typeof pickId !== 'string') {
+    console.error('social-connect: could not hold the shared Pages: ' + (stashErr?.message ?? 'no id'));
+    return backToPortal('error', 'Facebook shared ' + usable.length + ' Page(s), but Synapse could not '
+      + 'hold them while you choose. Please try again.');
+  }
+  console.log('social-connect: ' + usable.length + ' Page(s) shared, waiting for a choice');
+  return backToPortal('choose', pickId);
+}
+
+type SharedPage = { id: string; name: string; ig_id: string | null; ig_username: string | null };
+
+/** Connects the Pages an agency ticked, each with the Instagram account it
+ *  owns. Moved out of finishFacebook unchanged in substance; it now runs for
+ *  the chosen Pages only. */
+async function connectFacebookPages(
+  admin: ReturnType<typeof createClient>,
+  agencyId: string,
+  profileId: string,
+  pages: SharedPage[],
+  tokens: Record<string, string>,
+  grantedScopes: string[],
+): Promise<{ connected: string[]; problems: string[] }> {
+  const G = 'https://graph.facebook.com/v21.0';
   const connected: string[] = [];
   const problems: string[] = [];
 
-  for (const pg of usable) {
+  for (const pg of pages) {
+    const pageToken = tokens[pg.id];
+    if (!pageToken) { problems.push((pg.name || pg.id) + ': no token came back for it'); continue; }
     const { data: acctId, error: connErr } = await admin.rpc('connect_social_account', {
-      p_agency_id: claims.agency_id as string,
+      p_agency_id: agencyId,
       p_platform: 'facebook',
       p_account_id: pg.id,
       p_username: pg.name ?? '',
-      p_access_token: pg.access_token,
+      p_access_token: pageToken,
       p_refresh_token: null,
       // Deliberately null: a Page token from a long-lived user token has no
       // expiry, and a fabricated one would show as an expired session.
       p_expires_at: null,
       p_scopes: grantedScopes,
-      p_connected_by: claims.profile_id as string,
-      /* NEVER PASSED BEFORE, so every Page ever connected was recorded as
-         'instagram_login'. Harmless so far only because the Facebook adapter
-         uses graph.facebook.com whatever the column says -- but it is a false
-         statement in the one column whose job is to name the host that
-         accepts this token. */
+      p_connected_by: profileId,
       p_auth_source: 'facebook_login',
     });
     if (connErr) {
-      /* One Page failing is not the others failing. Recorded and carried to
-         the end rather than abandoning Pages that would have saved. */
+      // One Page failing is not the others failing.
       console.error('social-connect: could not save Page ' + pg.id + ': ' + connErr.message);
       problems.push((pg.name || pg.id) + ': ' + connErr.message);
       continue;
     }
     connected.push(pg.name || pg.id);
 
-    /* ── the button that competes with every post on this Page ─────────
-       Written straight to the row rather than through connect_social_account.
-       That function is security definer and carries the vault handling and
-       the membership guard; it has been reproduced in full twice this week
-       and every reproduction is a chance to drop one of them. Three
-       descriptive columns do not belong in the credential path.
-
-       A failed read writes nothing at all, leaving the columns NULL, which
-       is defined as "not known" -- so the portal stays quiet instead of
-       telling an agency their Page has no button when we simply could not
-       look. */
-    const cta = await readPageCta(G, pg.id, pg.access_token);
+    /* The Page's action button, read and never changed. A failed read writes
+       nothing, which the portal treats as "not known". */
+    const cta = await readPageCta(G, pg.id, pageToken);
     if (cta && typeof acctId === 'string') {
       const { error: ctaErr } = await admin
         .from('social_accounts')
-        .update({
-          page_cta_type: cta.type,
-          page_cta_url: cta.url,
-          page_cta_read_at: new Date().toISOString(),
-        })
+        .update({ page_cta_type: cta.type, page_cta_url: cta.url, page_cta_read_at: new Date().toISOString() })
         .eq('id', acctId);
-      /* The Page is connected and working. Failing to record a note about its
-         button is not a reason to tell anybody the connection failed. */
       if (ctaErr) console.error('social-connect: could not store the Page button: ' + ctaErr.message);
-      else console.log('social-connect: Page ' + pg.id + ' button = ' + cta.type);
     }
 
-    /* ── and the Instagram account that Page owns ──────────────────────
-       Reached through Facebook rather than through the Instagram product, so
-       the credential is the PAGE's token and every call about it goes to
-       graph.facebook.com. auth_source carries that to the publisher, which
-       would otherwise send a Page token to graph.instagram.com and be told
-       only that it is invalid.
-
-       Not finding one is an ordinary outcome, not a failure: plenty of Pages
-       have no Instagram attached, and the Facebook connection just succeeded
-       either way. */
-    const ig = pg.instagram_business_account;
-    if (!ig?.id) {
-      console.log('social-connect: no instagram_business_account on Page ' + pg.id);
-      continue;
-    }
+    /* The Instagram account this Page owns, authorised as the Page (the
+       Page token, graph.facebook.com). None is an ordinary outcome. */
+    if (!pg.ig_id) continue;
     const { data: igAcctId, error: igErr } = await admin.rpc('connect_social_account', {
-      p_agency_id: claims.agency_id as string,
+      p_agency_id: agencyId,
       p_platform: 'instagram',
-      p_account_id: ig.id,
-      p_username: ig.username ?? '',
-      /* The PAGE token, deliberately. Instagram publishing through this path
-         is authorised as the Page, and there is no separate Instagram token
-         to be had. */
-      p_access_token: pg.access_token,
+      p_account_id: pg.ig_id,
+      p_username: pg.ig_username ?? '',
+      p_access_token: pageToken,
       p_refresh_token: null,
       p_expires_at: null,
       p_scopes: grantedScopes,
-      p_connected_by: claims.profile_id as string,
+      p_connected_by: profileId,
       p_auth_source: 'facebook_login',
     });
     if (igErr) {
       console.error('social-connect: Page connected, Instagram did not: ' + igErr.message);
-      problems.push('Instagram @' + (ig.username || ig.id) + ': ' + igErr.message);
-    } else {
-      connected.push('Instagram @' + (ig.username || ig.id));
-
-      /* WHICH PAGE OWNS IT. A private reply is POST /{page-id}/messages, so
-         answering a comment needs the Page, not the Instagram account. While
-         an agency had one Page this could be inferred; with two it cannot,
-         and the wrong inference answers a comment on one brand's post from
-         another brand's Page.
-
-         A direct update rather than another argument on
-         connect_social_account: that function is security definer and holds
-         the vault handling and the membership guard, and this is one
-         descriptive column. */
-      if (typeof igAcctId === 'string') {
-        const { error: linkErr } = await admin
-          .from('social_accounts')
-          .update({ parent_account_id: pg.id })
-          .eq('id', igAcctId);
-        /* The account is connected and can publish. Failing to record its
-           Page costs private replies, not posting, and is not a reason to
-           report the connection as failed. */
-        if (linkErr) {
-          console.error('social-connect: could not record the owning Page for '
-            + ig.id + ': ' + linkErr.message);
-        }
-      }
+      problems.push('Instagram @' + (pg.ig_username || pg.ig_id) + ': ' + igErr.message);
+      continue;
+    }
+    connected.push('Instagram @' + (pg.ig_username || pg.ig_id));
+    /* Which Page owns it: a private reply is sent as the Page. */
+    if (typeof igAcctId === 'string') {
+      const { error: linkErr } = await admin
+        .from('social_accounts').update({ parent_account_id: pg.id }).eq('id', igAcctId);
+      if (linkErr) console.error('social-connect: could not record the owning Page for ' + pg.ig_id + ': ' + linkErr.message);
     }
   }
+  return { connected, problems };
+}
 
-  /* Every one of them failed to save. That is our problem, not Meta's, and
-     reporting it as a success with an empty list would be the worst of both. */
-  if (!connected.length) {
-    return backToPortal('error',
-      'Facebook shared ' + usable.length + ' account(s) and none could be saved: '
-      + problems.join('; '));
+/** Which agency, if any, already holds each of these Facebook Pages. */
+async function pageOwners(
+  admin: ReturnType<typeof createClient>,
+  pageIds: string[],
+): Promise<Record<string, { agencyId: string; agencyName: string }>> {
+  const out: Record<string, { agencyId: string; agencyName: string }> = {};
+  if (!pageIds.length) return out;
+  const { data } = await admin
+    .from('social_accounts')
+    .select('platform_account_id, agency_id, agencies(name)')
+    .eq('platform', 'facebook')
+    .in('platform_account_id', pageIds)
+    .is('deleted_at', null)
+    .eq('is_active', true);
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const ag = r.agencies as { name?: string } | null;
+    out[String(r.platform_account_id)] = { agencyId: String(r.agency_id), agencyName: ag?.name ?? 'another agency' };
   }
+  return out;
+}
 
-  return backToPortal('facebook',
-    connected.join(', ')
-    + (problems.length ? ' \u2014 not saved: ' + problems.join('; ') : ''));
+/** The signed-in member asking, and their agency. */
+async function memberCaller(req: Request): Promise<
+  { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+  const host = Deno.env.get('SUPABASE_URL') ?? '';
+  const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return json({ error: 'Not authenticated' }, 401);
+  const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { data: membership } = await admin
+    .from('agency_members')
+    .select('agency_id, role')
+    .eq('profile_id', user.id)
+    .is('deleted_at', null)
+    .limit(1)
+    .maybeSingle();
+  if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+  if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+    return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+  }
+  return { userId: user.id, agencyId: membership.agency_id as string, admin };
 }
 
 /* ── the flow ─────────────────────────────────────────────────────────────── */
@@ -1075,6 +1094,77 @@ Deno.serve(async (req: Request) => {
           tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
         },
       });
+    }
+
+    /* ── which of the shared Pages are this agency's ─────────────────────
+       The Facebook callback holds what was shared (social_connect_picks) and
+       sends the person back with ?connected=choose. GET lists the Pages --
+       names only, and which agency already holds any of them; POST connects
+       the ones ticked. Only the member who started the connection, in the
+       agency it was started for, can see or spend it. */
+    if ((url.searchParams.get('action') ?? '') === 'facebook-pick') {
+      const who = await memberCaller(req);
+      if (who instanceof Response) return who;
+      const readPick = async (pick: string) => {
+        if (!/^[0-9a-f-]{36}$/i.test(pick)) return null;
+        const { data: row } = await who.admin.from('social_connect_picks')
+          .select('pages, expires_at, agency_id, profile_id').eq('id', pick).maybeSingle();
+        if (!row || row.profile_id !== who.userId || row.agency_id !== who.agencyId
+            || Date.parse(row.expires_at as string) < Date.now()) return null;
+        return row;
+      };
+      const expired = () => json({ error: 'This choice has expired. Connect Facebook again.' }, 404);
+      const { data: ag } = await who.admin.from('agencies').select('name').eq('id', who.agencyId).maybeSingle();
+      const agencyName = (ag?.name as string) ?? '';
+
+      if (req.method === 'GET') {
+        const row = await readPick(url.searchParams.get('pick') ?? '');
+        if (!row) return expired();
+        const pages = (row.pages ?? []) as SharedPage[];
+        const owners = await pageOwners(who.admin, pages.map((p) => p.id));
+        return json({
+          agency: agencyName,
+          expires_at: row.expires_at,
+          pages: pages.map((p) => ({
+            id: p.id,
+            name: p.name,
+            instagram: p.ig_username ? '@' + p.ig_username : (p.ig_id ? 'Instagram' : null),
+            connected: owners[p.id]
+              ? (owners[p.id].agencyId === who.agencyId ? 'here' : owners[p.id].agencyName)
+              : null,
+          })),
+        });
+      }
+
+      if (req.method === 'POST') {
+        let body: Record<string, unknown> = {};
+        try { body = await req.json(); } catch { /* empty body: nothing chosen */ }
+        const pick = String(body.pick ?? '');
+        const ids = Array.isArray(body.page_ids) ? (body.page_ids as unknown[]).map(String) : [];
+        if (!ids.length) return json({ error: 'Tick at least one Page.' }, 400);
+        /* Checked before the stash is spent, so a refused choice can be
+           corrected without connecting Facebook again. */
+        const row = await readPick(pick);
+        if (!row) return expired();
+        const owners = await pageOwners(who.admin, ids);
+        const elsewhere = ids.filter((id) => owners[id] && owners[id].agencyId !== who.agencyId);
+        if (elsewhere.length) {
+          return json({ error: elsewhere.map((id) => owners[id].agencyName).join(', ')
+            + ' already has that Page connected. Disconnect it there first.' }, 409);
+        }
+        const { data: got, error: takeErr } = await who.admin.rpc('take_connect_pick', { p_id: pick });
+        if (takeErr || !got) return expired();
+        const taken = got as { pages: SharedPage[]; tokens: Record<string, string>; scopes: string[] };
+        const chosen = (taken.pages ?? []).filter((p) => ids.includes(p.id));
+        const res = await connectFacebookPages(who.admin, who.agencyId, who.userId, chosen,
+          taken.tokens ?? {}, taken.scopes ?? []);
+        if (!res.connected.length) {
+          return json({ error: 'Nothing could be saved: ' + res.problems.join('; ') }, 500);
+        }
+        console.log('social-connect: ' + res.connected.length + ' account(s) connected by choice');
+        return json({ agency: agencyName, connected: res.connected, problems: res.problems });
+      }
+      return json({ error: 'GET to list, POST to connect' }, 405);
     }
 
     /* ── the bot's public profile, applied from code ─────────────────────
