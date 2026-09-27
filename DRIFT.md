@@ -111,8 +111,18 @@ and `authenticated` everything on it. On a table, RLS stands between those
 grants and the rows; a view owned by `postgres` without `security_invoker`
 bypasses it, so the public anon key could read every job's schedule and last
 error message over the REST API.
-Revoked in `20260927235517`. Only `cron_health` was checked — any other view in
-`public` created the same way will carry the same grant.
+Revoked in `20260927235517`.
+
+Every view in `public` had the same grant, and on one it was a hole:
+`agent_social_counts` (`0065`) is a definer-rights view over `profiles` alone, so
+Postgres makes it writable, and writes through it reach `profiles` as `postgres`
+(BYPASSRLS). The anon key could delete every profile with one REST call.
+`20260928001207` cuts it and `listing_agent_cards` back to SELECT, which is all
+the clients use; no auth account was missing its profile afterwards, so there is
+no sign it was used. `geography_columns` and `geometry_columns` carry the grant
+too but belong to PostGIS and are left alone. **Every new view in `public` gets
+this grant again** — a view needs its own `revoke all … from anon,
+authenticated` before any `grant select`.
 
 **Two files, one version.** A migration from a concurrent session was also
 named `20260927230000_…`. `scripts/migrate.mjs` keys on the version alone, so
