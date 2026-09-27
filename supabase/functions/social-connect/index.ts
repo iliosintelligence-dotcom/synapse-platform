@@ -650,6 +650,96 @@ async function telegramBotHandle(token: string): Promise<string | null> {
   }
 }
 
+/* What @SynapseListingsBot says about itself. Telegram's limits: 512
+   characters for the description (shown in an empty chat, under "What can
+   this bot do?") and 120 for the short one (the profile page and link
+   previews). It does not answer messages -- nothing listens for them -- so
+   it says so rather than letting someone wait for a reply. */
+const TG_PROFILE = {
+  description: [
+    'I post property listings from estate agencies on Synapse to their own '
+      + 'Telegram channels: photos, the price and the charges, and a '
+      + '“View this home” button under every post.',
+    '',
+    'Agencies: add me to your channel as an administrator with Post Messages, '
+      + 'then connect the channel in the Synapse agency portal, under Social '
+      + '→ Channels.',
+    '',
+    'Looking for a home? Talk to Tayo at synapsecore.dev',
+    '',
+    'I don’t reply to messages here.',
+  ].join('\n'),
+  short: 'Posts Synapse agencies’ property listings to their Telegram channels, '
+    + 'with a “View this home” button.',
+};
+
+/* The rights Telegram pre-ticks when the bot is added to a CHANNEL. Posting
+   is the only thing the bot does, so it is the only thing it asks for:
+   an agency deciding whether to trust it should see one box, not eight. */
+const TG_CHANNEL_RIGHTS: Record<string, boolean> = {
+  is_anonymous: false, can_manage_chat: false, can_delete_messages: false,
+  can_manage_video_chats: false, can_restrict_members: false,
+  can_promote_members: false, can_change_info: false, can_invite_users: false,
+  can_post_stories: false, can_edit_stories: false, can_delete_stories: false,
+  can_post_messages: true, can_edit_messages: false, can_pin_messages: false,
+};
+
+let TG_SYNCED: { token: string; at: number; result: Record<string, unknown> } | null = null;
+async function syncTelegramProfile(token: string): Promise<Record<string, unknown>> {
+  if (TG_SYNCED && TG_SYNCED.token === token && Date.now() - TG_SYNCED.at < 600_000) {
+    return { ...TG_SYNCED.result, cached: true };
+  }
+  const call = async (method: string, body: Record<string, unknown> = {}) => {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
+    } catch (e) {
+      return { ok: false, description: e instanceof Error ? e.message : 'network error' };
+    }
+  };
+  const changed: string[] = [];
+  const errors: string[] = [];
+
+  const d = await call('getMyDescription');
+  if (!d.ok) errors.push('read description: ' + (d.description ?? 'failed'));
+  else if ((d.result?.description ?? '') !== TG_PROFILE.description) {
+    const s = await call('setMyDescription', { description: TG_PROFILE.description });
+    if (s.ok) changed.push('description'); else errors.push('description: ' + (s.description ?? 'failed'));
+  }
+
+  const sd = await call('getMyShortDescription');
+  if (!sd.ok) errors.push('read short description: ' + (sd.description ?? 'failed'));
+  else if ((sd.result?.short_description ?? '') !== TG_PROFILE.short) {
+    const s = await call('setMyShortDescription', { short_description: TG_PROFILE.short });
+    if (s.ok) changed.push('short_description'); else errors.push('short description: ' + (s.description ?? 'failed'));
+  }
+
+  /* Compared on posting alone: Telegram may report can_manage_chat as true
+     for any channel administrator whatever was set, and comparing every key
+     would rewrite the rights on every call for a difference nobody chose. */
+  const rr = await call('getMyDefaultAdministratorRights', { for_channels: true });
+  if (!rr.ok) errors.push('read channel rights: ' + (rr.description ?? 'failed'));
+  else if (!rr.result?.can_post_messages) {
+    const s = await call('setMyDefaultAdministratorRights', { rights: TG_CHANNEL_RIGHTS, for_channels: true });
+    if (s.ok) changed.push('channel_rights'); else errors.push('channel rights: ' + (s.description ?? 'failed'));
+  }
+
+  const result: Record<string, unknown> = {
+    ok: errors.length === 0,
+    bot: await telegramBotHandle(token),
+    changed,
+    errors,
+    description: TG_PROFILE.description,
+    short_description: TG_PROFILE.short,
+  };
+  if (!errors.length) TG_SYNCED = { token, at: Date.now(), result };
+  return result;
+}
+
 /* A server-side switch, read with the service role. platform_settings has
    RLS on and no policy at all, so it is unreachable through the API and this
    is the only way in.
@@ -842,6 +932,23 @@ Deno.serve(async (req: Request) => {
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
         },
       });
+    }
+
+    /* ── the bot's public profile, applied from code ─────────────────────
+       What a person sees when they open @SynapseListingsBot, and the rights
+       Telegram pre-ticks when an agency adds it to a channel. Kept here
+       rather than typed into BotFather so it is reviewed, versioned and
+       re-applied in one request: change TG_PROFILE and call this.
+
+       No input and nothing returned but our own public text, so it needs no
+       session. It writes only what differs, and remembers a clean run for
+       ten minutes per instance, so calling it repeatedly costs nothing. */
+    if (url.searchParams.get('action') === 'telegram-profile') {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      return json(await syncTelegramProfile(tgBotToken));
     }
 
     /* ── telegram: a form, not a redirect ─────────────────────────────────

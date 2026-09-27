@@ -58,7 +58,7 @@ function json(body: unknown, status = 200): Response {
    ever been offered the chance to write. The twin reworded the caption meant
    for somewhere else, on the one platform where length is the whole craft.
    Adding it here is what lets the composer offer it. */
-const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp', 'x'] as const;
+const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp', 'x', 'telegram'] as const;
 type Channel = typeof CHANNELS[number];
 
 /* ── THE ANGLES ────────────────────────────────────────────────────────────
@@ -175,6 +175,10 @@ const AFFINITY: Record<Channel, string[]> = {
   /* Cost and the single sharp number read well in 240 characters; the space
      and the process do not. */
   x: ['cost', 'value', 'question', 'moment', 'objection', 'trust', 'amenity', 'fit', 'location', 'space', 'process'],
+  /* A channel follower chose to follow this agency and reads the whole post
+     in the feed, so the numbers lead: what it costs, what it is worth, what
+     is in it. */
+  telegram: ['cost', 'value', 'space', 'location', 'amenity', 'fit', 'trust', 'process', 'objection', 'moment', 'question'],
 };
 
 /**
@@ -245,6 +249,14 @@ const VOICE: Record<Channel, string> = {
   x: 'one post, hard limit 240 characters before the link. A single sharp '
     + 'observation or a number that stops the scroll. No emoji spam, no hashtag '
     + 'stack, no "thread below". Nigerian, dry, confident.',
+  /* Telegram refuses a photo caption over 1024 characters and the publisher
+     cuts at that point, so the form has to fit well inside it -- with room
+     for the link, which is added after the first line. The post carries its
+     own "View this home" button, so the caption never has to point anywhere. */
+  telegram: 'the form, kept UNDER 850 characters: caps headline, location, the key '
+    + 'specs, the price and the charges, the next step. A "View this home" button '
+    + 'sits under the post, so never write "link in bio", "DM us" or "click the '
+    + 'link". No hashtags -- a channel is followed, not searched.',
 };
 
 /* THE FORM THE MARKET ACTUALLY USES.
@@ -395,6 +407,8 @@ own posts, and it is why two captions in one batch will not read alike.
 INSTAGRAM, FACEBOOK and YOUTUBE take the full form. WHATSAPP takes the
 headline, the price, the charges and the next step, nothing else. X cannot
 carry a spec sheet at all: there it is one line, one number, one point.
+TELEGRAM takes the form but must stay under 850 characters, because Telegram
+cuts a photo caption at 1024 and the link still has to fit.
 ${brandLine}
 RULES:
 - These are REAL verified listings. Never invent facts, amenities, numbers,
