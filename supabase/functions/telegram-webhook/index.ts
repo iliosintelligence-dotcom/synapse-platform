@@ -226,7 +226,7 @@ async function onChannelPost(p: Json) {
     'telegram_connect_codes?code=eq.' + encodeURIComponent(code)
       + '&used_at=is.null&expires_at=gt.' + encodeURIComponent(now) + '&select=agency_id,profile_id',
     { method: 'PATCH', headers: { Prefer: 'return=representation' },
-      body: JSON.stringify({ used_at: now, chat_id: chat.id }) },
+      body: JSON.stringify({ used_at: now, chat_id: chat.id, error: null }) },
   );
   const rows = claim.ok ? await claim.json().catch(() => []) : [];
   if (!Array.isArray(rows) || !rows.length) return;   // unknown, used or expired: leave the post alone
@@ -240,7 +240,9 @@ async function onChannelPost(p: Json) {
   const st = member.ok ? String(member.result.status) : '';
   const canPost = st === 'creator' || (st === 'administrator' && member.result.can_post_messages !== false);
   if (!canPost) {
-    await mark({ error: 'The bot is in ' + (chat.title ?? 'the channel') + ' but is not allowed to post. '
+    /* Released, not spent: the fix is a switch in Telegram, and the same
+       code posted again afterwards should work. */
+    await mark({ used_at: null, error: 'The bot is in ' + (chat.title ?? 'the channel') + ' but is not allowed to post. '
       + 'In the channel: Administrators \u2192 the bot \u2192 turn on Post Messages, then post the code again.' });
     return;
   }
@@ -257,13 +259,13 @@ async function onChannelPost(p: Json) {
   if (!conn.ok) {
     const why = await conn.text();
     console.error('telegram-webhook: connect_telegram_channel failed', conn.status, why);
-    await mark({ error: 'The channel could not be connected: ' + why.slice(0, 200) });
+    await mark({ used_at: null, error: 'The channel could not be connected: ' + why.slice(0, 200) });
     return;
   }
   const accountId = await conn.json().catch(() => null);
 
   const del = await tg('deleteMessage', { chat_id: chat.id, message_id: p.message_id });
-  await mark({ account_id: accountId, channel: label, code_post_deleted: Boolean(del.ok) });
+  await mark({ account_id: accountId, channel: label, code_post_deleted: Boolean(del.ok), error: null });
   console.log('telegram-webhook: channel ' + chat.id + ' connected by code for agency ' + agency_id);
 }
 
