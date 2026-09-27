@@ -186,6 +186,78 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
   }
 }
 
+/* ── TikTok ─────────────────────────────────────────────────────────────
+   Login Kit for Web, OAuth v2. Its own app and credentials (TIKTOK_CLIENT_KEY
+   / TIKTOK_CLIENT_SECRET), its own dialog on tiktok.com, and the same redirect
+   as Meta -- this function -- which TikTok requires to be registered exactly,
+   static and without parameters.
+
+   video.upload, not video.publish. Posts are SENT TO THE AGENT'S TIKTOK
+   INBOX (post_mode MEDIA_UPLOAD) and finished in the app, where they add a
+   sound -- which on TikTok is most of what decides reach, and which the API
+   cannot choose well. Direct posting needs video.publish, TikTok's audit, and
+   a compliance screen in our composer; it can come later without changing
+   anything stored here. */
+const TIKTOK_SCOPES = ['user.info.basic', 'video.upload'];
+
+async function finishTikTok(
+  code: string,
+  claims: Record<string, unknown>,
+  key: string,
+  secret: string,
+  redirectUri: string,
+): Promise<Response> {
+  const tr = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_key: key, client_secret: secret, code,
+      grant_type: 'authorization_code', redirect_uri: redirectUri,
+    }),
+  });
+  const tok = await tr.json().catch(() => ({}));
+  if (!tr.ok || !tok.access_token) {
+    console.error('social-connect: tiktok token exchange rejected -- '
+      + (tok.error ?? tr.status) + ' ' + (tok.error_description ?? ''));
+    return backToPortal('error', 'TikTok would not issue a token'
+      + (tok.error_description ? ': ' + tok.error_description : '.'));
+  }
+  const granted = String(tok.scope ?? '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  if (!granted.includes('video.upload')) {
+    return backToPortal('error', 'TikTok connected without permission to send posts. '
+      + 'Connect again and allow "Upload content to TikTok".');
+  }
+
+  /* Who, in TikTok's own words: display_name is what the agent recognises. */
+  const ur = await fetch('https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url', {
+    headers: { Authorization: 'Bearer ' + tok.access_token },
+  });
+  const u = await ur.json().catch(() => ({}));
+  const user = (u && u.data && u.data.user) || {};
+  const openId = String(user.open_id ?? tok.open_id ?? '');
+  if (!openId) return backToPortal('error', 'TikTok did not say which account this is. Please try again.');
+  const name = String(user.display_name ?? '').trim() || 'TikTok account';
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { error } = await admin.rpc('connect_social_account', {
+    p_agency_id: claims.agency_id as string,
+    p_platform: 'tiktok',
+    p_account_id: openId,
+    p_username: name,
+    p_access_token: tok.access_token,
+    p_refresh_token: tok.refresh_token ?? null,
+    p_expires_at: new Date(Date.now() + (Number(tok.expires_in) || 86400) * 1000).toISOString(),
+    p_scopes: granted,
+    p_connected_by: claims.profile_id as string,
+  });
+  if (error) {
+    console.error('social-connect: could not save TikTok account: ' + error.message);
+    return backToPortal('error', 'TikTok connected, but the account could not be saved: ' + error.message);
+  }
+  console.log('social-connect: tiktok ' + openId + ' connected for agency ' + claims.agency_id);
+  return backToPortal('tiktok', name);
+}
+
 /**
  * Facebook Pages. Three exchanges, and the third is the one that matters:
  * posting to a Page is done with a PAGE token, not the user's own. A Page
@@ -879,6 +951,8 @@ Deno.serve(async (req: Request) => {
      this way nobody outside Synapse ever holds a token. Genuinely secret,
      unlike the Facebook config id, so it stays in the secrets store. */
   const tgBotToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+  const ttKey = (Deno.env.get('TIKTOK_CLIENT_KEY') ?? '').trim();
+  const ttSecret = (Deno.env.get('TIKTOK_CLIENT_SECRET') ?? '').trim();
 
   let fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
   if (!fbConfigId) fbConfigId = await settingText('meta_fb_config_id');
@@ -975,6 +1049,8 @@ Deno.serve(async (req: Request) => {
              named a bot before one existed, and a handle that drifts from
              the token has every agency adding an account that is not ours. */
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
+          /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
+          tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
         },
       });
     }
@@ -1239,6 +1315,54 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    /* ── step 1, TikTok: its own dialog and its own credentials ────────── */
+    if (url.searchParams.get('action') === 'start' && url.searchParams.get('platform') === 'tiktok') {
+      const missingTt = [!ttKey && 'TIKTOK_CLIENT_KEY', !ttSecret && 'TIKTOK_CLIENT_SECRET'].filter(Boolean);
+      if (missingTt.length) {
+        return json({ error: 'TikTok is not configured on this project yet. Missing: '
+          + missingTt.join(', ') + '.', missing: missingTt }, 503);
+      }
+      const authHeader = req.headers.get('Authorization');
+      if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+      const host = Deno.env.get('SUPABASE_URL') ?? '';
+      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: who } = await asUser.auth.getUser();
+      if (!who.user) return json({ error: 'Not authenticated' }, 401);
+      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', who.user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a social account' }, 403);
+      }
+      const ttState = await signState({
+        agency_id: membership.agency_id,
+        profile_id: who.user.id,
+        platform: 'tiktok',
+        nonce: crypto.randomUUID(),
+        exp: Date.now() + STATE_TTL_MS,
+      });
+      const ttAuth = new URL('https://www.tiktok.com/v2/auth/authorize/');
+      ttAuth.searchParams.set('client_key', ttKey);
+      ttAuth.searchParams.set('scope', TIKTOK_SCOPES.join(','));
+      ttAuth.searchParams.set('response_type', 'code');
+      ttAuth.searchParams.set('redirect_uri', redirectUri);
+      ttAuth.searchParams.set('state', ttState);
+      console.log('social-connect start: platform=tiktok redirect=' + redirectUri
+        + ' scope=' + TIKTOK_SCOPES.join(','));
+      return json({
+        url: ttAuth.toString(), platform: 'tiktok', redirectUri,
+        scopes: TIKTOK_SCOPES, expiresInMinutes: STATE_TTL_MS / 60000,
+      });
+    }
+
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
     if (url.searchParams.get('action') === 'start') {
       /* Which product. Both live on one Meta app and one redirect URI, so the
@@ -1461,6 +1585,14 @@ Deno.serve(async (req: Request) => {
 
     const claims = await readState(state);
     if (!claims) return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+
+    /* TikTok first: it needs neither Meta credential, and the check below
+       would refuse it for lacking one. The platform is read from the state
+       we signed, never from the query. */
+    if (claims.platform === 'tiktok') {
+      if (!ttKey || !ttSecret) return backToPortal('error', 'TikTok is not configured on this project.');
+      return await finishTikTok(code, claims, ttKey, ttSecret, redirectUri);
+    }
 
     /* AFTER the state is read, because the state is what says which
        platform this is -- and the two platforms need different

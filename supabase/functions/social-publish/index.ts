@@ -803,10 +803,119 @@ const telegramAdapter: Adapter = async (post, conn) => {
   }
 };
 
+/* ── TikTok: photos, sent to the agent's inbox ─────────────────────────────
+   Content Posting API, photo mode, post_mode MEDIA_UPLOAD: TikTok puts the
+   post in the agent's TikTok inbox and they finish it in the app -- adding a
+   sound, which decides most of a TikTok's reach and which the API cannot
+   choose well. So "published" here means DELIVERED TO THE INBOX, and the
+   payload says so.
+
+   TikTok pulls the photos itself (PULL_FROM_URL is the only source for
+   photos) and only from a domain we have verified with it -- which the
+   storage host is not. So every photo is addressed through
+   www.synapsecore.dev/m/, a Vercel rewrite (a proxy, not a redirect: TikTok
+   refuses 3xx) onto Supabase's image renderer, which also fits it inside
+   TikTok's 1080 limit. A photo from anywhere else cannot be sent and is left
+   out rather than failing the post. */
+const TT_API = 'https://open.tiktokapis.com';
+const TT_MEDIA_BASE = 'https://www.synapsecore.dev/m/';
+
+function tiktokPhotoUrl(u: string): string | null {
+  const store = (Deno.env.get('SUPABASE_URL') ?? '') + '/storage/v1/object/public/';
+  if (!u || !u.startsWith(store) || isVideoUrl(u)) return null;
+  return TT_MEDIA_BASE + u.slice(store.length);
+}
+
+const tiktokAdapter: Adapter = async (post, conn) => {
+  const payload: Record<string, unknown> = {
+    ...buildPayload(post), account: conn.username, mode: 'MEDIA_UPLOAD',
+  };
+  const photos = (post.media_urls ?? [])
+    .map(tiktokPhotoUrl).filter((u): u is string => Boolean(u)).slice(0, 35);
+  if (!photos.length) {
+    return {
+      ok: false, postId: null, provider: 'tiktok', payload,
+      error: 'No photo TikTok can take: it only pulls photos stored on Synapse. '
+        + '(Sending videos to TikTok is not built yet.)',
+    };
+  }
+  const caption = (post.caption ?? '').trim();
+  const title = (caption.split('\n').find((l) => l.trim()) ?? '').trim().slice(0, 90);
+  try {
+    const res = await fetch(TT_API + '/v2/post/publish/content/init/', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({
+        post_info: { title, description: caption.slice(0, 4000) },
+        source_info: { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: photos },
+        post_mode: 'MEDIA_UPLOAD',
+        media_type: 'PHOTO',
+      }),
+    });
+    const j = await res.json().catch(() => ({}));
+    const code = j && j.error ? String(j.error.code ?? '') : '';
+    if (!res.ok || code !== 'ok') {
+      /* TikTok's message is written for a person ("url ownership
+         unverified", "spam risk: too many pending uploads") and is the
+         useful half, so it is carried through. */
+      return {
+        ok: false, postId: null, provider: 'tiktok', payload,
+        error: 'TikTok refused: ' + ((j && j.error && (j.error.message || j.error.code)) || ('HTTP ' + res.status)),
+      };
+    }
+    const publishId = j.data && j.data.publish_id ? String(j.data.publish_id) : null;
+    return {
+      ok: true, postId: publishId, provider: 'tiktok', error: '',
+      payload: { ...payload, photos: photos.length, publish_id: publishId,
+                 delivered: 'inbox', note: 'In the TikTok inbox: finish and post it in the TikTok app.' },
+    };
+  } catch (err) {
+    return { ok: false, postId: null, provider: 'tiktok', payload,
+             error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+/* TikTok's access token lives a day. Renewed here, just before a post needs
+   it, and written back so the stored credential stays the working one. A
+   renewal that fails leaves the account unusable for this batch, which is
+   reported as not connected -- the fix is the same, reconnect. */
+async function refreshTikTok(
+  admin: ReturnType<typeof createClient>,
+  accountId: string,
+): Promise<string | null> {
+  const key = (Deno.env.get('TIKTOK_CLIENT_KEY') ?? '').trim();
+  const secret = (Deno.env.get('TIKTOK_CLIENT_SECRET') ?? '').trim();
+  if (!key || !secret) return null;
+  const { data: rt } = await admin.rpc('social_account_refresh_token', { p_account_id: accountId });
+  if (!rt) return null;
+  const r = await fetch(TT_API + '/v2/oauth/token/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_key: key, client_secret: secret, grant_type: 'refresh_token', refresh_token: String(rt),
+    }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) {
+    console.error('social-publish: tiktok refresh failed for ' + accountId + ': '
+      + (j.error ?? r.status) + ' ' + (j.error_description ?? ''));
+    return null;
+  }
+  const { error } = await admin.rpc('update_social_account_tokens', {
+    p_account_id: accountId,
+    p_access_token: j.access_token,
+    p_refresh_token: j.refresh_token ?? null,
+    p_expires_at: new Date(Date.now() + (Number(j.expires_in) || 86400) * 1000).toISOString(),
+  });
+  if (error) console.error('social-publish: tiktok token not saved for ' + accountId + ': ' + error.message);
+  return String(j.access_token);
+}
+
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
   telegram: telegramAdapter,
+  tiktok: tiktokAdapter,
 };
 
 const ADAPTERS: Record<string, Adapter> = {
@@ -944,7 +1053,7 @@ async function loadConnections(
 
   const { data: accounts } = await admin
     .from('social_accounts')
-    .select('id, platform, platform_account_id, platform_username, auth_source')
+    .select('id, platform, platform_account_id, platform_username, auth_source, token_expires_at')
     .eq('agency_id', agencyId)
     .in('platform', platforms)
     .eq('is_active', true)
@@ -968,6 +1077,16 @@ async function loadConnections(
       const { data } = await admin.rpc('social_account_token', { p_account_id: a.id });
       if (!data) continue;  // connected but revoked: treated as not connected
       token = data as unknown as string;
+      /* A TikTok token within fifteen minutes of its 24-hour end is renewed
+         now, not discovered dead at TikTok. */
+      if (a.platform === 'tiktok') {
+        const exp = a.token_expires_at ? Date.parse(a.token_expires_at) : 0;
+        if (!exp || exp - Date.now() < 15 * 60 * 1000) {
+          const fresh = await refreshTikTok(admin, a.id);
+          if (!fresh) continue;
+          token = fresh;
+        }
+      }
     }
     const conn: Connection = {
       accountId: a.id,
