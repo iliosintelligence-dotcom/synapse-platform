@@ -589,6 +589,73 @@ function viaTrypost(platform: string): boolean {
   return Boolean(TRYPOST_CONTENT_TYPE[platform]);
 }
 
+/* ── X: 280 characters, and it means it ────────────────────────────────────
+   Found 2026-09-28 by asking trypost what became of every Synapse X post: of
+   thirteen, ONE went live -- the 285-character one, which X counts as under
+   280 because a link counts as 23 whatever its length. Every longer one
+   failed, and trypost reported each as "An unexpected error occurred while
+   publishing". Most were Instagram captions copied across, 300 to 1,200
+   characters. The generator is asked for under 240 plus the link, but asking
+   is not enforcing, so this is where the limit is kept: whatever caption
+   reaches X is fitted to it here, with the listing link kept whole.
+
+   X's counting (twitter-text v3): a URL is 23; most Latin, Greek, Cyrillic
+   and common punctuation count 1; everything else counts 2 -- emoji, CJK,
+   and symbols like the naira sign. Counting every other code point as 2
+   overcounts an emoji sequence slightly, which only ever errs short. */
+const X_LIMIT = 280;
+const X_URL = /https?:\/\/[^\s]+/g;
+const X_TAG = /(^|\s)#[\p{L}\p{N}_]+/gu;
+
+function xWeight(text: string): number {
+  let n = 0;
+  for (const ch of text.replace(X_URL, 'x'.repeat(23))) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const light = cp <= 0x10ff || (cp >= 0x2000 && cp <= 0x200d)
+      || (cp >= 0x2010 && cp <= 0x201f) || (cp >= 0x2032 && cp <= 0x2037);
+    n += light ? 1 : 2;
+  }
+  return n;
+}
+
+/** The caption as X will take it: within 280 weighted characters, the listing
+ *  link kept (ours first, if there are several), up to two hashtags if they
+ *  leave room, and the words cut at a sentence or a word -- never mid-word. A
+ *  caption that already fits goes through untouched. */
+function fitForX(caption: string): string {
+  const text = (caption ?? '').trim();
+  if (xWeight(text) <= X_LIMIT) return text;
+
+  const links = text.match(X_URL) ?? [];
+  const link = links.find((u) => /synapsecore\.dev\/s\//.test(u)) ?? links[0] ?? '';
+  const tags = (text.match(X_TAG) ?? []).map((t) => t.trim()).slice(0, 2);
+  let body = text.replace(X_URL, ' ').replace(X_TAG, ' ')
+    .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  const tail = (withTags: boolean) =>
+    (link ? '\n\n' + link : '') + (withTags && tags.length ? (link ? ' ' : '\n\n') + tags.join(' ') : '');
+  // Hashtags only while they leave most of the post for words.
+  const withTags = xWeight(tail(true)) <= 80;
+  const budget = X_LIMIT - xWeight(tail(withTags));
+
+  if (xWeight(body) > budget) {
+    // Longest prefix that fits with an ellipsis, then back to a sentence end
+    // if one is reasonably far in, else to the last space.
+    let cut = '';
+    for (const ch of body) {
+      if (xWeight(cut + ch + '…') > budget) break;
+      cut += ch;
+    }
+    const sentence = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '),
+      cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
+    const space = cut.lastIndexOf(' ');
+    body = sentence > cut.length * 0.5
+      ? cut.slice(0, sentence + 1).trim()
+      : (space > 0 ? cut.slice(0, space) : cut).trim().replace(/[,;:\-–—]+$/, '') + '…';
+  }
+  return (body + tail(withTags)).trim();
+}
+
 const trypostAdapter: Adapter = async (post, conn) => {
   const contentType = TRYPOST_CONTENT_TYPE[post.platform] ?? '';
   const accountId = conn.platformAccountId ?? '';
@@ -602,6 +669,11 @@ const trypostAdapter: Adapter = async (post, conn) => {
   };
   const fail = (error: string) =>
     ({ ok: false, postId: null, provider: 'trypost', error, payload } as PublishResult);
+  const isX = post.platform === 'x';
+  if (isX) {
+    const sent = fitForX(post.caption ?? '');
+    Object.assign(payload, { x_fitted: sent !== (post.caption ?? '').trim(), x_weight: xWeight(sent) });
+  }
 
   if (!trypostConfigured()) return fail('trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY.');
   if (!contentType) return fail('trypost has no content type for ' + post.platform + '.');
@@ -630,8 +702,9 @@ const trypostAdapter: Adapter = async (post, conn) => {
       headers,
       body: JSON.stringify({
         platforms: [{ social_account_id: accountId, content_type: contentType }],
-        content: post.caption ?? '',
-        media: post.media_urls.map((url) => ({ url })),
+        content: isX ? fitForX(post.caption ?? '') : (post.caption ?? ''),
+        // X takes four images to a post.
+        media: (isX ? post.media_urls.slice(0, 4) : post.media_urls).map((url) => ({ url })),
       }),
     });
     const body = await res.json().catch(() => ({}));
