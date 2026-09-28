@@ -155,4 +155,5 @@ rows for 43 agents, 31 agency rows. Its alert closed at 2,306 occurrences.
 `purge-telegram-link-codes` had its first run at 03:35 and its "has never run"
 alert closed at the 03:45 check. The same will happen to any daily job created
 after its slot for the day: it reads as stalled until its first run, then the
-check closes it — `purge-social-connect-failures` did exactly that overnight.
+check closes it. `purge-social-connect-failures` (daily 03:50) is the next:
+first run at 03:50 on 28 September, alert due to close at the 04:00 check.
