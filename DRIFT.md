@@ -149,7 +149,10 @@ person today. A row per agency needs the primary key changed.
 opened and closed a "no message" alert — about 250 a day. None of those were
 real failures.
 
-**Still to confirm:** the first nightly runs on the fixed code.
-`synapse-daily-snapshots` runs at 01:30 UTC on 28 September; its open alert
-should close at the 01:45 check. `purge-telegram-link-codes` has its first run
-ever at 03:35; its "has never run" stalled alert should close at 03:45.
+**Confirmed on 28 September.** `synapse-daily-snapshots` succeeded at 01:30 UTC,
+its first success since 3 September, and wrote 27 September itself: 43 agent
+rows for 43 agents, 31 agency rows. Its alert closed at 2,306 occurrences.
+`purge-telegram-link-codes` had its first run at 03:35 and its "has never run"
+alert closed at the 03:45 check. The same will happen to any daily job created
+after its slot for the day: it reads as stalled until its first run, then the
+check closes it — `purge-social-connect-failures` did exactly that overnight.
