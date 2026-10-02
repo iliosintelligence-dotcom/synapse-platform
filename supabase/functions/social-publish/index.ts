@@ -80,6 +80,15 @@ interface PublishResult {
   error: string;
   /** Exactly what was, or would have been, sent. Stored either way. */
   payload: Record<string, unknown>;
+  /** The request may have reached the platform but no answer came back, so
+   *  the post may be up already. Never retried automatically: a duplicate in
+   *  a public channel cannot be taken back, and a missing post is one press
+   *  of Retry. Set by the Telegram path only. */
+  mayHaveSent?: boolean;
+  /** Not sent now because it went out before (a reclaimed row whose
+   *  'published' write never landed). Recorded as published; nothing that
+   *  follows a send -- the Story kit -- runs again. */
+  alreadySent?: boolean;
 }
 
 /* -- adapters ---------------------------------------------------------------
@@ -808,6 +817,17 @@ function tgLink(caption: string): string | null {
   return m ? m[0] : null;
 }
 
+/** The request went out and no readable answer came back. */
+class TelegramNoAnswer extends Error {}
+
+/* THE BOT TOKEN IS IN THE URL, and Deno puts the URL in a network error's
+   message ("error sending request for url (https://api.telegram.org/bot…").
+   Whatever this adapter returns as `error` lands in failure_reason, which
+   the agency's portal shows. So a message is scrubbed before it leaves. */
+function scrubToken(msg: string): string {
+  return msg.replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot<token>');
+}
+
 const telegramAdapter: Adapter = async (post, conn) => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, chat_id: conn.platformAccountId,
@@ -819,14 +839,26 @@ const telegramAdapter: Adapter = async (post, conn) => {
   const caption = tgCaption(post.caption ?? '');
   const link = tgLink(post.caption ?? '');
 
+  /* A REFUSAL AND NO ANSWER ARE DIFFERENT OUTCOMES, and used to be handled
+     as one. Telegram saying ok:false means nothing was posted, so trying
+     again is safe. A dropped connection or a reply we cannot read means we
+     do not know -- Telegram may have posted it -- and retrying that is how
+     one listing turns up twice in somebody's channel. */
   const call = async (method: string, body: Record<string, unknown>) => {
-    const r = await fetch(`${base}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const j = await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
-    if (!j?.ok) {
+    let r: Response;
+    try {
+      r = await fetch(`${base}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw new TelegramNoAnswer('Telegram did not answer ' + method + ': '
+        + scrubToken(e instanceof Error ? e.message : String(e)));
+    }
+    const j = await r.json().catch(() => null);
+    if (!j) throw new TelegramNoAnswer('Telegram’s reply to ' + method + ' could not be read (HTTP ' + r.status + ')');
+    if (!j.ok) {
       /* Telegram's description is the useful half and is written for a
          person: "chat not found", "not enough rights to send photos". Carried
          through rather than replaced with a status code. */
@@ -890,11 +922,94 @@ const telegramAdapter: Adapter = async (post, conn) => {
   } catch (err) {
     return {
       ok: false, postId: null, provider: 'telegram',
-      error: err instanceof Error ? err.message : String(err),
+      error: scrubToken(err instanceof Error ? err.message : String(err)),
       payload,
+      mayHaveSent: err instanceof TelegramNoAnswer,
     };
   }
 };
+
+/* ── a Telegram post goes to a chat once ──────────────────────────────────
+   Reported 2026-10-02 as "Telegram keeps auto posting". The record showed
+   nothing had been sent twice (see 20261002080000_a_telegram_post_is_sent_once
+   .sql) -- but nothing stopped it either:
+
+   - The 'published' write after a send was never checked. A message that
+     went out but whose write did not land left the row at 'publishing', and
+     the claim reclaims a 'publishing' row five minutes old -- so it went out
+     again, up to max_attempts times. Likewise if this function died between
+     Telegram answering and the write.
+   - A reply that could not be read was treated as a refusal and retried at
+     1, 5 and 25 minutes, though Telegram may well have posted it.
+
+   So the send is claimed first, one claim per post and chat in
+   telegram_deliveries, and the claim can be won once. Telegram's answer
+   decides what becomes of it: sent -> the message id goes on the claim;
+   refused -> nothing was posted, the claim is let go and the retry ladder
+   works as before; no answer -> the claim stays and the post fails instead
+   of retrying, telling the agency to look at the channel. A reclaimed row
+   whose message already went out is marked published from its claim
+   without being sent again. */
+async function publishOnce(
+  /* any, not ReturnType<typeof createClient>: that type resolves its schema
+     to `never` under deno check, which is the dozen errors the helpers above
+     already carry. Nothing here relies on generated table types. */
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  post: QueuedPost,
+  conn: Connection,
+  adapter: Adapter,
+  rehearsal: boolean,
+): Promise<PublishResult> {
+  if (rehearsal || adapter !== telegramAdapter || !conn.platformAccountId) return await adapter(post, conn);
+
+  const chat = String(conn.platformAccountId);
+  const where = conn.username || 'the channel';
+  const payload = { ...buildPayload(post), account: conn.username, chat_id: chat };
+
+  const { data: claim, error } = await admin.rpc('claim_telegram_delivery', {
+    p_post_id: post.id, p_chat_id: chat,
+  });
+  /* THIS FILE DEPLOYS ON MERGE; THE MIGRATION IS APPLIED BY HAND. Until it
+     is, the function does not exist, and refusing every Telegram post for
+     that would stop the channels outright. So it sends as it always has,
+     and says so loudly in the log. */
+  if (error && (error.code === 'PGRST202' || error.code === '42883')) {
+    console.error('social-publish: claim_telegram_delivery is missing -- apply 20261002080000. Sending '
+      + post.id + ' without the once-per-chat guard.');
+    return await adapter(post, conn);
+  }
+  if (error || !claim) {
+    /* Nothing was sent, so this is an ordinary failure and is retried. */
+    return { ok: false, postId: null, provider: 'telegram', payload,
+      error: 'Could not reserve the send to ' + where + ': ' + (error?.message ?? 'no answer from the database') };
+  }
+
+  const c = claim as { claimed?: boolean; message_id?: number | null; sent_at?: string | null };
+  if (!c.claimed) {
+    if (c.sent_at) {
+      return { ok: true, alreadySent: true, provider: 'telegram', error: '',
+        postId: c.message_id != null ? String(c.message_id) : null,
+        payload: { ...payload, already_sent_at: c.sent_at } };
+    }
+    return { ok: false, mayHaveSent: true, postId: null, provider: 'telegram', payload,
+      error: 'An earlier attempt to send this to ' + where + ' got no answer from Telegram, so it may '
+        + 'already be there. Look in the channel first; if it is not, press Retry.' };
+  }
+
+  const result = await adapter(post, conn);
+  if (result.ok) {
+    const { error: e } = await admin.from('telegram_deliveries')
+      .update({ message_id: result.postId != null ? Number(result.postId) : null, sent_at: new Date().toISOString() })
+      .eq('social_post_id', post.id).eq('chat_id', chat);
+    if (e) console.error('social-publish: ' + post.id + ' went out but its claim was not updated: ' + e.message);
+  } else if (!result.mayHaveSent) {
+    const { error: e } = await admin.from('telegram_deliveries')
+      .delete().eq('social_post_id', post.id).eq('chat_id', chat).is('sent_at', null);
+    if (e) console.error('social-publish: claim for ' + post.id + ' not released after a refusal: ' + e.message);
+  }
+  return result;
+}
 
 /* ── TikTok: photos, sent to the agent's inbox ─────────────────────────────
    Content Posting API, photo mode, post_mode MEDIA_UPLOAD: TikTok puts the
@@ -1534,25 +1649,33 @@ Deno.serve(async (req: Request) => {
               : notConnected(post.platform),
             payload: buildPayload(post),
           }
-        : await adapterFor(post, live)(post, conn ?? NO_CONNECTION);
+        : await publishOnce(admin, post, conn ?? NO_CONNECTION, adapterFor(post, live), rehearsal);
       if (post.dry_run || !live) dryRun++;
 
       if (result.ok) {
-        await admin
+        /* CHECKED NOW. An unchecked write that failed left a post that had
+           gone out sitting at 'publishing', and the claim hands such a row
+           back five minutes later -- which, for Telegram, was a second send.
+           publishOnce now stops that send; this makes the failure visible. */
+        const { error: markErr } = await admin
           .from('social_posts')
           .update({
             status: 'published',
             platform_post_id: result.postId,
             provider: result.provider,
             payload: result.payload,
-            published_at: new Date().toISOString(),
+            published_at: result.alreadySent && typeof result.payload.already_sent_at === 'string'
+              ? result.payload.already_sent_at
+              : new Date().toISOString(),
             failure_reason: null,
           })
           .eq('id', post.id);
+        if (markErr) console.error('social-publish: ' + post.id + ' went out but was not marked published: ' + markErr.message);
         published++;
         /* A Telegram post gets its Story kit: see sendStoryKit. Never allowed
-           to fail the post it follows -- the post is already out. */
-        if (!rehearsal && post.platform === 'telegram') {
+           to fail the post it follows -- the post is already out. Not again
+           for a post that went out on an earlier run. */
+        if (!rehearsal && post.platform === 'telegram' && !result.alreadySent) {
           await sendStoryKit(admin, post)
             .catch((e) => console.error('social-publish: story kit failed for ' + post.id, e));
         }
@@ -1564,8 +1687,9 @@ Deno.serve(async (req: Request) => {
       }
 
       // attempts was incremented by the claim, so this row has had `attempts`
-      // tries including the one that just failed.
-      const exhausted = post.attempts >= post.max_attempts;
+      // tries including the one that just failed. A send that may already be
+      // up is not retried at all: see publishOnce.
+      const exhausted = post.attempts >= post.max_attempts || Boolean(result.mayHaveSent);
       // Widening backoff: 1 min, then 5, then 25. A provider that is down
       // stays down for a while.
       const delayMinutes = Math.pow(5, Math.max(0, post.attempts - 1));
