@@ -324,6 +324,136 @@ async function readPageCta(
   }
 }
 
+type PageRow = {
+  id: string; name: string; access_token?: string;
+  instagram_business_account?: { id: string; username?: string };
+};
+
+/* The three permissions whose grant names Pages. pages_show_list is the one
+   that matters; the other two are read as well because a grant can list a
+   Page under one and not another, and every Page named anywhere is worth
+   trying before telling somebody that none was shared. */
+const GRANT_PAGE_SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement'];
+
+/** What the grant itself says about Pages, and the Pages it names, read one
+ *  by one. Only counts and Graph error codes leave this function besides the
+ *  Page rows themselves; never the token, never the person's id. */
+type GrantRead = {
+  read: boolean;                    // debug_token answered with granular_scopes
+  token_type: string | null;        // USER or SYSTEM_USER, as debug_token says
+  targets: Record<string, number | 'untargeted' | 'absent'>;
+  ids: number;                      // distinct Page ids named across those scopes
+  readable: number;                 // of those, how many answered a read
+  read_errors: Record<string, number>;  // Graph error code -> how many Pages gave it
+  pages: PageRow[];
+};
+
+/**
+ * THE PAGES FACEBOOK GRANTED, WHEN /me/accounts WILL NOT LIST THEM.
+ *
+ * Under Login for Business the Pages a person ticks in the dialog are written
+ * into the token itself, as target_ids on each Page permission
+ * (debug_token -> granular_scopes). /me/accounts is a different question --
+ * "which Pages does this person have a role on, as Facebook sees it today" --
+ * and it can come back empty while the grant plainly names Pages: on 2 Oct
+ * every permission was granted and /me/accounts returned nothing at all.
+ *
+ * So when the list is empty we ask the grant, and read each Page it names by
+ * id with the same user token. That read returns the Page token directly
+ * when the person may act for the Page, which is the only thing the chooser
+ * needs. A Page the grant names but that will not answer (deleted, or no
+ * longer theirs) is counted, not hidden: "the grant names two Pages and
+ * neither exists" is the exact signature of Pages deleted and recreated
+ * after the first connection, and it has a different fix from "nothing was
+ * ticked".
+ *
+ * The app token (id|secret) is used for debug_token only, in a query string
+ * to Meta and nowhere else. It is never logged.
+ */
+async function pagesFromGrant(
+  graphHost: string,
+  userToken: string,
+  appId: string,
+  appSecret: string,
+): Promise<GrantRead> {
+  const out: GrantRead = {
+    read: false, token_type: null, targets: {}, ids: 0, readable: 0, read_errors: {}, pages: [],
+  };
+  try {
+    const r = await fetch(
+      `${graphHost}/debug_token?input_token=${encodeURIComponent(userToken)}`
+        + `&access_token=${encodeURIComponent(appId + '|' + appSecret)}`,
+    );
+    const j = await r.json().catch(() => null);
+    const scopes = Array.isArray(j?.data?.granular_scopes)
+      ? (j.data.granular_scopes as Array<{ scope?: string; target_ids?: unknown }>)
+      : null;
+    if (!r.ok || !scopes) {
+      console.warn('social-connect: debug_token gave no granular_scopes (' + r.status
+        + (j?.error?.code ? ', code ' + j.error.code : '') + ')');
+      return out;
+    }
+    out.read = true;
+    /* Which kind of token the configuration issues. Synapse is written for a
+       USER token; a configuration set to issue system-user tokens asks for a
+       business portfolio in the dialog and offers only Pages inside it,
+       which a Page created on a personal profile never is. */
+    out.token_type = typeof j.data.type === 'string' ? j.data.type.slice(0, 20) : null;
+
+    const ids = new Set<string>();
+    for (const s of GRANT_PAGE_SCOPES) {
+      const row = scopes.find((g) => g?.scope === s);
+      /* Three different answers. Absent: the permission is not in the grant.
+         Untargeted: granted with no Page list, which names nothing we can
+         read. A number: that many Pages named, possibly zero. */
+      if (!row) { out.targets[s] = 'absent'; continue; }
+      if (!Array.isArray(row.target_ids)) { out.targets[s] = 'untargeted'; continue; }
+      out.targets[s] = row.target_ids.length;
+      for (const id of row.target_ids) {
+        if (/^\d+$/.test(String(id))) ids.add(String(id));
+      }
+    }
+    out.ids = ids.size;
+
+    /* Read every Page named by the grant: a valid Page after the first 25
+       still needs to reach the chooser, and stale_pages requires checking all
+       named Pages. Keep concurrency bounded so a large grant does not fan out
+       an unbounded number of Graph requests at once. */
+    const pageIds = [...ids];
+    const reads: Array<PageRow | null> = [];
+    for (let i = 0; i < pageIds.length; i += 25) {
+      const batch = await Promise.all(pageIds.slice(i, i + 25).map(async (id) => {
+        try {
+          const pr = await fetch(
+            `${graphHost}/${id}?fields=id,name,access_token,instagram_business_account{id,username}`
+              + `&access_token=${encodeURIComponent(userToken)}`,
+          );
+          const p = await pr.json().catch(() => null);
+          if (!pr.ok || !p?.id) {
+            const code = String(p?.error?.code ?? pr.status);
+            out.read_errors[code] = (out.read_errors[code] ?? 0) + 1;
+            return null;
+          }
+          return p as PageRow;
+        } catch {
+          out.read_errors.network = (out.read_errors.network ?? 0) + 1;
+          return null;
+        }
+      }));
+      reads.push(...batch);
+    }
+    out.pages = reads.filter((p): p is PageRow => p !== null);
+    out.readable = out.pages.length;
+  } catch (err) {
+    console.warn('social-connect: reading the grant threw: '
+      + (err instanceof Error ? err.message : String(err)));
+  }
+  console.log('social-connect: grant names ' + out.ids + ' Page(s), ' + out.readable
+    + ' readable; targets ' + JSON.stringify(out.targets)
+    + (Object.keys(out.read_errors).length ? '; read errors ' + JSON.stringify(out.read_errors) : ''));
+  return out;
+}
+
 async function finishFacebook(
   code: string,
   claims: Record<string, unknown>,
@@ -403,9 +533,9 @@ async function finishFacebook(
   let permsKnown = false;
   if (granted.length) { grantedScopes = granted; permsKnown = true; }
   else console.warn('social-connect: could not read granted permissions; recording the requested list');
+  const declined = permRows.filter((p) => p.status !== 'granted').map((p) => p.permission);
   console.log('social-connect: granted = [' + grantedScopes.join(', ')
-    + '] declined = [' + permRows.filter((p) => p.status !== 'granted')
-        .map((p) => p.permission).join(', ') + ']');
+    + '] declined = [' + declined.join(', ') + ']');
 
   /* Which Pages this person administers, and the token for each. */
   /* instagram_business_account comes back in the SAME call. Asking for it
@@ -419,29 +549,67 @@ async function finishFacebook(
   );
   const pages = await pagesRes.json().catch(() => ({}));
   if (!pagesRes.ok) {
-    return backToPortal('error', pages?.error?.message ?? 'Could not read your Facebook Pages.');
+    return backToPortal('error', pages?.error?.message ?? 'Could not read your Facebook Pages.', {
+      reason: 'pages_unreadable',
+      facts: {
+        where: 'facebook-pages', mode: usingConfig ? 'login-for-business' : 'classic',
+        granted: permsKnown ? grantedScopes : null, declined,
+        me_accounts_error: pages?.error?.code ?? pagesRes.status,
+      },
+    });
   }
 
-  const list = (pages.data ?? []) as Array<{
-    id: string; name: string; access_token: string;
-    instagram_business_account?: { id: string; username?: string };
-  }>;
-  const usable = list.filter((pg) => pg.access_token);
+  const listed = (pages.data ?? []) as PageRow[];
+  /* ONLY WHEN THE LIST IS EMPTY. A non-empty /me/accounts is Facebook's
+     considered answer and keeps the path it has always had; the grant is
+     asked only when that answer is nothing at all. */
+  const grant = listed.length ? null : await pagesFromGrant(G, userToken, appId, appSecret);
+  const list: PageRow[] = listed.length ? listed : (grant?.pages ?? []);
+  if (!listed.length && list.length) {
+    console.log('social-connect: /me/accounts was empty; ' + list.length
+      + ' Page(s) read from the grant instead');
+  }
+  const usable = list.filter((pg): pg is PageRow & { access_token: string } => !!pg.access_token);
   if (!usable.length) {
     /* Granting the permission without ticking a Page is the single most common
        way this flow ends with nothing connected, and Meta reports it as an
        empty list rather than an error. Say what to do about it, and say in
        the log how many came back at all -- an empty list and a list of Pages
        with no tokens are different problems wearing the same symptom. */
-    if (!list.length) {
+    if (!listed.length) {
       /* Safe to print: the list is empty, so there is no token in here. What
          it can carry is a paging cursor or a summary block, which is the
          difference between "you have no Pages" and "we were handed page 2". */
       console.error('social-connect: empty /me/accounts body = '
         + JSON.stringify(pages).slice(0, 400));
     }
-    console.error('social-connect: /me/accounts returned ' + list.length
-      + ' page(s), ' + usable.length + ' with a token');
+    console.error('social-connect: /me/accounts returned ' + listed.length
+      + ' page(s); ' + list.length + ' found in all, ' + usable.length + ' with a token');
+
+    /* WHAT FACEBOOK GAVE, WRITTEN DOWN (2026-10-02). The toast tells the
+       person what to do; this tells whoever reads social_connect_failures
+       what happened -- which permissions came back, how many Pages
+       /me/accounts listed, and how many the grant itself names and how many
+       of those could be read. Counts and permission names only: no token, no
+       Page or person id, no names. The 2 October failure arrived with the
+       message alone, and "granted everything, shared nothing" could not be
+       told apart from a grant that named two deleted Pages. */
+    const facts: Record<string, unknown> = {
+      where: 'facebook-pages',
+      mode: usingConfig ? 'login-for-business' : 'classic',
+      granted: permsKnown ? grantedScopes : null,
+      declined,
+      me_accounts: listed.length,
+      me_accounts_with_token: listed.filter((pg) => pg.access_token).length,
+      /* null, not zero, when the grant could not be read: "it names no
+         Page" and "we never saw it" are different findings. */
+      grant_read: grant ? grant.read : null,
+      token_type: grant?.read ? grant.token_type : null,
+      page_targets: grant?.read ? grant.targets : null,
+      target_pages: grant?.read ? grant.ids : null,
+      target_pages_readable: grant?.read ? grant.readable : null,
+      target_read_errors: grant && Object.keys(grant.read_errors).length ? grant.read_errors : null,
+    };
 
     /* WHICH PERMISSION, NAMED. grantedScopes was read four lines above for
        exactly this and the decision here used to ignore it -- the diagnosis
@@ -458,23 +626,48 @@ async function finishFacebook(
        this is a check of our own request against itself. */
     const absent = permsKnown ? needed.filter((p) => !grantedScopes.includes(p)) : [];
 
-    /* Where to grant them, which differs by product and is the next thing
-       likely to go wrong. Under Login for Business the CONFIGURATION decides
-       and the scope list in this file is ignored entirely, so "grant the
-       permission" means editing the configuration -- not re-running the
-       dialog more carefully, which is what the old message advised and which
-       cannot work. */
-    const whereToFix = usingConfig
-      ? 'Add them to Facebook Login for Business > Configurations > '
-        + 'configuration ' + fbConfigId + '. On this app the configuration '
-        + 'decides the permissions and the dialog ignores any list we send.'
-      : 'Add them in the Meta app under Facebook Login, then connect again.';
+    /* SHORT ENOUGH TO ARRIVE WHOLE. The detail travels in the redirect and is
+       cut at 180 characters there, so the long version of the "no Page"
+       message reached the portal as its first half -- the half about our
+       configuration -- and the half saying what to do was cut off. Each
+       message below is one sentence of what happened and one of what to do,
+       inside the limit; `reason` lets the portal say the rest in full.
 
+       Under Login for Business the CONFIGURATION decides the permissions and
+       the scope list in this file is ignored, so a missing permission is ours
+       to fix in the Meta app, not the agency's to fix by trying harder. */
     if (absent.length) {
       return backToPortal('error',
-        'Facebook did not grant ' + absent.join(' and ')
-        + ', so it reported no Pages at all rather than an error. ' + whereToFix
-        + ' (Granted: ' + (grantedScopes.join(', ') || 'nothing') + '.)');
+        'Facebook did not grant ' + absent.join(' and ') + ', so it listed no Pages. '
+        + (usingConfig
+            ? 'Synapse must add it to Login for Business configuration ' + fbConfigId + '.'
+            : 'Connect again and leave every permission on.'),
+        { reason: 'missing_permission', facts });
+    }
+
+    /* A failed direct read is not proof that a Page disappeared: Graph can
+       fail temporarily, and a network error tells us nothing about the Page.
+       Only classify the grant as stale when every named Page read returned
+       Graph's object-not-found code (100 or 803). */
+    const pageReadsConfirmMissing = grant && grant.ids > 0 && grant.readable === 0
+      && Object.keys(grant.read_errors).length > 0
+      && Object.keys(grant.read_errors).every((code) => code === '100' || code === '803');
+    if (pageReadsConfirmMissing) {
+      /* Pages deleted (or handed away) after the first connection stay in the
+         business integration's grant, and Facebook replays that grant without
+         showing its Page list again. Removing the integration on Facebook is
+         the only reset under Login for Business. */
+      return backToPortal('error',
+        'Facebook’s permission still points at Pages that no longer open (deleted?). '
+        + 'Remove Synapse in Facebook’s Business integrations, then connect again.',
+        { reason: 'stale_pages', facts });
+    }
+
+    if (grant && grant.ids > 0 && grant.readable === 0 && Object.keys(grant.read_errors).length) {
+      return backToPortal('error',
+        'Facebook named Pages, but we could not read them just now. Please try again; '
+        + 'if it keeps happening, tell Synapse.',
+        { reason: 'temporary_failure', facts });
     }
 
     /* SAY SO WHEN WE DO NOT KNOW. This is the branch that was asserting
@@ -483,36 +676,30 @@ async function finishFacebook(
        than a wrong diagnosis. */
     if (!permsKnown) {
       return backToPortal('error',
-        'Facebook shared no Page, and we could not read which permissions it '
-        + 'granted, so we cannot say which of the two happened. Try once more; '
-        + 'if it repeats, the function log has the reply from /me/permissions.');
+        'Facebook shared no Page and we could not read what it granted. '
+        + 'Please try once more; if it repeats, tell Synapse.',
+        { reason: 'unknown', facts });
     }
 
     if (list.length) {
       return backToPortal('error',
-        'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
-        + 'Reconnect and leave every permission switched on.');
+        'Facebook returned ' + list.length + ' Page(s) but no posting token. '
+        + 'Connect again with every permission on; you need full control of the Page.',
+        { reason: 'no_token', facts });
     }
 
-    /* Permissions read, permissions present, no Page. Under Login for
-       Business that points at the ASSETS rather than the permissions: a
-       configuration names which asset types it asks for, and one that does
-       not ask for Pages never shows anybody a Page to tick. The permissions
-       are granted, the asset list is empty, and nothing is wrong anywhere.
-
-       Worth naming first, because "tick the Page you post from" is advice
-       nobody can follow when they were never asked. */
+    /* Permissions read, permissions present, no Page anywhere -- not listed
+       and not named in the grant. Either nothing was ticked, or Facebook
+       skipped its Page list because it remembered an earlier choice, or
+       (ours, under Login for Business) the configuration does not ask for
+       Pages as an asset, in which case nobody is ever shown one to tick.
+       The first two are fixed by the person and the message says how; the
+       third is in docs/meta-connect-checklist.md, and the facts row shows
+       which it was. */
     return backToPortal('error',
-      'Facebook granted the permissions but shared no Page. '
-      + (usingConfig
-          ? 'Check that configuration ' + fbConfigId + ' asks for Pages as an ASSET '
-            + '-- under Login for Business the assets are a separate list from the '
-            + 'permissions, and a configuration that does not request Pages never '
-            + 'offers one to tick. Then connect again and pick the business that '
-            + 'holds the Page. '
-          : 'Connect again and tick the Page you post from when it asks which '
-            + 'assets to share. ')
-      + 'You must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
+      'Facebook connected but shared no Page. Connect again and tick your Pages; '
+      + 'if Facebook doesn’t ask, remove Synapse in its Business integrations first.',
+      { reason: 'no_pages', facts });
   }
 
   /* ── THE AGENCY CHOOSES (2026-09-28) ─────────────────────────────────
@@ -687,7 +874,15 @@ async function memberCaller(req: Request): Promise<
 
 /** Sends the operator back to the portal with a plain-language outcome rather
  *  than leaving them on a white page owned by an edge function. */
-async function backToPortal(status: string, detail?: string): Promise<Response> {
+async function backToPortal(
+  status: string,
+  detail?: string,
+  /* reason: a short fixed word the portal can turn into full instructions,
+     since the detail is cut at 180 characters on the way. facts: what the
+     platform actually returned, for social_connect_failures only -- never
+     put in the URL. */
+  extra?: { reason?: string; facts?: Record<string, unknown> },
+): Promise<Response> {
   /* THE DEFAULT IS ABSOLUTE, AND HAS TO BE.
      This used to fall back to the RELATIVE '/app/agency.html'. A relative
      redirect issued by an edge function resolves against the function's own
@@ -724,12 +919,25 @@ async function backToPortal(status: string, detail?: string): Promise<Response> 
     const sbUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     if (sbUrl && key) {
-      const write = fetch(sbUrl + '/rest/v1/social_connect_failures', {
+      const post = (row: Record<string, unknown>) => fetch(sbUrl + '/rest/v1/social_connect_failures', {
         method: 'POST',
         headers: { apikey: key, Authorization: 'Bearer ' + key,
                    'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ status, detail: (detail ?? '').slice(0, 1000) || null }),
-      }).catch(() => null);
+        body: JSON.stringify(row),
+      });
+      const row = { status, detail: (detail ?? '').slice(0, 1000) || null };
+      const write = (async () => {
+        if (!extra?.facts) { await post(row); return; }
+        const r = await post({ ...row, facts: extra.facts });
+        if (r.ok) return;
+        await r.text().catch(() => '');
+        /* BEFORE THE facts COLUMN EXISTS (migration 20261002090000), PostgREST
+           refuses the unknown column and the whole row would be lost -- the
+           function deploys on merge, the migration only when somebody runs
+           it. So the facts ride in the detail instead, and the record
+           survives whichever lands first. */
+        await post({ ...row, detail: ((detail ?? '') + ' [facts ' + JSON.stringify(extra.facts) + ']').slice(0, 2000) });
+      })().catch(() => null);
       await Promise.race([write, new Promise((r) => setTimeout(r, 1500))]);
     }
   }
@@ -737,6 +945,7 @@ async function backToPortal(status: string, detail?: string): Promise<Response> 
   const u = new URL(portal, 'https://placeholder.invalid');
   u.searchParams.set('connected', status);
   if (detail) u.searchParams.set('detail', detail.slice(0, 180));
+  if (extra?.reason) u.searchParams.set('reason', extra.reason);
   const target = portal.startsWith('http') ? u.toString() : u.pathname + u.search;
   return new Response(null, { status: 302, headers: { ...corsHeaders, Location: target } });
 }
@@ -1711,11 +1920,15 @@ Deno.serve(async (req: Request) => {
          of that loop from inside the product: the dialog stops asking, and
          the error looks identical on every attempt.
 
-          makes it re-ask rather than replay. On a first
-         connect it changes nothing, and on every later one it is the
-         difference between a recoverable mistake and a dead end. Facebook is
-         a rare enough thing to connect that showing the picker each time
-         costs nothing worth keeping. */
+         auth_type=rerequest makes classic Login re-ask rather than replay.
+         It does NOT do that under Login for Business, which is this app: a
+         configuration's remembered grant is replayed regardless, so a person
+         who granted no Page -- or Pages since deleted -- gets the same empty
+         answer on every attempt. The only reset there is on Facebook's side:
+         remove the app under Settings > Business integrations, then connect
+         again. The portal says so whenever the answer comes back empty
+         (reason no_pages / stale_pages). Left on because it still helps in
+         classic mode and costs nothing in either. */
       if (platform === 'facebook') auth.searchParams.set('auth_type', 'rerequest');
 
       auth.searchParams.set('state', state);
@@ -1763,8 +1976,31 @@ Deno.serve(async (req: Request) => {
     const state = url.searchParams.get('state');
 
     // The person declined, or Meta refused. Both are ordinary outcomes.
+    /* error_reason is kept with the description. "Permissions error" is all
+       Facebook's description says on 27 Sept's two cancellations, and it says
+       the same whether the window was closed, Cancel was pressed, or Meta
+       refused for its own reasons; error_reason (user_denied, ...) is the
+       part that tells them apart. Meta's own fixed words, nothing about the
+       person. */
     const denied = url.searchParams.get('error');
-    if (denied) return backToPortal('cancelled', url.searchParams.get('error_description') ?? denied);
+    if (denied) {
+      const why = (url.searchParams.get('error_reason') ?? '').slice(0, 40);
+      const said = url.searchParams.get('error_description') ?? denied;
+      /* Which dialog, from our own signed state, which Meta hands back on a
+         refusal too. Instagram's login says user_denied in the same words,
+         and the portal's answer to it is a "Connect Facebook again" button. */
+      const from = state ? (await readState(state))?.platform : null;
+      return backToPortal('cancelled', said + (why ? ' (' + why + ')' : ''), {
+        reason: why === 'user_denied' && from === 'facebook' ? 'user_denied' : undefined,
+        facts: {
+          where: 'dialog',
+          platform: typeof from === 'string' ? from : null,
+          error: denied.slice(0, 60),
+          error_code: (url.searchParams.get('error_code') ?? '').slice(0, 12) || null,
+          error_reason: why || null,
+        },
+      });
+    }
 
     if (!code || !state) return json({ error: 'This endpoint expects an OAuth redirect from Meta.' }, 400);
 
