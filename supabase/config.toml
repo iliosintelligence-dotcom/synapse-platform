@@ -120,3 +120,7 @@ verify_jwt = true
 # its sibling files to travel with it.
 [functions.admin-actions]
 verify_jwt = true
+
+# Reads an agent's description into the listing form's fields. Members only.
+[functions.listing-extract]
+verify_jwt = true
