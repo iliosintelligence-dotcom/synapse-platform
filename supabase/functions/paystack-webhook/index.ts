@@ -16,6 +16,17 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
 Deno.serve(async (req: Request) => {
   let signatureVerified = false;
   if (req.method !== 'POST') return new Response('ok');
@@ -37,7 +48,7 @@ Deno.serve(async (req: Request) => {
     if (event.event === 'charge.success' && reference) {
       const url = Deno.env.get('SUPABASE_URL') ?? '';
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-      const admin = createClient(url, serviceKey);
+      const admin = createDbClient(url, serviceKey);
       await activatePayment(admin, reference, paystackKey);
     }
 
@@ -73,7 +84,7 @@ async function validSignature(rawBody: string, signature: string, secret: string
  *  self-contained by convention (see create-lead, social-generate) rather
  *  than reaching for a shared-lib abstraction for one reused function. */
 async function activatePayment(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   reference: string,
   paystackKey: string,
 ): Promise<void> {
@@ -130,23 +141,14 @@ function rpcMissing(e: { message?: string; code?: string } | null): boolean {
 }
 
 async function legacyActivate(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   reference: string,
   amount: number | undefined,
   currency: string | undefined,
 ): Promise<{ ok: boolean; tier?: string; missing?: boolean }> {
-  // The generated Database type predates the billing migration, so keep the
-  // dynamic table/RPC typing confined to this migration-compatibility path.
-  const legacyAdmin = admin as unknown as {
-    from: (table: 'subscription_payments') => any;
-    rpc: (
-      name: 'activate_subscription',
-      args: { p_agency_id: string; p_plan_tier: string },
-    ) => Promise<{ error: { message: string } | null }>;
-  };
   // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
   // status='pending' and return a row, so activation cannot double-apply.
-  const { data: updated } = await legacyAdmin
+  const { data: updated } = await admin
     .from('subscription_payments')
     .update({ status: 'success', verified_at: new Date().toISOString() })
     .eq('paystack_reference', reference)
@@ -156,7 +158,7 @@ async function legacyActivate(
     .select('agency_id, plan_tier')
     .maybeSingle();
   if (updated) {
-    const { error: activateError } = await legacyAdmin.rpc('activate_subscription', {
+    const { error: activateError } = await admin.rpc('activate_subscription', {
       p_agency_id: updated.agency_id,
       p_plan_tier: updated.plan_tier,
     });
@@ -166,7 +168,7 @@ async function legacyActivate(
          same end state the new RPC's transaction rolls back to -- and fail,
          so the caller (or Paystack's webhook retry) tries the whole thing
          again. */
-      await legacyAdmin
+      await admin
         .from('subscription_payments')
         .update({ status: 'pending', verified_at: null })
         .eq('paystack_reference', reference)
@@ -176,7 +178,7 @@ async function legacyActivate(
     return { ok: true, tier: updated.plan_tier as string };
   }
   // Already activated by the other path (webhook or client verify).
-  const { data: already } = await legacyAdmin
+  const { data: already } = await admin
     .from('subscription_payments')
     .select('plan_tier, status')
     .eq('paystack_reference', reference)

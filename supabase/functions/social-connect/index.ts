@@ -43,6 +43,23 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
+function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return copy;
+}
+
 /* CORS is inlined rather than imported from _shared. This function is deployed
    as a single file, and social-publish already shipped with an import path
    that did not exist in the repo -- it only worked because the helper was
@@ -173,7 +190,7 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
   const ok = await crypto.subtle.verify(
     'HMAC',
     await stateKey(),
-    unb64url(state.slice(dot + 1)),
+    asArrayBuffer(unb64url(state.slice(dot + 1))),
     new TextEncoder().encode(body),
   );
   if (!ok) return null;
@@ -238,7 +255,7 @@ async function finishTikTok(
   if (!openId) return backToPortal('error', 'TikTok did not say which account this is. Please try again.');
   const name = String(user.display_name ?? '').trim() || 'TikTok account';
 
-  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const admin = createDbClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
   const { error } = await admin.rpc('connect_social_account', {
     p_agency_id: claims.agency_id as string,
     p_platform: 'tiktok',
@@ -712,7 +729,7 @@ async function finishFacebook(
      social_connect_picks, tokens in the vault -- and the portal asks which of
      these Pages belong to THIS agency. connectFacebookPages connects only the
      ones ticked (action=facebook-pick). */
-  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const admin = createDbClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
   const tokens: Record<string, string> = {};
   const shared = usable.map((pg) => {
     tokens[pg.id] = pg.access_token;
@@ -745,7 +762,7 @@ type SharedPage = { id: string; name: string; ig_id: string | null; ig_username:
  *  owns. Moved out of finishFacebook unchanged in substance; it now runs for
  *  the chosen Pages only. */
 async function connectFacebookPages(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   agencyId: string,
   profileId: string,
   pages: SharedPage[],
@@ -825,7 +842,7 @@ async function connectFacebookPages(
 
 /** Which agency, if any, already holds each of these Facebook Pages. */
 async function pageOwners(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   pageIds: string[],
 ): Promise<Record<string, { agencyId: string; agencyName: string }>> {
   const out: Record<string, { agencyId: string; agencyName: string }> = {};
@@ -846,16 +863,16 @@ async function pageOwners(
 
 /** The signed-in member asking, and their agency. */
 async function memberCaller(req: Request): Promise<
-  { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> {
+  { userId: string; agencyId: string; admin: DbClient } | Response> {
   const authHeader = req.headers.get('Authorization') ?? '';
   if (!authHeader) return json({ error: 'Not authenticated' }, 401);
   const host = Deno.env.get('SUPABASE_URL') ?? '';
-  const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+  const asUser = createDbClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
     global: { headers: { Authorization: authHeader } },
   });
   const { data: { user } } = await asUser.auth.getUser();
   if (!user) return json({ error: 'Not authenticated' }, 401);
-  const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const admin = createDbClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
   const { data: membership } = await admin
     .from('agency_members')
     .select('agency_id, role')
@@ -1116,7 +1133,7 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
    answer without it. */
 async function settingText(key: string): Promise<string> {
   try {
-    const admin = createClient(
+    const admin = createDbClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
     );
@@ -1398,7 +1415,7 @@ Deno.serve(async (req: Request) => {
        The link, link-start and channels actions are about the CALLER, so
        they share one answer to "who, and in which agency". */
     const telegramCaller = async (): Promise<
-      { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> => {
+      { userId: string; agencyId: string; admin: DbClient } | Response> => {
       if (!tgBotToken) {
         return json({ error: 'Telegram is not configured on this project yet. '
           + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
@@ -1406,12 +1423,12 @@ Deno.serve(async (req: Request) => {
       const authHeader = req.headers.get('Authorization') ?? '';
       if (!authHeader) return json({ error: 'Not authenticated' }, 401);
       const host = Deno.env.get('SUPABASE_URL') ?? '';
-      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+      const asUser = createDbClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: { user } } = await asUser.auth.getUser();
       if (!user) return json({ error: 'Not authenticated' }, 401);
-      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const admin = createDbClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
         .select('agency_id, role')
@@ -1571,13 +1588,13 @@ Deno.serve(async (req: Request) => {
          here is the same scope mistake that broke Generate captions this
          morning -- caught by deno check this time instead of by a user. */
       const supaHost = Deno.env.get('SUPABASE_URL') ?? '';
-      const anon = createClient(supaHost, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+      const anon = createDbClient(supaHost, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: { user } } = await anon.auth.getUser();
       if (!user) return json({ error: 'Not authenticated' }, 401);
 
-      const admin = createClient(supaHost, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const admin = createDbClient(supaHost, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
         .select('agency_id, role')
@@ -1719,12 +1736,12 @@ Deno.serve(async (req: Request) => {
       const authHeader = req.headers.get('Authorization');
       if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
       const host = Deno.env.get('SUPABASE_URL') ?? '';
-      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+      const asUser = createDbClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: who } = await asUser.auth.getUser();
       if (!who.user) return json({ error: 'Not authenticated' }, 401);
-      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const admin = createDbClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
         .select('agency_id, role')
@@ -1826,7 +1843,7 @@ Deno.serve(async (req: Request) => {
       if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
 
       const supaUrl = Deno.env.get('SUPABASE_URL') ?? '';
-      const userClient = createClient(supaUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+      const userClient = createDbClient(supaUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: userData } = await userClient.auth.getUser();
@@ -1847,7 +1864,7 @@ Deno.serve(async (req: Request) => {
 
          Same three roles queue_social_post accepts, and connected_by records
          who did it. */
-      const admin = createClient(supaUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const admin = createDbClient(supaUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
         .select('agency_id, role')
@@ -2078,7 +2095,7 @@ Deno.serve(async (req: Request) => {
        has now touched only this function and the vault. p_connected_by names
        the operator this callback is acting for: the function re-checks that
        they are an owner or admin of the agency in the signed state. */
-    const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    const admin = createDbClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
     const { error: connErr } = await admin.rpc('connect_social_account', {
       p_agency_id: claims.agency_id as string,
       p_platform: 'instagram',

@@ -36,6 +36,17 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { isSupportedPushEndpoint } from '../_shared/push-endpoint.ts';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -91,9 +102,16 @@ async function vapidAuth(endpoint: string, subject: string, privB64: string, pub
    Written out rather than pulled from a library: this runs on an edge
    runtime where a Node-targeted push library tends to fail on `crypto`, and
    the whole scheme is ~60 lines of WebCrypto. */
+function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return copy;
+}
 const hkdf = async (salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, len: number) => {
-  const k = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
-  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, k, len * 8));
+  const k = await crypto.subtle.importKey('raw', asArrayBuffer(ikm), 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({
+    name: 'HKDF', hash: 'SHA-256', salt: asArrayBuffer(salt), info: asArrayBuffer(info),
+  }, k, len * 8));
 };
 const concat = (...a: Uint8Array[]) => {
   const out = new Uint8Array(a.reduce((n, x) => n + x.length, 0));
@@ -107,7 +125,9 @@ async function encryptPayload(plaintext: string, p256dhB64: string, authB64: str
 
   const local = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
   const localPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', local.publicKey));
-  const clientKey = await crypto.subtle.importKey('raw', clientPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const clientKey = await crypto.subtle.importKey(
+    'raw', asArrayBuffer(clientPub), { name: 'ECDH', namedCurve: 'P-256' }, false, [],
+  );
   const shared = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: clientKey }, local.privateKey, 256));
 
   const enc = new TextEncoder();
@@ -163,7 +183,7 @@ Deno.serve(async (req: Request) => {
   try {
     const url = Deno.env.get('SUPABASE_URL')!;
     const svc = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const db = createClient(url, svc, { auth: { persistSession: false } });
+    const db = createDbClient(url, svc, { auth: { persistSession: false } });
 
     const body = await req.json().catch(() => ({})) as { lat?: number; lon?: number; visitorId?: string };
     const lat = Number(body.lat), lon = Number(body.lon);

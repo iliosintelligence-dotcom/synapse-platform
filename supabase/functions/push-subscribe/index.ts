@@ -21,6 +21,17 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { isSupportedPushEndpoint } from '../_shared/push-endpoint.ts';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -34,7 +45,7 @@ const DEAL_TYPES = ['rent', 'sale', 'shortlet'];
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
-    const db = createClient(
+    const db = createDbClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
       { auth: { persistSession: false } },
@@ -158,7 +169,7 @@ Deno.serve(async (req: Request) => {
        have resumed sending the moment a position was reported again. */
     if (action === 'disable') {
       const { error } = await scope(
-        db.from('geofence_watches').update({ enabled: false }) as never,
+        db.from('geofence_watches').update({ enabled: false }),
       );
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true });
