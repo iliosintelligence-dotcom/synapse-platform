@@ -111,6 +111,12 @@ verify_jwt = true
 [functions.geocode-listings]
 verify_jwt = true
 
+# Deletes an agency and its owner's login, with the service role. Closed:
+# only a signed-in owner may start it, and the function checks the session
+# with Auth again and the ownership in SQL on top of this.
+[functions.delete-agency]
+verify_jwt = true
+
 # Not currently deployed, and listed here precisely because of that: the day
 # somebody does deploy it, it must arrive closed. It holds the only use of the
 # service-role key in the codebase and refuses anyone whose profiles.role is
