@@ -261,8 +261,12 @@ Deno.serve(async (req: Request) => {
         const r = await sendPush(s as never, payload);
         if (r.ok) { sent++; anySent = true; continue; }
         // 404/410 mean the browser threw the subscription away. Drop it, or it
-        // is retried forever on every future position report.
-        if (r.status === 404 || r.status === 410) {
+        // is retried forever on every future position report. A row whose
+        // endpoint is not a Web Push service (stored before push-subscribe
+        // checked hosts) can never be delivered either, so it goes too; the
+        // browser registers afresh on its next visit.
+        const unsupported = 'reason' in r && r.reason === 'unsupported-push-endpoint';
+        if (r.status === 404 || r.status === 410 || unsupported) {
           await db.from('push_subscriptions').delete().eq('id', s.id);
         }
       }

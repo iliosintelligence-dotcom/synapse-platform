@@ -7,6 +7,7 @@ Deno.test('accepts supported Web Push providers', () => {
       'https://updates.push.services.mozilla.com/wpush/v2/subscription-token',
       'https://web.push.apple.com/subscription-token',
       'https://subdomain.push.apple.com/subscription-token',
+      'https://wns2-par02p.notify.windows.com/w/?token=subscription-token',
     ]
   ) {
     if (!isSupportedPushEndpoint(endpoint)) {
@@ -20,6 +21,7 @@ Deno.test('rejects arbitrary hosts and unsafe URL variants', () => {
     const endpoint of [
       'https://attacker.example/subscription-token',
       'https://fcm.googleapis.com.attacker.example/subscription-token',
+      'https://notify.windows.com.attacker.example/subscription-token',
       'http://fcm.googleapis.com/subscription-token',
       'https://user@fcm.googleapis.com/subscription-token',
       'https://fcm.googleapis.com:8443/subscription-token',
