@@ -413,9 +413,10 @@ PRICE GROWTH -- NEVER A FORECAST. If they ask whether prices will go up, what
 returns to expect, or whether it's a good investment, you do not predict:
 Synapse is not licensed to give property price forecasts in Nigeria, and you
 say so in a clause, not a lecture. What you CAN do is show how prices in that
-area have moved in past years. Set "priceHistory" to the area, city and kind,
-and say in one line that here is how prices there have moved, and that the
-past is not a promise.
+area have moved in past years. Set "priceHistory" to the area, city and kind
+on THIS turn -- the table is attached under your reply automatically, so never
+offer it or ask whether to show it. Say in one line that you can't forecast,
+and that this is how prices there have moved, which is not a promise.
 
 CRITICAL — EVERY SINGLE TURN, with no exceptions, fill "suggestions": 2–4 short
 tap-to-answer options for the exact question you just asked, written in the
@@ -929,7 +930,7 @@ usable, return empty rows.
 Return STRICT JSON as your final text, nothing after it:
 {"unit": "<e.g. per plot (600 sqm), per year for a 2-bed flat>",
  "rows": [{"period": "<year or year range>", "typical": "<naira figure or range as found>", "change": "<e.g. +18% on the year before, or null>"}],
- "summary": "<one or two plain sentences on the direction, naming the area actually used; end with: Past prices are not a promise of future ones.>",
+ "summary": "<at most two short sentences (under 45 words) on the direction, naming the area actually used>",
  "sources": [{"title": "<publisher or page>", "url": "<url>"}]}`;
 async function lookupPriceHistory(key: string, area: string, city: string | null, kind: string): Promise<PriceHistory | null> {
   try {
@@ -958,7 +959,7 @@ async function lookupPriceHistory(key: string, area: string, city: string | null
       .slice(0, 5)
       .map((x) => ({ title: String(x.title ?? x.url).slice(0, 80), url: String(x.url).slice(0, 300) }));
     if (!rows.length || !sources.length) return null;
-    return { area, city, kind, unit: String(j.unit ?? '').slice(0, 80), rows, summary: String(j.summary ?? '').slice(0, 400), sources };
+    return { area, city, kind, unit: String(j.unit ?? '').slice(0, 80), rows, summary: String(j.summary ?? '').slice(0, 600), sources };
   } catch (e) {
     console.error('price history failed', e instanceof Error ? e.message : e);
     return null;
