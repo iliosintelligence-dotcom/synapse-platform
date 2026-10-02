@@ -1,0 +1,179 @@
+# Read or set the two Supabase Auth URL settings that decide where emailed
+# links land: the Site URL and the Redirect URL allow-list.
+#
+# WHY THIS EXISTS. A buyer asked for a password reset and the link opened
+# localhost. The app was not at fault -- auth.js already refuses to email a
+# loopback address and asks for https://www.synapsecore.dev/app/signin.html.
+# But Supabase honours `redirectTo` only when it is on the project's allow-list;
+# otherwise it silently falls back to the Site URL, which ships as
+# http://localhost:3000. Every emailed link -- reset, confirmation, invite --
+# goes through the same fallback.
+#
+# These are dashboard settings, and dashboard settings drift without anybody
+# noticing. The intended values now live in supabase/auth-urls.json, so the
+# answer to "what should this be?" is in the repository and this workflow
+# puts it there.
+#
+# THE RESPONSE IS NEVER PRINTED WHOLE. GET /config/auth returns the entire auth
+# configuration, including SMTP and OAuth provider secrets. Only site_url and
+# uri_allow_list are ever extracted; the body is written to a runner-local temp
+# file, read by jq, and deleted.
+#
+# `show` changes nothing. `apply` MERGES the allow-list -- existing entries
+# (localhost for development, anything added by hand) are kept, and only the
+# fallback stops being localhost.
+
+name: Auth URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'show (read only) · apply (set from supabase/auth-urls.json) · errors (recent failed auth requests, no personal data) · connect-log (what social-connect logged, 48h)'
+        required: true
+        default: show
+        type: choice
+        options: [show, apply, errors, connect-log]
+
+concurrency:
+  group: auth-urls
+  cancel-in-progress: false
+
+jobs:
+  auth-urls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ${{ inputs.mode }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          REF: bhrhejpekmhbhwryjhgk
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set."; exit 1
+          fi
+          API="https://api.supabase.com/v1/projects/$REF/config/auth"
+          TMP="$(mktemp)"
+          trap 'rm -f "$TMP"' EXIT
+
+          # Only the two fields ever reach the log. An error body is printed,
+          # because it is an error message rather than configuration.
+          call() {
+            local code
+            code=$(curl -sS -o "$TMP" -w '%{http_code}' "$@")
+            if [ "${code:0:1}" != "2" ]; then
+              echo "::error::Management API returned $code"; cat "$TMP"; exit 1
+            fi
+          }
+
+          # ── errors: what the auth server actually said ──────────────────
+          # Built after the reset page showed its catch-all "Something went
+          # wrong": the page had swallowed the real message. This reads the
+          # auth server's own log of failed requests for the last 24 hours.
+          #
+          # NO PERSONAL DATA. Auth log lines can carry the email, IP and
+          # referrer; only method, path, status, error code and message are
+          # ever printed.
+          # ── connect-log: what social-connect said, last 48 hours ───────
+          # Every failed social connection is logged by the function as
+          # "social-connect failed: <reason>" (backToPortal), and the portal
+          # only flashes it in a toast. This reads those lines back. Only the
+          # message text is printed, and only lines from social-connect.
+          if [ "$MODE" = "connect-log" ]; then
+            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
+            START=$(date -u -d '-48 hours' +%Y-%m-%dT%H:%M:%SZ)
+            END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS"               --data-urlencode "sql=select timestamp, event_message from logs where regexp_contains(event_message, 'social-connect') order by timestamp desc limit 80"               --data-urlencode "iso_timestamp_start=$START"               --data-urlencode "iso_timestamp_end=$END"
+            jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
+            jq -r '(.result // [])[] | "\((.timestamp / 1000000 | floor | todate))  \(.event_message | gsub("[[:space:]]+"; " ") | .[0:400])"' "$TMP"
+            exit 0
+          fi
+
+          if [ "$MODE" = "errors" ]; then
+            LOGS="https://api.supabase.com/v1/projects/$REF/analytics/endpoints/logs"
+            START=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+            END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            call --get -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$LOGS" \
+              --data-urlencode "sql=SELECT * FROM logs ORDER BY timestamp DESC LIMIT 300" \
+              --data-urlencode "iso_timestamp_start=$START" \
+              --data-urlencode "iso_timestamp_end=$END"
+            # Shape first, as field NAMES only -- the filter below is useless
+            # if the rows are not shaped the way it assumes, and it should say
+            # so rather than print nothing and look like "no errors".
+            echo "── shape ──"
+            # A query error comes back as 200 with an `error` key, not as a
+            # failed request -- so it is printed, or a rejected query reads
+            # exactly like an empty log.
+            jq -r 'if .error then "QUERY ERROR: \(.error | tostring)" else empty end' "$TMP"
+            jq -r '"rows: \((.result // []) | length)",
+                   "sources: \([(.result // [])[] | .source_name] | unique | join(", "))",
+                   "top-level keys: \(keys | join(", "))",
+                   "row keys: \(((.result // [])[0] // {}) | keys | join(", "))",
+                   "event keys: \([(.result // [])[:50][] | (.event_message | fromjson? // {}) | keys[]] | unique | join(", "))",
+                   "rows mentioning /user: \([(.result // [])[] | select((.event_message // "") | test("/user"))] | length)",
+                   "rows mentioning /verify: \([(.result // [])[] | select((.event_message // "") | test("/verify"))] | length)"' "$TMP"
+            echo "── failed or erroring auth requests, newest first ──"
+            jq -r '
+              (.result // [])[]
+              | . as $row
+              | ($row.event_message | fromjson? // {msg: $row.event_message}) as $e
+              | select((($e.status // 0) | tonumber? // 0) >= 400 or ($e.error // $e.error_code // "") != "")
+              | [ ($row.timestamp | tostring),
+                  ($e.method // "-"), ($e.path // "-"), (($e.status // "-") | tostring),
+                  ($e.error_code // "-"), ($e.error // $e.msg // "-") ]
+              | join("  |  ")' "$TMP" | head -40
+            exit 0
+          fi
+
+          call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
+          CURRENT=$(jq '{site_url, uri_allow_list}' "$TMP")
+          echo "── current ──"; echo "$CURRENT"
+
+          # The password rules GoTrue enforces on sign-up and on a reset. Read
+          # because the reset page's own check (8 characters) must match them:
+          # a stricter server rule fails AFTER the person submits, with a
+          # message the page did not recognise. Rules, not secrets.
+          echo "── password policy ──"
+          jq '{password_min_length, password_required_characters,
+               password_hibp_enabled,
+               security_update_password_require_reauthentication,
+               mailer_otp_exp}' "$TMP"
+
+          # The reset email. Wording and a link template, not a secret. It is
+          # managed here since 2026-09-28: the default {{ .ConfirmationURL }}
+          # link finishes with a PKCE code that only the browser which asked
+          # for the reset can redeem, so a reset opened on another device (or
+          # in a mail app's own browser) landed on a plain sign-in page.
+          echo "── reset email ──"
+          jq -r '"subject: \(.mailer_subjects_recovery // "(default)")",
+                 "template: \(if (.mailer_templates_recovery_content // "") == "" then "(default)" else .mailer_templates_recovery_content end)"' "$TMP"
+
+          if [ "$MODE" = "apply" ]; then
+            SITE=$(jq -r '.site_url' supabase/auth-urls.json)
+            MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
+              ([ ($cur.uri_allow_list // "") | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ]
+                + $want[0].redirect_urls) | unique | join(",")')
+            # The reset email travels with the URLs: its link is only right if
+            # it points at a page on the allowed site that knows the token.
+            SUBJ=$(jq -r '.recovery_subject // empty' supabase/auth-urls.json)
+            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" \
+                     --rawfile tpl supabase/templates/recovery.html '
+              {site_url: $s, uri_allow_list: $u}
+              + (if $subj != "" then {mailer_subjects_recovery: $subj} else {} end)
+              + (if ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)')
+
+            call -X PATCH \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$BODY" "$API"
+
+            # Read back rather than trust the PATCH response: the proof that a
+            # setting changed is reading it after the change.
+            call -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "$API"
+            echo "── after ──"; jq '{site_url, uri_allow_list}' "$TMP"
+            jq -r '"reset subject: \(.mailer_subjects_recovery // "(default)")",
+                   "reset template: \(.mailer_templates_recovery_content // "(default)")"' "$TMP"
+          fi

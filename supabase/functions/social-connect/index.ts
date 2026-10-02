@@ -1,0 +1,1866 @@
+/**
+ * social-connect -- the OAuth flow that puts a real Meta token in Vault.
+ *
+ * WHY THIS EXISTS
+ * 0053 built `connect_social_account` and gave it to service_role only, with a
+ * comment saying it is "called by an OAuth callback running with the service
+ * role". That callback was never written, so the whole token path had no
+ * entrance: a correct, tested, unreachable function.
+ *
+ * WHAT IS NOT BLOCKED BY APPROVAL
+ * In Development Mode, Meta grants an app's own admins, developers and testers
+ * every permission the app requests WITHOUT App Review. So the owner of this
+ * app can connect their own Instagram professional account or Facebook Page and
+ * publish for real today. App Review is what lets OTHER agencies do it.
+ *
+ * ROUTES
+ *   GET  ?action=start&platform=instagram|facebook  (Authorization: user JWT)
+ *        -> { url } to send them to
+ *   GET  ?code=..&state=..  -> callback; 302 back to the portal
+ *
+ * THE STATE PARAMETER IS THE SECURITY BOUNDARY.
+ * The callback arrives from Meta with no session and no JWT -- it is a browser
+ * redirect. Whatever it says about which agency to connect is the only claim
+ * available, so it has to be one we made. `state` is HMAC-signed with a key
+ * derived from the service role secret and carries an expiry, so a
+ * connect-for-someone-else URL cannot be forged or replayed later. It also
+ * carries WHICH platform, because both products share one app and one redirect
+ * URI and Meta says nothing about which dialog the person came out of.
+ *
+ * MUST BE DEPLOYED WITH verify_jwt = false.
+ * The callback is a browser redirect and carries no JWT, so the gateway would
+ * reject it before this code ran. That does not make the function open:
+ * `?action=start` checks the Authorization header and resolves the user itself,
+ * and the callback trusts nothing except the HMAC-signed state it issued.
+ * Authentication moved into the function; it was not removed.
+ *
+ * Secrets required (set in Supabase, never in this file):
+ *   META_APP_ID, META_APP_SECRET, PORTAL_URL (optional)
+ *   META_FB_CONFIG_ID (optional) -- set this when the Meta app is on
+ *   "Facebook Login for Business" rather than classic Facebook Login. What it
+ *   changes is documented at the dialog construction in the start branch.
+ *   The redirect is NOT a secret -- see the derivation in the handler.
+ */
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+/* CORS is inlined rather than imported from _shared. This function is deployed
+   as a single file, and social-publish already shipped with an import path
+   that did not exist in the repo -- it only worked because the helper was
+   inlined at deploy time. One file with no import cannot drift that way. */
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+/** How long a start URL stays usable. Long enough to read the dialog, short
+ *  enough that a link leaked from browser history is already dead. */
+const STATE_TTL_MS = 15 * 60 * 1000;
+
+/* The permissions this app asks for, and nothing beyond them. Meta rejects
+   over-broad requests, and every extra scope is another thing to justify.
+   These are the current values for the Instagram API with Instagram Login;
+   the older `business_*` names were deprecated in January 2025. */
+/* instagram_business_manage_comments is what lets us READ the comments on
+   our own posts. Instagram has no read-only comments permission -- the manage
+   scope is the only one that returns the text -- and engagement has to come
+   back to the agency somehow or publishing is a one-way street. */
+const IG_SCOPES = ['instagram_business_basic', 'instagram_business_content_publish',
+                   'instagram_business_manage_comments'];
+
+/* Facebook Pages. A Page token is what actually posts, and `pages_show_list`
+   is what lets us discover which Pages this person administers in order to get
+   one. `pages_read_engagement` is required alongside `pages_manage_posts` --
+   Meta refuses the publish call without it, which is not obvious from the
+   error it returns. `business_management` is deliberately NOT requested: it is
+   heavily scrutinised in review and nothing here needs it. */
+/* pages_manage_metadata is here for ONE reason and it is not metadata: Meta's
+   own reference for /me/accounts says that endpoint needs a user token with
+   pages_manage_metadata AND pages_show_list. Without it the call does not
+   fail -- it returns an EMPTY LIST, which is indistinguishable from "this
+   person administers no Pages" and reads as the operator's fault.
+
+   That cost an afternoon. Every permission we asked for came back granted,
+   declined was empty, the operator ticked a Page in the dialog, and
+   /me/accounts still returned nothing, because the permission that unlocks
+   the listing was never among the ones we asked for. */
+/* instagram_basic is what makes instagram_business_account return a value
+   at all. Without it /me/accounts answers with the Page and silently omits
+   the linked Instagram account -- which reads as "no Instagram linked" and
+   is not. instagram_content_publish is what allows posting to it.
+
+   On an app using Login for Business these must ALSO be ticked in the
+   configuration: the dialog obeys the configuration and ignores this list. */
+/* instagram_manage_comments, for the same reason and with the same
+   reservation: it is the only scope that returns comment text on Instagram.
+
+   pages_manage_engagement is NOT here: it is the power to write and
+   moderate in public, and nothing here does either. Add it the day
+   something actually replies publicly, and not before.
+
+   pages_read_user_content IS here, and an earlier version of this comment
+   said it was not needed -- that Page comments were readable with
+   pages_read_engagement. Meta's permissions reference says otherwise:
+   read_engagement covers content POSTED BY THE PAGE, and read_user_content
+   covers "comments ... by users". A comment on a listing is written by a
+   user. Worse, Meta lists read_user_content as a DEPENDENCY of
+   instagram_basic, which the whole Facebook-Login Instagram path stands on.
+   Caught while writing the App Review pack, before the first connection.
+
+   A SCOPE IS GRANTED ONCE, at the moment the token is issued. Adding one
+   later does not upgrade a live token -- the agency has to disconnect and
+   connect again. That is why this is going in before the first connection
+   rather than alongside the feature that uses it. */
+/* pages_messaging is what sends a PRIVATE REPLY -- one direct message to
+   somebody who commented, carrying the listing's link. It is the only route
+   out of an Instagram caption, which never linkifies.
+
+   Not instagram_manage_messages: that belongs to the Instagram Login flow,
+   and accounts reached this way hold a PAGE token. Meta's private-reply
+   reference lists pages_messaging beside instagram_manage_comments, and the
+   Page token must carry the MESSAGING task. Production also needs Advanced
+   Access and the Human Agent feature, which is App Review -- until then
+   nothing sends, and social_reply_settings.enabled defaults to false. */
+const FB_SCOPES = ['pages_show_list', 'pages_manage_metadata',
+                   'pages_manage_posts', 'pages_read_engagement',
+                   'pages_read_user_content',
+                   'instagram_basic', 'instagram_content_publish',
+                   'instagram_manage_comments', 'pages_messaging'];
+
+const PLATFORMS = ['instagram', 'facebook'] as const;
+type Platform = typeof PLATFORMS[number];
+
+const scopesFor = (p: Platform): string[] => (p === 'facebook' ? FB_SCOPES : IG_SCOPES);
+
+/* ── signed state ─────────────────────────────────────────────────────────── */
+
+function b64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function unb64url(s: string): Uint8Array {
+  const p = s.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(p + '='.repeat((4 - (p.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+async function stateKey(): Promise<CryptoKey> {
+  /* Derived from a secret this function already has, so connecting an account
+     does not require the operator to invent and store yet another one. */
+  const material = new TextEncoder().encode(
+    'synapse.social-connect.state.v1:' + (Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''),
+  );
+  const digest = await crypto.subtle.digest('SHA-256', material);
+  return crypto.subtle.importKey('raw', digest, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+}
+
+async function signState(payload: Record<string, unknown>): Promise<string> {
+  const body = b64url(new TextEncoder().encode(JSON.stringify(payload)));
+  const sig = await crypto.subtle.sign('HMAC', await stateKey(), new TextEncoder().encode(body));
+  return body + '.' + b64url(new Uint8Array(sig));
+}
+
+async function readState(state: string): Promise<Record<string, unknown> | null> {
+  const dot = state.lastIndexOf('.');
+  if (dot < 1) return null;
+  const body = state.slice(0, dot);
+  const ok = await crypto.subtle.verify(
+    'HMAC',
+    await stateKey(),
+    unb64url(state.slice(dot + 1)),
+    new TextEncoder().encode(body),
+  );
+  if (!ok) return null;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(unb64url(body)));
+    if (typeof parsed.exp !== 'number' || Date.now() > parsed.exp) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/* ── TikTok ─────────────────────────────────────────────────────────────
+   Login Kit for Web, OAuth v2. Its own app and credentials (TIKTOK_CLIENT_KEY
+   / TIKTOK_CLIENT_SECRET), its own dialog on tiktok.com, and the same redirect
+   as Meta -- this function -- which TikTok requires to be registered exactly,
+   static and without parameters.
+
+   video.upload, not video.publish. Posts are SENT TO THE AGENT'S TIKTOK
+   INBOX (post_mode MEDIA_UPLOAD) and finished in the app, where they add a
+   sound -- which on TikTok is most of what decides reach, and which the API
+   cannot choose well. Direct posting needs video.publish, TikTok's audit, and
+   a compliance screen in our composer; it can come later without changing
+   anything stored here. */
+const TIKTOK_SCOPES = ['user.info.basic', 'video.upload'];
+
+async function finishTikTok(
+  code: string,
+  claims: Record<string, unknown>,
+  key: string,
+  secret: string,
+  redirectUri: string,
+): Promise<Response> {
+  const tr = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_key: key, client_secret: secret, code,
+      grant_type: 'authorization_code', redirect_uri: redirectUri,
+    }),
+  });
+  const tok = await tr.json().catch(() => ({}));
+  if (!tr.ok || !tok.access_token) {
+    console.error('social-connect: tiktok token exchange rejected -- '
+      + (tok.error ?? tr.status) + ' ' + (tok.error_description ?? ''));
+    return backToPortal('error', 'TikTok would not issue a token'
+      + (tok.error_description ? ': ' + tok.error_description : '.'));
+  }
+  const granted = String(tok.scope ?? '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  if (!granted.includes('video.upload')) {
+    return backToPortal('error', 'TikTok connected without permission to send posts. '
+      + 'Connect again and allow "Upload content to TikTok".');
+  }
+
+  /* Who, in TikTok's own words: display_name is what the agent recognises. */
+  const ur = await fetch('https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url', {
+    headers: { Authorization: 'Bearer ' + tok.access_token },
+  });
+  const u = await ur.json().catch(() => ({}));
+  const user = (u && u.data && u.data.user) || {};
+  const openId = String(user.open_id ?? tok.open_id ?? '');
+  if (!openId) return backToPortal('error', 'TikTok did not say which account this is. Please try again.');
+  const name = String(user.display_name ?? '').trim() || 'TikTok account';
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { error } = await admin.rpc('connect_social_account', {
+    p_agency_id: claims.agency_id as string,
+    p_platform: 'tiktok',
+    p_account_id: openId,
+    p_username: name,
+    p_access_token: tok.access_token,
+    p_refresh_token: tok.refresh_token ?? null,
+    p_expires_at: new Date(Date.now() + (Number(tok.expires_in) || 86400) * 1000).toISOString(),
+    p_scopes: granted,
+    p_connected_by: claims.profile_id as string,
+  });
+  if (error) {
+    console.error('social-connect: could not save TikTok account: ' + error.message);
+    return backToPortal('error', 'TikTok connected, but the account could not be saved: ' + error.message);
+  }
+  console.log('social-connect: tiktok ' + openId + ' connected for agency ' + claims.agency_id);
+  return backToPortal('tiktok', name);
+}
+
+/**
+ * Facebook Pages. Three exchanges, and the third is the one that matters:
+ * posting to a Page is done with a PAGE token, not the user's own. A Page
+ * token derived from a long-lived user token does not expire on a timer, which
+ * is why no expiry is stored for it -- inventing a 60-day one would make the
+ * portal show "session expired" on a credential that still works.
+ */
+/**
+ * The action button Meta renders under every post on this Page.
+ *
+ * READ ONLY, and not by choice: the endpoint that used to set it is
+ * deprecated. We report it so the agency can change it by hand, because the
+ * alternative is that the most prominent control on their own posts stays
+ * invisible to the product trying to measure those posts.
+ *
+ * Three outcomes, kept distinct:
+ *   null                  we could not read it. Nothing is written, and the
+ *                         portal says nothing rather than inventing an answer.
+ *   { type: 'NONE' }      read, and the Page has no button. A real answer.
+ *   { type: 'CALL_NOW' }  read, and here is what it is.
+ *
+ * The host is a parameter rather than a module constant so this cannot drift
+ * from the version finishFacebook addresses -- a button read at one API
+ * version and a Page connected at another is the sort of mismatch that is
+ * invisible until it matters.
+ */
+async function readPageCta(
+  graphHost: string,
+  pageId: string,
+  pageToken: string,
+): Promise<{ type: string; url: string | null } | null> {
+  try {
+    const r = await fetch(
+      `${graphHost}/${encodeURIComponent(pageId)}/call_to_actions`
+      + `?access_token=${encodeURIComponent(pageToken)}`,
+    );
+    if (!r.ok) {
+      /* Commonly a permissions answer rather than a broken one, and the
+         connection itself is unaffected either way. Logged, not raised. */
+      console.warn('social-connect: could not read the Page button for '
+        + pageId + ' (' + r.status + ')');
+      return null;
+    }
+    const j = await r.json().catch(() => null);
+    const rows = Array.isArray(j?.data) ? j.data : null;
+    if (!rows) return null;
+    if (!rows.length) return { type: 'NONE', url: null };
+
+    const first = rows[0] as Record<string, unknown>;
+    return {
+      type: typeof first.type === 'string' ? first.type : 'UNKNOWN',
+      /* web_url first: it is the one a desktop reader follows and the one
+         worth showing back to an agency. The app-specific URLs are the same
+         destination in a different wrapper. */
+      url: (typeof first.web_url === 'string' && first.web_url)
+        || (typeof first.android_url === 'string' && first.android_url)
+        || (typeof first.iphone_url === 'string' && first.iphone_url)
+        || null,
+    };
+  } catch (err) {
+    console.warn('social-connect: Page button read threw for ' + pageId + ': '
+      + (err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+}
+
+async function finishFacebook(
+  code: string,
+  claims: Record<string, unknown>,
+  appId: string,
+  appSecret: string,
+  redirectUri: string,
+  /* PASSED, NOT REACHED FOR. This function is declared at the top level and
+     fbConfigId is resolved inside the request handler, so reading it here
+     would be a ReferenceError -- the same scope mistake that made Generate
+     captions report a network fault this morning and broke Post now before
+     that. Empty string means classic Facebook Login. */
+  fbConfigId: string,
+): Promise<Response> {
+  const usingConfig = !!fbConfigId;
+  const G = 'https://graph.facebook.com/v21.0';
+
+  const tokRes = await fetch(
+    `${G}/oauth/access_token?client_id=${encodeURIComponent(appId)}`
+      + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+      + `&client_secret=${encodeURIComponent(appSecret)}`
+      + `&code=${encodeURIComponent(code)}`,
+  );
+  const tok = await tokRes.json().catch(() => ({}));
+  if (!tokRes.ok || !tok.access_token) {
+    /* "Error validating client secret" is Meta saying META_APP_SECRET does not
+       belong to META_APP_ID. Neither value is ever logged -- one is a secret
+       and the other identifies it -- but their SHAPE is not sensitive, and it
+       is exactly what separates "wrong secret" from "empty secret" from "the
+       secret of a different app". Two lengths tell those apart without
+       printing either value. */
+    const why = tok?.error?.message ?? 'Facebook would not issue a token.';
+    console.error('social-connect: token exchange rejected -- ' + why
+      + ' [app_id length ' + appId.length + ', secret length ' + appSecret.length + ']');
+    return backToPortal('error', why);
+  }
+
+  /* The short-lived user token lasts about an hour. Exchanging it is what
+     makes the Page tokens derived from it long-lived too; skip this and every
+     Page token quietly dies within the hour. */
+  let userToken: string = tok.access_token;
+  const longRes = await fetch(
+    `${G}/oauth/access_token?grant_type=fb_exchange_token`
+      + `&client_id=${encodeURIComponent(appId)}`
+      + `&client_secret=${encodeURIComponent(appSecret)}`
+      + `&fb_exchange_token=${encodeURIComponent(userToken)}`,
+  );
+  const long = await longRes.json().catch(() => ({}));
+  if (longRes.ok && long.access_token) userToken = long.access_token;
+
+  /* READ THE GRANT BEFORE USING IT, not after it has already worked.
+     This sat after the Page check, so it only ever ran on the happy path --
+     which meant the one failure we were actually stuck on, /me/accounts
+     returning nothing, told us nothing about why. And the why is usually
+     right here: that endpoint returns an EMPTY LIST, not an error, when
+     pages_show_list was not granted. Same shape as ticking no Page, same
+     message, completely different fix.
+
+     Read first, log always, decide after. */
+  let grantedScopes: string[] = FB_SCOPES;
+  const permRes = await fetch(
+    `${G}/me/permissions?access_token=${encodeURIComponent(userToken)}`,
+  ).catch(() => null);
+  const perms = permRes && permRes.ok ? await permRes.json().catch(() => null) : null;
+  const permRows = (perms?.data ?? []) as Array<{ permission: string; status: string }>;
+  const granted = permRows
+    .filter((p) => p.status === 'granted')
+    .map((p) => p.permission);
+  /* WAS THE GRANT ACTUALLY READ. The fallback below is fine for what it is
+     used for -- recording a scope list on the account, where the requested
+     list is a fair stand-in -- and is poison for anything that REPORTS what
+     happened. FB_SCOPES contains every permission we ask for, so a check of
+     "did Facebook grant pages_show_list" against the fallback always answers
+     yes, and says so to the operator as though it were an observation.
+
+     One flag, so the difference between knowing and assuming survives the
+     next few lines. */
+  let permsKnown = false;
+  if (granted.length) { grantedScopes = granted; permsKnown = true; }
+  else console.warn('social-connect: could not read granted permissions; recording the requested list');
+  console.log('social-connect: granted = [' + grantedScopes.join(', ')
+    + '] declined = [' + permRows.filter((p) => p.status !== 'granted')
+        .map((p) => p.permission).join(', ') + ']');
+
+  /* Which Pages this person administers, and the token for each. */
+  /* instagram_business_account comes back in the SAME call. Asking for it
+     here rather than in a second round trip is not only cheaper -- it means
+     the Page and the Instagram account it belongs to can never be read at
+     two different moments and disagree. */
+  const pagesRes = await fetch(
+    `${G}/me/accounts?fields=id,name,access_token,`
+      + `instagram_business_account{id,username}&limit=50`
+      + `&access_token=${encodeURIComponent(userToken)}`,
+  );
+  const pages = await pagesRes.json().catch(() => ({}));
+  if (!pagesRes.ok) {
+    return backToPortal('error', pages?.error?.message ?? 'Could not read your Facebook Pages.');
+  }
+
+  const list = (pages.data ?? []) as Array<{
+    id: string; name: string; access_token: string;
+    instagram_business_account?: { id: string; username?: string };
+  }>;
+  const usable = list.filter((pg) => pg.access_token);
+  if (!usable.length) {
+    /* Granting the permission without ticking a Page is the single most common
+       way this flow ends with nothing connected, and Meta reports it as an
+       empty list rather than an error. Say what to do about it, and say in
+       the log how many came back at all -- an empty list and a list of Pages
+       with no tokens are different problems wearing the same symptom. */
+    if (!list.length) {
+      /* Safe to print: the list is empty, so there is no token in here. What
+         it can carry is a paging cursor or a summary block, which is the
+         difference between "you have no Pages" and "we were handed page 2". */
+      console.error('social-connect: empty /me/accounts body = '
+        + JSON.stringify(pages).slice(0, 400));
+    }
+    console.error('social-connect: /me/accounts returned ' + list.length
+      + ' page(s), ' + usable.length + ' with a token');
+
+    /* WHICH PERMISSION, NAMED. grantedScopes was read four lines above for
+       exactly this and the decision here used to ignore it -- the diagnosis
+       was computed, logged where nobody in the portal can reach it, and
+       thrown away.
+
+       These two are what /me/accounts needs to return anything at all.
+       pages_manage_metadata is the one that surprises people: Meta's own
+       reference requires it for this endpoint, and without it the call
+       SUCCEEDS and returns an empty list, which is indistinguishable from
+       administering no Pages. */
+    const needed = ['pages_show_list', 'pages_manage_metadata'];
+    /* Only meaningful when the grant was actually read. Against the fallback
+       this is a check of our own request against itself. */
+    const absent = permsKnown ? needed.filter((p) => !grantedScopes.includes(p)) : [];
+
+    /* Where to grant them, which differs by product and is the next thing
+       likely to go wrong. Under Login for Business the CONFIGURATION decides
+       and the scope list in this file is ignored entirely, so "grant the
+       permission" means editing the configuration -- not re-running the
+       dialog more carefully, which is what the old message advised and which
+       cannot work. */
+    const whereToFix = usingConfig
+      ? 'Add them to Facebook Login for Business > Configurations > '
+        + 'configuration ' + fbConfigId + '. On this app the configuration '
+        + 'decides the permissions and the dialog ignores any list we send.'
+      : 'Add them in the Meta app under Facebook Login, then connect again.';
+
+    if (absent.length) {
+      return backToPortal('error',
+        'Facebook did not grant ' + absent.join(' and ')
+        + ', so it reported no Pages at all rather than an error. ' + whereToFix
+        + ' (Granted: ' + (grantedScopes.join(', ') || 'nothing') + '.)');
+    }
+
+    /* SAY SO WHEN WE DO NOT KNOW. This is the branch that was asserting
+       "Facebook granted the permissions" on the strength of a list we wrote
+       ourselves. Unknown is a worse answer than a diagnosis and a better one
+       than a wrong diagnosis. */
+    if (!permsKnown) {
+      return backToPortal('error',
+        'Facebook shared no Page, and we could not read which permissions it '
+        + 'granted, so we cannot say which of the two happened. Try once more; '
+        + 'if it repeats, the function log has the reply from /me/permissions.');
+    }
+
+    if (list.length) {
+      return backToPortal('error',
+        'Facebook returned ' + list.length + ' Page(s) but no posting token for any of them. '
+        + 'Reconnect and leave every permission switched on.');
+    }
+
+    /* Permissions read, permissions present, no Page. Under Login for
+       Business that points at the ASSETS rather than the permissions: a
+       configuration names which asset types it asks for, and one that does
+       not ask for Pages never shows anybody a Page to tick. The permissions
+       are granted, the asset list is empty, and nothing is wrong anywhere.
+
+       Worth naming first, because "tick the Page you post from" is advice
+       nobody can follow when they were never asked. */
+    return backToPortal('error',
+      'Facebook granted the permissions but shared no Page. '
+      + (usingConfig
+          ? 'Check that configuration ' + fbConfigId + ' asks for Pages as an ASSET '
+            + '-- under Login for Business the assets are a separate list from the '
+            + 'permissions, and a configuration that does not request Pages never '
+            + 'offers one to tick. Then connect again and pick the business that '
+            + 'holds the Page. '
+          : 'Connect again and tick the Page you post from when it asks which '
+            + 'assets to share. ')
+      + 'You must be an admin of that Page. (Granted: ' + grantedScopes.join(', ') + '.)');
+  }
+
+  /* ── THE AGENCY CHOOSES (2026-09-28) ─────────────────────────────────
+     This used to connect every Page Facebook shared, to whichever agency
+     started the connection. That is how Iteriba Real Estate's Page became
+     Greenlight's Facebook, twice: Facebook reuses the earlier grant and skips
+     its own Page list (auth_type=rerequest below does not stop it), so
+     "connect again" handed back the same Page and it was attached again with
+     nobody asked. Now what Facebook shared is held for 15 minutes -- names in
+     social_connect_picks, tokens in the vault -- and the portal asks which of
+     these Pages belong to THIS agency. connectFacebookPages connects only the
+     ones ticked (action=facebook-pick). */
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const tokens: Record<string, string> = {};
+  const shared = usable.map((pg) => {
+    tokens[pg.id] = pg.access_token;
+    return {
+      id: pg.id,
+      name: pg.name ?? '',
+      ig_id: pg.instagram_business_account?.id ?? null,
+      ig_username: pg.instagram_business_account?.username ?? null,
+    };
+  });
+  const { data: pickId, error: stashErr } = await admin.rpc('stash_connect_pick', {
+    p_agency_id: claims.agency_id as string,
+    p_profile_id: claims.profile_id as string,
+    p_pages: shared,
+    p_tokens: tokens,
+    p_scopes: grantedScopes,
+  });
+  if (stashErr || typeof pickId !== 'string') {
+    console.error('social-connect: could not hold the shared Pages: ' + (stashErr?.message ?? 'no id'));
+    return backToPortal('error', 'Facebook shared ' + usable.length + ' Page(s), but Synapse could not '
+      + 'hold them while you choose. Please try again.');
+  }
+  console.log('social-connect: ' + usable.length + ' Page(s) shared, waiting for a choice');
+  return backToPortal('choose', pickId);
+}
+
+type SharedPage = { id: string; name: string; ig_id: string | null; ig_username: string | null };
+
+/** Connects the Pages an agency ticked, each with the Instagram account it
+ *  owns. Moved out of finishFacebook unchanged in substance; it now runs for
+ *  the chosen Pages only. */
+async function connectFacebookPages(
+  admin: ReturnType<typeof createClient>,
+  agencyId: string,
+  profileId: string,
+  pages: SharedPage[],
+  tokens: Record<string, string>,
+  grantedScopes: string[],
+): Promise<{ connected: string[]; problems: string[] }> {
+  const G = 'https://graph.facebook.com/v21.0';
+  const connected: string[] = [];
+  const problems: string[] = [];
+
+  for (const pg of pages) {
+    const pageToken = tokens[pg.id];
+    if (!pageToken) { problems.push((pg.name || pg.id) + ': no token came back for it'); continue; }
+    const { data: acctId, error: connErr } = await admin.rpc('connect_social_account', {
+      p_agency_id: agencyId,
+      p_platform: 'facebook',
+      p_account_id: pg.id,
+      p_username: pg.name ?? '',
+      p_access_token: pageToken,
+      p_refresh_token: null,
+      // Deliberately null: a Page token from a long-lived user token has no
+      // expiry, and a fabricated one would show as an expired session.
+      p_expires_at: null,
+      p_scopes: grantedScopes,
+      p_connected_by: profileId,
+      p_auth_source: 'facebook_login',
+    });
+    if (connErr) {
+      // One Page failing is not the others failing.
+      console.error('social-connect: could not save Page ' + pg.id + ': ' + connErr.message);
+      problems.push((pg.name || pg.id) + ': ' + connErr.message);
+      continue;
+    }
+    connected.push(pg.name || pg.id);
+
+    /* The Page's action button, read and never changed. A failed read writes
+       nothing, which the portal treats as "not known". */
+    const cta = await readPageCta(G, pg.id, pageToken);
+    if (cta && typeof acctId === 'string') {
+      const { error: ctaErr } = await admin
+        .from('social_accounts')
+        .update({ page_cta_type: cta.type, page_cta_url: cta.url, page_cta_read_at: new Date().toISOString() })
+        .eq('id', acctId);
+      if (ctaErr) console.error('social-connect: could not store the Page button: ' + ctaErr.message);
+    }
+
+    /* The Instagram account this Page owns, authorised as the Page (the
+       Page token, graph.facebook.com). None is an ordinary outcome. */
+    if (!pg.ig_id) continue;
+    const { data: igAcctId, error: igErr } = await admin.rpc('connect_social_account', {
+      p_agency_id: agencyId,
+      p_platform: 'instagram',
+      p_account_id: pg.ig_id,
+      p_username: pg.ig_username ?? '',
+      p_access_token: pageToken,
+      p_refresh_token: null,
+      p_expires_at: null,
+      p_scopes: grantedScopes,
+      p_connected_by: profileId,
+      p_auth_source: 'facebook_login',
+    });
+    if (igErr) {
+      console.error('social-connect: Page connected, Instagram did not: ' + igErr.message);
+      problems.push('Instagram @' + (pg.ig_username || pg.ig_id) + ': ' + igErr.message);
+      continue;
+    }
+    connected.push('Instagram @' + (pg.ig_username || pg.ig_id));
+    /* Which Page owns it: a private reply is sent as the Page. */
+    if (typeof igAcctId === 'string') {
+      const { error: linkErr } = await admin
+        .from('social_accounts').update({ parent_account_id: pg.id }).eq('id', igAcctId);
+      if (linkErr) console.error('social-connect: could not record the owning Page for ' + pg.ig_id + ': ' + linkErr.message);
+    }
+  }
+  return { connected, problems };
+}
+
+/** Which agency, if any, already holds each of these Facebook Pages. */
+async function pageOwners(
+  admin: ReturnType<typeof createClient>,
+  pageIds: string[],
+): Promise<Record<string, { agencyId: string; agencyName: string }>> {
+  const out: Record<string, { agencyId: string; agencyName: string }> = {};
+  if (!pageIds.length) return out;
+  const { data } = await admin
+    .from('social_accounts')
+    .select('platform_account_id, agency_id, agencies(name)')
+    .eq('platform', 'facebook')
+    .in('platform_account_id', pageIds)
+    .is('deleted_at', null)
+    .eq('is_active', true);
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const ag = r.agencies as { name?: string } | null;
+    out[String(r.platform_account_id)] = { agencyId: String(r.agency_id), agencyName: ag?.name ?? 'another agency' };
+  }
+  return out;
+}
+
+/** The signed-in member asking, and their agency. */
+async function memberCaller(req: Request): Promise<
+  { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+  const host = Deno.env.get('SUPABASE_URL') ?? '';
+  const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return json({ error: 'Not authenticated' }, 401);
+  const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { data: membership } = await admin
+    .from('agency_members')
+    .select('agency_id, role')
+    .eq('profile_id', user.id)
+    .is('deleted_at', null)
+    .limit(1)
+    .maybeSingle();
+  if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+  if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+    return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+  }
+  return { userId: user.id, agencyId: membership.agency_id as string, admin };
+}
+
+/* ── the flow ─────────────────────────────────────────────────────────────── */
+
+/** Sends the operator back to the portal with a plain-language outcome rather
+ *  than leaving them on a white page owned by an edge function. */
+async function backToPortal(status: string, detail?: string): Promise<Response> {
+  /* THE DEFAULT IS ABSOLUTE, AND HAS TO BE.
+     This used to fall back to the RELATIVE '/app/agency.html'. A relative
+     redirect issued by an edge function resolves against the function's own
+     origin, so with PORTAL_URL unset the operator finished a successful OAuth
+     round trip and landed on
+     https://<ref>.supabase.co/app/agency.html -- a 404. The token was safely
+     in the vault by then, because the connect happens before this redirect, so
+     the actual outcome was "it worked and looked broken": the worst kind, and
+     one nobody would think to check because the failure appears after the
+     success.
+
+     PORTAL_URL still overrides, which is what a preview deployment or a
+     rename needs. But a setting whose absence silently breaks the flow is not
+     really optional, and making the operator discover that by walking into it
+     is not a reasonable thing to ship. */
+  const portal = Deno.env.get('PORTAL_URL')
+    || 'https://www.synapsecore.dev/app/agency.html';
+  /* SAY IT IN THE LOG AS WELL AS THE URL.
+     Every failure on this leg used to exist in exactly one place: the
+     `detail` parameter of a 302, which is visible only to the person holding
+     the browser, as a toast that disappears. From the outside the callback
+     was a 302 and nothing else -- indistinguishable from success, and it was
+     read as success more than once today. The redirect stays; it is how the
+     operator is told. This is how anyone reading the logs is told. */
+  if (status === 'error') console.error('social-connect failed: ' + (detail ?? 'no detail'));
+  else console.log('social-connect ' + status + ': ' + (detail ?? ''));
+  /* AND WRITE IT DOWN (2026-09-28). The log turned out to be unreadable from
+     outside the dashboard, so "Facebook still gives the same error" arrived
+     with no error attached, twice. A failed or cancelled connection is kept
+     in social_connect_failures (service role only, purged at 30 days): the
+     outcome and the platform's own words, nothing about the person. Never
+     allowed to hold up the redirect by more than a moment. */
+  if (status === 'error' || status === 'cancelled') {
+    const sbUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    if (sbUrl && key) {
+      const write = fetch(sbUrl + '/rest/v1/social_connect_failures', {
+        method: 'POST',
+        headers: { apikey: key, Authorization: 'Bearer ' + key,
+                   'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ status, detail: (detail ?? '').slice(0, 1000) || null }),
+      }).catch(() => null);
+      await Promise.race([write, new Promise((r) => setTimeout(r, 1500))]);
+    }
+  }
+
+  const u = new URL(portal, 'https://placeholder.invalid');
+  u.searchParams.set('connected', status);
+  if (detail) u.searchParams.set('detail', detail.slice(0, 180));
+  const target = portal.startsWith('http') ? u.toString() : u.pathname + u.search;
+  return new Response(null, { status: 302, headers: { ...corsHeaders, Location: target } });
+}
+
+/* The bot's public @handle, from the token. Public by design -- every agency
+   has to type it into Telegram -- and cached per instance, since it can only
+   change with the token. Null when Telegram does not answer; the portal then
+   keeps the handle it already shows. */
+let TG_HANDLE: { token: string; handle: string | null } | null = null;
+async function telegramBotHandle(token: string): Promise<string | null> {
+  if (TG_HANDLE && TG_HANDLE.token === token) return TG_HANDLE.handle;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const d = await r.json().catch(() => null);
+    const u = d && d.ok && d.result && typeof d.result.username === 'string' ? d.result.username : '';
+    const handle = u ? '@' + u : null;
+    if (handle) TG_HANDLE = { token, handle };
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
+/* What @SynapseListingsBot says about itself. Telegram's limits: 512
+   characters for the description (shown in an empty chat, under "What can
+   this bot do?") and 120 for the short one (the profile page and link
+   previews). A message to the bot is answered by telegram-webhook with a
+   button into Tayo's chat carrying the question, so the description says
+   that is what happens. */
+const TG_PROFILE = {
+  description: [
+    'I post property listings from estate agencies on Synapse to their own '
+      + 'Telegram channels: photos, the price and the charges, and a '
+      + '“View this home” button under every post.',
+    '',
+    'Looking for a home? Send me a message and I’ll hand you to Tayo, '
+      + 'Synapse’s property advisor — or tap “Chat with Tayo” below.',
+    '',
+    'Agencies: connect a channel from the Synapse agency portal, under Social '
+      + '→ Add channel → Telegram.',
+  ].join('\n'),
+  short: 'Posts Synapse agencies’ property listings to their Telegram channels, '
+    + 'with a “View this home” button.',
+};
+
+/* The rights Telegram pre-ticks when the bot is added to a CHANNEL. Posting,
+   and deleting -- used for one thing only: removing the "/connect CODE" post
+   the agency makes to connect the channel, so its followers never see it.
+   Nothing else; an agency deciding whether to trust it should see two boxes,
+   not eight. */
+const TG_CHANNEL_RIGHTS: Record<string, boolean> = {
+  is_anonymous: false, can_manage_chat: false, can_delete_messages: true,
+  can_manage_video_chats: false, can_restrict_members: false,
+  can_promote_members: false, can_change_info: false, can_invite_users: false,
+  can_post_stories: false, can_edit_stories: false, can_delete_stories: false,
+  can_post_messages: true, can_edit_messages: false, can_pin_messages: false,
+};
+
+/* MUST MATCH telegram-webhook's webhookSecret(). Telegram echoes it in the
+   X-Telegram-Bot-Api-Secret-Token header on every delivery; derived from the
+   bot token so there is no second secret to keep. */
+async function webhookSecret(token: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('synapse.telegram-webhook.v1'));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+let TG_SYNCED: { token: string; at: number; result: Record<string, unknown> } | null = null;
+async function syncTelegramProfile(token: string): Promise<Record<string, unknown>> {
+  if (TG_SYNCED && TG_SYNCED.token === token && Date.now() - TG_SYNCED.at < 600_000) {
+    return { ...TG_SYNCED.result, cached: true };
+  }
+  const call = async (method: string, body: Record<string, unknown> = {}) => {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
+    } catch (e) {
+      return { ok: false, description: e instanceof Error ? e.message : 'network error' };
+    }
+  };
+  const changed: string[] = [];
+  const errors: string[] = [];
+
+  const d = await call('getMyDescription');
+  if (!d.ok) errors.push('read description: ' + (d.description ?? 'failed'));
+  else if ((d.result?.description ?? '') !== TG_PROFILE.description) {
+    const s = await call('setMyDescription', { description: TG_PROFILE.description });
+    if (s.ok) changed.push('description'); else errors.push('description: ' + (s.description ?? 'failed'));
+  }
+
+  const sd = await call('getMyShortDescription');
+  if (!sd.ok) errors.push('read short description: ' + (sd.description ?? 'failed'));
+  else if ((sd.result?.short_description ?? '') !== TG_PROFILE.short) {
+    const s = await call('setMyShortDescription', { short_description: TG_PROFILE.short });
+    if (s.ok) changed.push('short_description'); else errors.push('short description: ' + (s.description ?? 'failed'));
+  }
+
+  /* Compared on posting alone: Telegram may report can_manage_chat as true
+     for any channel administrator whatever was set, and comparing every key
+     would rewrite the rights on every call for a difference nobody chose. */
+  const rr = await call('getMyDefaultAdministratorRights', { for_channels: true });
+  if (!rr.ok) errors.push('read channel rights: ' + (rr.description ?? 'failed'));
+  else if (!rr.result?.can_post_messages || !rr.result?.can_delete_messages) {
+    const s = await call('setMyDefaultAdministratorRights', { rights: TG_CHANNEL_RIGHTS, for_channels: true });
+    if (s.ok) changed.push('channel_rights'); else errors.push('channel rights: ' + (s.description ?? 'failed'));
+  }
+
+  /* THE MENU BUTTON beside the message box: "Chat with Tayo", opening Tayo
+     inside Telegram. It does not force a new conversation -- somebody
+     tapping it for the third time is continuing, not starting over. */
+  const tayoMenu = 'https://www.synapsecore.dev/app/toju.html?ch=telegram';
+  const mb = await call('getChatMenuButton');
+  if (!mb.ok) errors.push('read menu button: ' + (mb.description ?? 'failed'));
+  else if (mb.result?.type !== 'web_app' || mb.result?.web_app?.url !== tayoMenu
+           || mb.result?.text !== 'Chat with Tayo') {
+    const s = await call('setChatMenuButton', {
+      menu_button: { type: 'web_app', text: 'Chat with Tayo', web_app: { url: tayoMenu } },
+    });
+    if (s.ok) changed.push('menu_button'); else errors.push('menu button: ' + (s.description ?? 'failed'));
+  }
+
+  /* THE WEBHOOK, which is how Start presses and channel additions reach us.
+     Re-registered when it points elsewhere, listens for the wrong updates, or
+     Telegram reports deliveries being refused -- which is what a rotated
+     token looks like from here, since the secret is derived from it. */
+  const hook = (Deno.env.get('SUPABASE_URL') ?? '') + '/functions/v1/telegram-webhook';
+  /* channel_post: how a "/connect CODE" posted in a channel reaches us. */
+  const wantUpdates = ['message', 'my_chat_member', 'channel_post'];
+  const info = await call('getWebhookInfo');
+  const have = info.ok ? info.result ?? {} : {};
+  const sameUpdates = Array.isArray(have.allowed_updates)
+    && wantUpdates.every((u) => have.allowed_updates.includes(u))
+    && have.allowed_updates.length === wantUpdates.length;
+  const refused = /401|403|forbidden|unauthori/i.test(String(have.last_error_message ?? ''));
+  if (!info.ok || have.url !== hook || !sameUpdates || refused) {
+    const w = await call('setWebhook', {
+      url: hook,
+      secret_token: await webhookSecret(token),
+      allowed_updates: wantUpdates,
+      max_connections: 10,
+    });
+    if (w.ok) changed.push('webhook'); else errors.push('webhook: ' + (w.description ?? 'failed'));
+  }
+
+  const result: Record<string, unknown> = {
+    ok: errors.length === 0,
+    bot: await telegramBotHandle(token),
+    changed,
+    errors,
+    description: TG_PROFILE.description,
+    short_description: TG_PROFILE.short,
+  };
+  if (!errors.length) TG_SYNCED = { token, at: Date.now(), result };
+  return result;
+}
+
+/* A server-side switch, read with the service role. platform_settings has
+   RLS on and no policy at all, so it is unreachable through the API and this
+   is the only way in.
+
+   Never throws. A configuration read that takes the whole function down with
+   it would turn a missing row into a 500 on a path that has a perfectly good
+   answer without it. */
+async function settingText(key: string): Promise<string> {
+  try {
+    const admin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    );
+    const { data } = await admin
+      .from('platform_settings').select('value').eq('key', key).maybeSingle();
+    const v = (data as { value?: unknown } | null)?.value;
+    /* jsonb, so it arrives as whatever was stored. Both shapes are accepted
+       because both are things a person writing a migration would reasonably
+       write, and refusing one of them would be a trap with no upside. */
+    if (typeof v === 'string') return v.trim();
+    if (v && typeof v === 'object') {
+      const id = (v as Record<string, unknown>).id;
+      if (typeof id === 'string') return id.trim();
+    }
+    return '';
+  } catch (err) {
+    console.error('settingText(' + key + ') failed: '
+      + (err instanceof Error ? err.message : String(err)));
+    return '';
+  }
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  const url = new URL(req.url);
+  /* TRIMMED, because a secret is pasted by a human into a web form and the
+     failure mode of one trailing newline is "Error validating client secret"
+     -- a message that accuses the value of being WRONG when it is merely
+     untidy. That is an hour of regenerating a secret that was correct all
+     along, and this file has already lost a fortnight to one variable being
+     right and the code reading it being wrong. */
+  const appId = (Deno.env.get('META_APP_ID') ?? '').trim();
+  const appSecret = (Deno.env.get('META_APP_SECRET') ?? '').trim();
+
+  /* INSTAGRAM LOGIN HAS ITS OWN CREDENTIALS. "Instagram API with Instagram
+     Login" is a separate product from Facebook Login and Meta issues it a
+     separate app id and secret -- both shown on the same console page as the
+     redirect URI box:
+
+       Instagram > API setup with Instagram login
+         > 3. Set up Instagram business login > Business login settings
+
+     Sending the Facebook app id to instagram.com/oauth/authorize is rejected
+     at the dialog, before any permissions screen appears, so there is nothing
+     for the operator to read except Meta's own generic page.
+
+     There is no fallback to the Facebook pair -- see below for why there
+     used to be one and why it was wrong. */
+  /* NO FALLBACK TO THE FACEBOOK PAIR. It used to fall back, and the stated
+     reason -- "requiring these would make the function start refusing on a
+     project where it currently answers" -- was wrong about what answering
+     meant. It answered with a dialog URL carrying a Facebook app id to
+     instagram.com, which Meta rejects with "invalid request" AFTER the
+     operator has typed a password. There is no configuration in which that
+     id is the right thing to send here: Instagram API with Instagram Login is
+     issued its own id and secret, beside the Facebook app's and different
+     from them. A lenient default that is never correct is just a wrong answer
+     with a friendly face. */
+  const igAppId = (Deno.env.get('META_IG_APP_ID') ?? '').trim();
+  const igAppSecret = (Deno.env.get('META_IG_APP_SECRET') ?? '').trim();
+
+  /* Whichever pair this request actually needs. */
+  /* Takes unknown, because the callback's platform comes out of the signed
+     state as unknown and is compared the same way everywhere else in this
+     file. Anything that is not 'instagram' gets the Facebook pair, which is
+     the correct default for the only other platform there is. */
+  const idFor = (p: unknown) => (p === 'instagram' ? igAppId : appId);
+  const secretFor = (p: unknown) => (p === 'instagram' ? igAppSecret : appSecret);
+  /* Facebook only, and optional. Empty means classic Facebook Login. Set means
+     the app is on Facebook Login for Business, where a configuration -- not a
+     scope list -- decides what is asked for. Not a secret: it travels in the
+     dialog URL in plain sight. It sits with the secrets because it is the same
+     kind of thing, a per-app value this code cannot derive for itself. */
+  /* ENV FIRST, THEN THE DATABASE. Env wins where it is set, so a project
+     that already has the variable behaves exactly as it did. The database
+     answers where the question was going unanswered -- which, on this
+     project, is everywhere, and is why every Facebook dialog so far has gone
+     out in classic mode against an app that is not classic. */
+  /* ONE BOT FOR EVERY AGENCY. A per-agency bot would mean each of them
+     spending five minutes with BotFather and us storing their credential;
+     this way nobody outside Synapse ever holds a token. Genuinely secret,
+     unlike the Facebook config id, so it stays in the secrets store. */
+  const tgBotToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+  const ttKey = (Deno.env.get('TIKTOK_CLIENT_KEY') ?? '').trim();
+  const ttSecret = (Deno.env.get('TIKTOK_CLIENT_SECRET') ?? '').trim();
+
+  let fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
+  if (!fbConfigId) fbConfigId = await settingText('meta_fb_config_id');
+  /* Both spellings are still read below. META_REDIRECT_URI is canonical;
+     META_REDIRECT_URL is what Meta's own console calls "Valid OAuth Redirect
+     URIs" while every human says URL, and that one letter once cost about two
+     weeks of looking for a value that was already set. */
+  /* ── THE REDIRECT IS NOT A SETTING. IT IS THIS FUNCTION'S OWN ADDRESS ──
+     OAuth sends the browser back to redirect_uri with ?code=..., and the
+     only endpoint that can do anything with that code is this one. So there
+     is exactly one correct value, this function knows it without being told,
+     and every other value is broken by construction.
+
+     It had been set to the portal. Meta honoured it, the browser went
+     straight back to the agency portal with a code nothing was listening
+     for, and the connection silently did nothing -- reported as "it takes me
+     to Facebook, I put in the code, and it just brings me back to the app".
+     The logs showed it exactly: action=start returning 200 and then no
+     callback to this function, ever.
+
+     Deriving it removes the whole class of failure. The env var is still
+     honoured when it agrees with reality -- an operator may need it for a
+     custom domain -- but a value that does not point back here is ignored
+     rather than obeyed, because obeying it cannot work. The disagreement is
+     logged rather than swallowed, so this is visible instead of mysterious. */
+  /* THE SCHEME IN url.origin IS A LIE HERE, AND IT COST A LOGIN.
+     TLS terminates at Supabase's gateway, so the request this function
+     actually receives is plain http and `url.origin` reads
+     http://<ref>.supabase.co -- correct about the host, wrong about the
+     scheme, and the scheme is the half Meta checks.
+
+     Deriving from it handed Facebook an http:// redirect_uri and produced
+     "Facebook has detected that this app isn't using a secure connection to
+     transfer information", which is a dead end with an OK button -- no code,
+     no callback, nothing in the logs but a 200 on ?action=start. Worse, the
+     derivation ALSO out-voted a META_REDIRECT_URI that was set correctly to
+     the https URL, on the grounds that it disagreed with "reality". It was
+     right and this was wrong.
+
+     So the host is taken from the request, which is the part it knows, and
+     the scheme is asserted rather than read: these functions are only ever
+     reachable over https in production. Localhost keeps http, because a
+     local runtime genuinely is http and there is no gateway in front of it. */
+  const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(url.host);
+  const derivedRedirect = (isLocalHost ? 'http://' : 'https://')
+    + url.host + '/functions/v1/social-connect';
+  const configuredRedirect = (Deno.env.get('META_REDIRECT_URI')
+    || Deno.env.get('META_REDIRECT_URL')
+    || '').trim().replace(/\/+$/, '');
+  const redirectUri = configuredRedirect === derivedRedirect
+    ? configuredRedirect
+    : derivedRedirect;
+  if (configuredRedirect && configuredRedirect !== derivedRedirect) {
+    console.warn('social-connect: ignoring META_REDIRECT_URI (' + configuredRedirect
+      + ') because the OAuth code can only be exchanged here; using ' + derivedRedirect);
+  }
+
+  try {
+    /* ── step 0: which platforms can this project actually connect ────────
+       Setting up a Meta product is OURS, once, for every agency there will
+       ever be: the app, its credentials, its redirect URIs, App Review. An
+       agency's whole part is pressing a button and authorising.
+
+       The portal did not know which buttons were real, so it drew them all --
+       and an agency pressing the wrong one got a refusal naming environment
+       variables they have never heard of and could not set if they had. This
+       endpoint is how the portal finds out, so it can stop offering what only
+       we can fix.
+
+       BOOLEANS, NOT VALUES. It says whether credentials exist, never what they
+       are, and it is the same thing anyone learns by pressing the button and
+       reading the answer. No agency is named in the question and no user data
+       is in the reply, so it needs no session. */
+    if (url.searchParams.get('action') === 'status') {
+      const tgBot = tgBotToken ? await telegramBotHandle(tgBotToken) : null;
+      return json({
+        platforms: {
+          /* `mode` is reported because ready:true is not the whole story on
+             Facebook. An app built as Login for Business needs a config_id,
+             and without one this opens the classic dialog -- which is the
+             difference between a connection and an error page, and is
+             invisible from the portal either way. */
+          facebook: {
+            ready: Boolean(appId && appSecret),
+            mode: fbConfigId ? 'login-for-business' : 'classic',
+          },
+          instagram: { ready: Boolean(igAppId && igAppSecret) },
+          /* Reported like the others so the portal can decline to offer a
+             control it cannot deliver. `form` because the portal renders
+             something different for it: there is no redirect to send anybody
+             to, only a field to fill in. */
+          /* `bot` is the handle agencies must add to their channel, asked
+             of Telegram rather than written into the portal: the portal
+             named a bot before one existed, and a handle that drifts from
+             the token has every agency adding an account that is not ours. */
+          telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
+          /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
+          tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
+        },
+      });
+    }
+
+    /* ── which of the shared Pages are this agency's ─────────────────────
+       The Facebook callback holds what was shared (social_connect_picks) and
+       sends the person back with ?connected=choose. GET lists the Pages --
+       names only, and which agency already holds any of them; POST connects
+       the ones ticked. Only the member who started the connection, in the
+       agency it was started for, can see or spend it. */
+    if ((url.searchParams.get('action') ?? '') === 'facebook-pick') {
+      const who = await memberCaller(req);
+      if (who instanceof Response) return who;
+      const readPick = async (pick: string) => {
+        if (!/^[0-9a-f-]{36}$/i.test(pick)) return null;
+        const { data: row } = await who.admin.from('social_connect_picks')
+          .select('pages, expires_at, agency_id, profile_id').eq('id', pick).maybeSingle();
+        if (!row || row.profile_id !== who.userId || row.agency_id !== who.agencyId
+            || Date.parse(row.expires_at as string) < Date.now()) return null;
+        return row;
+      };
+      const expired = () => json({ error: 'This choice has expired. Connect Facebook again.' }, 404);
+      const { data: ag } = await who.admin.from('agencies').select('name').eq('id', who.agencyId).maybeSingle();
+      const agencyName = (ag?.name as string) ?? '';
+
+      if (req.method === 'GET') {
+        const row = await readPick(url.searchParams.get('pick') ?? '');
+        if (!row) return expired();
+        const pages = (row.pages ?? []) as SharedPage[];
+        const owners = await pageOwners(who.admin, pages.map((p) => p.id));
+        return json({
+          agency: agencyName,
+          expires_at: row.expires_at,
+          pages: pages.map((p) => ({
+            id: p.id,
+            name: p.name,
+            instagram: p.ig_username ? '@' + p.ig_username : (p.ig_id ? 'Instagram' : null),
+            connected: owners[p.id]
+              ? (owners[p.id].agencyId === who.agencyId ? 'here' : owners[p.id].agencyName)
+              : null,
+          })),
+        });
+      }
+
+      if (req.method === 'POST') {
+        let body: Record<string, unknown> = {};
+        try { body = await req.json(); } catch { /* empty body: nothing chosen */ }
+        const pick = String(body.pick ?? '');
+        const ids = Array.isArray(body.page_ids) ? (body.page_ids as unknown[]).map(String) : [];
+        if (!ids.length) return json({ error: 'Tick at least one Page.' }, 400);
+        /* Checked before the stash is spent, so a refused choice can be
+           corrected without connecting Facebook again. */
+        const row = await readPick(pick);
+        if (!row) return expired();
+        const owners = await pageOwners(who.admin, ids);
+        const elsewhere = ids.filter((id) => owners[id] && owners[id].agencyId !== who.agencyId);
+        if (elsewhere.length) {
+          return json({ error: elsewhere.map((id) => owners[id].agencyName).join(', ')
+            + ' already has that Page connected. Disconnect it there first.' }, 409);
+        }
+        const { data: got, error: takeErr } = await who.admin.rpc('take_connect_pick', { p_id: pick });
+        if (takeErr || !got) return expired();
+        const taken = got as { pages: SharedPage[]; tokens: Record<string, string>; scopes: string[] };
+        const chosen = (taken.pages ?? []).filter((p) => ids.includes(p.id));
+        const res = await connectFacebookPages(who.admin, who.agencyId, who.userId, chosen,
+          taken.tokens ?? {}, taken.scopes ?? []);
+        if (!res.connected.length) {
+          return json({ error: 'Nothing could be saved: ' + res.problems.join('; ') }, 500);
+        }
+        console.log('social-connect: ' + res.connected.length + ' account(s) connected by choice');
+        return json({ agency: agencyName, connected: res.connected, problems: res.problems });
+      }
+      return json({ error: 'GET to list, POST to connect' }, 405);
+    }
+
+    /* ── the bot's public profile, applied from code ─────────────────────
+       What a person sees when they open @SynapseListingsBot, and the rights
+       Telegram pre-ticks when an agency adds it to a channel. Kept here
+       rather than typed into BotFather so it is reviewed, versioned and
+       re-applied in one request: change TG_PROFILE and call this.
+
+       No input and nothing returned but our own public text, so it needs no
+       session. It writes only what differs, and remembers a clean run for
+       ten minutes per instance, so calling it repeatedly costs nothing. */
+    const tgAction = url.searchParams.get('action') ?? '';
+    if (tgAction === 'telegram-profile' || tgAction === 'telegram-setup') {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      return json(await syncTelegramProfile(tgBotToken));
+    }
+
+    /* ── telegram: who is asking ──────────────────────────────────────────
+       The link, link-start and channels actions are about the CALLER, so
+       they share one answer to "who, and in which agency". */
+    const telegramCaller = async (): Promise<
+      { userId: string; agencyId: string; admin: ReturnType<typeof createClient> } | Response> => {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      const authHeader = req.headers.get('Authorization') ?? '';
+      if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+      const host = Deno.env.get('SUPABASE_URL') ?? '';
+      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await asUser.auth.getUser();
+      if (!user) return json({ error: 'Not authenticated' }, 401);
+      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+      }
+      return { userId: user.id, agencyId: membership.agency_id as string, admin };
+    };
+
+    /* Is this person's Synapse account linked to a Telegram account yet. */
+    if (tgAction === 'telegram-link') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const { data: link } = await who.admin
+        .from('telegram_links')
+        .select('telegram_username, first_name, linked_at')
+        .eq('profile_id', who.userId)
+        .maybeSingle();
+      return json({ linked: link ?? null, bot: await telegramBotHandle(tgBotToken) });
+    }
+
+    /* A one-time t.me/<bot>?start=<code> link. Pressing Start on it sends
+       "/start <code>" to telegram-webhook FROM the person's Telegram account,
+       which is the proof. Ensures the webhook is registered first, so the
+       very first link on a fresh setup has somewhere to arrive. */
+    if (tgAction === 'telegram-link-start') {
+      if (req.method !== 'POST') return json({ error: 'POST to start a link' }, 405);
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const setup = await syncTelegramProfile(tgBotToken);
+      if (Array.isArray(setup.errors) && (setup.errors as string[]).some((e) => e.startsWith('webhook'))) {
+        return json({ error: 'Telegram did not accept our webhook, so a link could not arrive. '
+          + (setup.errors as string[]).join('; ') }, 502);
+      }
+      const bytes = crypto.getRandomValues(new Uint8Array(18));
+      const code = btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const { error: codeErr } = await who.admin
+        .from('telegram_link_codes')
+        .insert({ code, profile_id: who.userId });
+      if (codeErr) return json({ error: 'Could not start the link: ' + codeErr.message }, 500);
+      const bot = (await telegramBotHandle(tgBotToken) ?? '@SynapseListingsBot').replace(/^@/, '');
+      return json({ url: 'https://t.me/' + bot + '?start=' + code, expires_in: 900 });
+    }
+
+    /* ── connect by a code posted in the channel (TryPost's method) ────────
+       A short code for this member; posting "/connect CODE" in a channel the
+       bot administers connects that channel to this agency (telegram-webhook).
+       Posting there needs the right to post there, which is the proof. Makes
+       sure the webhook listens for channel posts before handing a code out. */
+    if (tgAction === 'telegram-code') {
+      if (req.method !== 'POST') return json({ error: 'POST for a code' }, 405);
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const setup = await syncTelegramProfile(tgBotToken);
+      if (Array.isArray(setup.errors) && (setup.errors as string[]).some((e) => e.startsWith('webhook'))) {
+        return json({ error: 'Telegram did not accept our webhook, so the code could not arrive. '
+          + (setup.errors as string[]).join('; ') }, 502);
+      }
+      /* Six characters without the look-alikes (0/O, 1/I/L), so it survives
+         being read off one screen and typed on another. */
+      const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let attempt = 0; attempt < 5 && !code; attempt++) {
+        const bytes = crypto.getRandomValues(new Uint8Array(6));
+        const candidate = [...bytes].map((b) => ALPHA[b % ALPHA.length]).join('');
+        const { error: insErr } = await who.admin.from('telegram_connect_codes')
+          .insert({ code: candidate, agency_id: who.agencyId, profile_id: who.userId });
+        if (!insErr) code = candidate;
+      }
+      if (!code) return json({ error: 'Could not issue a code. Please try again.' }, 500);
+      return json({ code, command: '/connect ' + code, expires_in: 900,
+                    bot: await telegramBotHandle(tgBotToken) });
+    }
+
+    /* Has that code been posted yet, and what came of it. Only the member it
+       was issued to may ask. */
+    if (tgAction === 'telegram-code-status') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const code = (url.searchParams.get('code') ?? '').trim().toUpperCase();
+      if (!/^[A-Z0-9]{6,12}$/.test(code)) return json({ error: 'No such code' }, 400);
+      const { data: row } = await who.admin.from('telegram_connect_codes')
+        .select('used_at, expires_at, channel, account_id, code_post_deleted, error')
+        .eq('code', code).eq('profile_id', who.userId).maybeSingle();
+      if (!row) return json({ status: 'unknown' });
+      if (row.error) return json({ status: 'error', error: row.error });
+      if (row.account_id) {
+        return json({ status: 'connected', channel: row.channel, code_post_deleted: row.code_post_deleted });
+      }
+      if (row.used_at) return json({ status: 'working' });
+      if (Date.parse(row.expires_at as string) < Date.now()) return json({ status: 'expired' });
+      return json({ status: 'waiting' });
+    }
+
+    /* The channels this person has added the bot to, newest first, marked
+       with whether this agency already has each one. Filtered by who added
+       the bot, which Telegram reports; the connect action still checks, with
+       Telegram, that the person administers the channel. */
+    if (tgAction === 'telegram-channels') {
+      const who = await telegramCaller();
+      if (who instanceof Response) return who;
+      const { data: link } = await who.admin
+        .from('telegram_links')
+        .select('telegram_user_id')
+        .eq('profile_id', who.userId)
+        .maybeSingle();
+      if (!link) return json({ linked: false, channels: [] });
+      const { data: chats } = await who.admin
+        .from('telegram_bot_chats')
+        .select('chat_id, title, username, bot_status, can_post, updated_at')
+        .eq('added_by', link.telegram_user_id)
+        .in('bot_status', ['administrator', 'creator'])
+        .order('updated_at', { ascending: false })
+        .limit(20);
+      const { data: mine } = await who.admin
+        .from('social_accounts')
+        .select('platform_account_id')
+        .eq('agency_id', who.agencyId)
+        .eq('platform', 'telegram')
+        .is('deleted_at', null);
+      const have = new Set((mine ?? []).map((r: { platform_account_id: string }) => String(r.platform_account_id)));
+      return json({
+        linked: true,
+        channels: (chats ?? []).map((c: Record<string, unknown>) => ({
+          chat_id: String(c.chat_id),
+          title: c.title ?? null,
+          username: c.username ? '@' + c.username : null,
+          can_post: c.can_post === true,
+          connected: have.has(String(c.chat_id)),
+        })),
+      });
+    }
+
+    /* ── telegram: a form, not a redirect ─────────────────────────────────
+       There is nowhere to send the operator. The bot is added to the channel
+       inside Telegram, and all that reaches us is a channel name -- which is
+       exactly why everything below is verified against Telegram rather than
+       taken on trust. */
+    if (url.searchParams.get('action') === 'telegram') {
+      if (!tgBotToken) {
+        return json({ error: 'Telegram is not configured on this project yet. '
+          + 'Missing: TELEGRAM_BOT_TOKEN.' }, 503);
+      }
+      if (req.method !== 'POST') return json({ error: 'POST a channel to connect it' }, 405);
+
+      const authHeader = req.headers.get('Authorization') ?? '';
+      if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+
+      /* Read from the environment rather than from supaUrl: that name is
+         declared inside the `start` block further down, so reaching for it
+         here is the same scope mistake that broke Generate captions this
+         morning -- caught by deno check this time instead of by a user. */
+      const supaHost = Deno.env.get('SUPABASE_URL') ?? '';
+      const anon = createClient(supaHost, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await anon.auth.getUser();
+      if (!user) return json({ error: 'Not authenticated' }, 401);
+
+      const admin = createClient(supaHost, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a channel' }, 403);
+      }
+
+      const body = await req.json().catch(() => ({}));
+      /* FOUR SHAPES, ALL ACCEPTED. @channel, t.me/channel, the full https
+         link, and a numeric -100... id are each what a reasonable person
+         would try. Rejecting three of them to be strict would be rejecting
+         them for being right in a way we failed to anticipate. */
+      let chat = String(body?.channel ?? '').trim();
+      chat = chat.replace(/^https?:\/\//i, '').replace(/^t\.me\//i, '').replace(/^\/+/, '');
+      if (!chat) return json({ error: 'Give the channel’s @name or link' }, 400);
+      if (!/^-?\d+$/.test(chat) && !chat.startsWith('@')) chat = '@' + chat;
+
+      const tg = async (method: string, params: Record<string, string>) => {
+        const q = new URLSearchParams(params).toString();
+        const r = await fetch(`https://api.telegram.org/bot${tgBotToken}/${method}?${q}`);
+        return await r.json().catch(() => ({ ok: false, description: 'unreadable reply' }));
+      };
+
+      /* Does it exist, and what is it called. */
+      const chatRes = await tg('getChat', { chat_id: chat });
+      if (!chatRes?.ok) {
+        return json({ error: 'Telegram could not find ' + chat + '. '
+          + (chatRes?.description ?? '')
+          + ' Check the @name, and make sure the bot has been added to the channel '
+          + 'first — Telegram hides a private channel from a bot that is not in it.' }, 400);
+      }
+      const info = chatRes.result ?? {};
+
+      /* Which bot are we. Asked rather than configured: the id belongs to the
+         token, and a configured id that drifts from a rotated token would
+         check the wrong account's membership and pass. */
+      const meRes = await tg('getMe', {});
+      const botId = meRes?.ok ? String(meRes.result?.id ?? '') : '';
+      if (!botId) return json({ error: 'Telegram did not recognise our bot. '
+        + (meRes?.description ?? '') }, 502);
+
+      /* THE QUESTION THAT MATTERS. "I added the bot" and "I added the bot
+         with permission to post" feel identical to do and are completely
+         different afterwards -- and the difference only shows up at the first
+         scheduled post, in a queue, days later. */
+      const memberRes = await tg('getChatMember', { chat_id: chat, user_id: botId });
+      const member = memberRes?.ok ? memberRes.result : null;
+      const status = member?.status ?? '';
+      if (status !== 'administrator' && status !== 'creator') {
+        return json({ error: 'The bot is in ' + (info.title ?? chat)
+          + ' but is not an administrator, so it cannot post. Open the channel in '
+          + 'Telegram → Administrators → add the bot, and allow Post Messages.' }, 400);
+      }
+      /* creator is never restricted; administrator carries the flag. */
+      if (status === 'administrator' && member?.can_post_messages === false) {
+        return json({ error: 'The bot is an administrator of ' + (info.title ?? chat)
+          + ' but Post Messages is switched off for it. Turn that on in the '
+          + 'channel’s Administrators screen.' }, 400);
+      }
+
+      /* THE CHANNEL IS YOURS. Everything above proves the BOT can post there,
+         which is true of every channel any agency has added it to -- so on its
+         own it let any member of any agency connect another agency's channel
+         by typing its @name. The linked Telegram account is who this person
+         is on Telegram; Telegram says whether that account administers the
+         channel. */
+      const { data: tgLink } = await admin
+        .from('telegram_links')
+        .select('telegram_user_id, telegram_username')
+        .eq('profile_id', user.id)
+        .maybeSingle();
+      if (!tgLink) {
+        return json({ error: 'Link your Telegram account first, so Telegram can confirm '
+          + 'this channel is yours.', needs_link: true }, 400);
+      }
+      const youRes = await tg('getChatMember', { chat_id: chat, user_id: String(tgLink.telegram_user_id) });
+      const youStatus = youRes?.ok ? String(youRes.result?.status ?? '') : '';
+      if (youStatus !== 'creator' && youStatus !== 'administrator') {
+        return json({ error: 'Your linked Telegram account'
+          + (tgLink.telegram_username ? ' (@' + tgLink.telegram_username + ')' : '')
+          + ' is not an administrator of ' + (info.title ?? chat) + ', so Synapse cannot '
+          + 'confirm the channel is yours. Link the Telegram account that runs it.' }, 403);
+      }
+
+      const { data: acctId, error: connErr } = await admin.rpc('connect_telegram_channel', {
+        p_agency_id: membership.agency_id,
+        p_chat_id: String(info.id ?? ''),
+        p_title: String(info.title ?? ''),
+        p_username: info.username ? '@' + info.username : '',
+        p_bot_token: tgBotToken,
+        p_connected_by: user.id,
+      });
+      if (connErr) return json({ error: connErr.message }, 400);
+
+      console.log('social-connect: telegram channel ' + info.id + ' connected for agency '
+        + membership.agency_id);
+      return json({
+        ok: true,
+        id: acctId,
+        channel: info.username ? '@' + info.username : (info.title ?? chat),
+      });
+    }
+
+    /* ── TikTok: are the credentials real, not merely present? ──────────
+       status only says the two secrets are set. A key from one app and a
+       secret from another (production vs sandbox is the easy mix-up) fails
+       only after somebody has been through TikTok's dialog -- the worst
+       moment to find out, and mid-take on a review recording. A client
+       credentials grant asks TikTok to accept the pair, with no user
+       involved. Returns TikTok's verdict only; never a key, secret or token. */
+    if (url.searchParams.get('action') === 'tiktok-check') {
+      if (!ttKey || !ttSecret) return json({ ok: false, error: 'not_configured' });
+      const cr = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_key: ttKey, client_secret: ttSecret, grant_type: 'client_credentials' }),
+      });
+      const cj = await cr.json().catch(() => ({}));
+      return json({
+        ok: Boolean(cj.access_token),
+        error: cj.access_token ? null : (cj.error ?? ('HTTP ' + cr.status)),
+        error_description: cj.access_token ? null : (cj.error_description ?? null),
+        redirect_uri: redirectUri,
+      });
+    }
+
+    /* ── step 1, TikTok: its own dialog and its own credentials ────────── */
+    if (url.searchParams.get('action') === 'start' && url.searchParams.get('platform') === 'tiktok') {
+      const missingTt = [!ttKey && 'TIKTOK_CLIENT_KEY', !ttSecret && 'TIKTOK_CLIENT_SECRET'].filter(Boolean);
+      if (missingTt.length) {
+        return json({ error: 'TikTok is not configured on this project yet. Missing: '
+          + missingTt.join(', ') + '.', missing: missingTt }, 503);
+      }
+      const authHeader = req.headers.get('Authorization');
+      if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+      const host = Deno.env.get('SUPABASE_URL') ?? '';
+      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: who } = await asUser.auth.getUser();
+      if (!who.user) return json({ error: 'Not authenticated' }, 401);
+      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', who.user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a social account' }, 403);
+      }
+      const ttState = await signState({
+        agency_id: membership.agency_id,
+        profile_id: who.user.id,
+        platform: 'tiktok',
+        nonce: crypto.randomUUID(),
+        exp: Date.now() + STATE_TTL_MS,
+      });
+      const ttAuth = new URL('https://www.tiktok.com/v2/auth/authorize/');
+      ttAuth.searchParams.set('client_key', ttKey);
+      ttAuth.searchParams.set('scope', TIKTOK_SCOPES.join(','));
+      ttAuth.searchParams.set('response_type', 'code');
+      ttAuth.searchParams.set('redirect_uri', redirectUri);
+      ttAuth.searchParams.set('state', ttState);
+      console.log('social-connect start: platform=tiktok redirect=' + redirectUri
+        + ' scope=' + TIKTOK_SCOPES.join(','));
+      return json({
+        url: ttAuth.toString(), platform: 'tiktok', redirectUri,
+        scopes: TIKTOK_SCOPES, expiresInMinutes: STATE_TTL_MS / 60000,
+      });
+    }
+
+    /* ── step 1: hand back an authorization URL ───────────────────────────── */
+    if (url.searchParams.get('action') === 'start') {
+      /* Which product. Both live on one Meta app and one redirect URI, so the
+         platform has to travel through the signed state -- the callback is a
+         bare browser redirect and Meta tells us nothing about which dialog the
+         person just came out of. */
+      const requested = url.searchParams.get('platform') ?? 'instagram';
+      if (!PLATFORMS.includes(requested as Platform)) {
+        return json({ error: `Unsupported platform: ${requested}` }, 400);
+      }
+      const platform = requested as Platform;
+
+      /* Name what is actually missing. The old message asserted that both
+         META_APP_ID and META_REDIRECT_URI were unset whenever either one was,
+         which sent at least one debugging session after the wrong variable --
+         the owner had set the secret and the redirect and not the app id, and
+         the error told them the redirect was missing too.
+
+         Presence only. The values are never read back, never logged and never
+         returned; this reports three booleans. META_APP_SECRET is included
+         because the callback leg needs it even though this guard does not, so
+         a half-configured app fails here rather than silently later, after the
+         person has already been sent to Meta and back. */
+      /* The redirect is no longer on this list: it is derived above and
+         cannot be missing. Only the two real secrets can be. */
+      /* Named for the platform being connected. Telling somebody
+         META_APP_ID is missing when they have set it and are connecting
+         Instagram is how a debugging session goes after the wrong variable
+         -- which the comment above records happening already. */
+      const missing = (platform === 'instagram'
+        ? [!igAppId && 'META_IG_APP_ID', !igAppSecret && 'META_IG_APP_SECRET']
+        : [!appId && 'META_APP_ID', !appSecret && 'META_APP_SECRET']
+      ).filter(Boolean) as string[];
+      if (missing.length) {
+        /* THE INSTAGRAM MESSAGE IS LONGER ON PURPOSE. Two of the three things
+           needed cannot be guessed from the name of a missing variable: the
+           product has to be added to the app at all, and Instagram registers
+           its redirect URI under its OWN settings rather than inheriting the
+           one Facebook Login already has.
+
+           It also names the route that works TODAY. An account linked to a
+           Facebook Page connects through the Facebook button with none of
+           this configured, and withholding that while listing what is missing
+           would be half a message. */
+        const detail = platform === 'instagram'
+          ? 'Connecting Instagram on its own needs the Instagram product set up in the '
+            + 'Meta app: App Dashboard > Instagram > API setup with Instagram login > '
+            + 'Set up Instagram business login. That page holds the Instagram App ID and '
+            + 'Secret (its own, not the Facebook app\'s) and its own OAuth redirect box, '
+            + 'which does not inherit the one Facebook Login uses. '
+            + 'If this Instagram account is linked to a Facebook Page, press Connect on '
+            + 'Facebook instead \u2014 one dialog connects the Page and the Instagram '
+            + 'account together, and needs none of the above.'
+          : '';
+        return json({
+          error: 'Instagram is not configured on this project yet. Missing: '
+            + missing.join(', ') + '.' + (detail ? ' ' + detail : ''),
+          missing,
+          hint: 'Set these on the synapse-platform project (bhrhejpekmhbhwryjhgk). '
+              + 'The redirect no longer needs setting -- it is this function. '
+              + 'Meta must still allow it: add ' + derivedRedirect
+              + ' to Valid OAuth Redirect URIs on the Meta app.',
+        }, 503);
+      }
+
+      const authHeader = req.headers.get('Authorization');
+      if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+
+      const supaUrl = Deno.env.get('SUPABASE_URL') ?? '';
+      const userClient = createClient(supaUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: userData } = await userClient.auth.getUser();
+      const user = userData.user;
+      if (!user) return json({ error: 'Not authenticated' }, 401);
+
+      /* Which agency, decided here from membership rather than taken from the
+         caller. The state we sign is only trustworthy if what it asserts was
+         established server-side.
+
+         ANY MEMBER MAY CONNECT (changed 2026-09-25). It was owner/admin, on
+         the grounds that a Meta token speaks for the whole agency. That held
+         while there was one account per platform. Now that an agency can hold
+         several and a post names which one it goes to, an agent connecting
+         their own account is not a claim to speak for anybody -- and
+         disconnect_social_account has accepted any member since 0053, so an
+         agent could already remove an account they were not allowed to add.
+
+         Same three roles queue_social_post accepts, and connected_by records
+         who did it. */
+      const admin = createClient(supaUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a social account' }, 403);
+      }
+
+      const state = await signState({
+        agency_id: membership.agency_id,
+        profile_id: user.id,
+        platform,
+        nonce: crypto.randomUUID(),
+        exp: Date.now() + STATE_TTL_MS,
+      });
+
+      /* Two different dialogs. Instagram Login lives on instagram.com and
+         issues a token for graph.instagram.com; Facebook Login lives on
+         facebook.com and issues one for graph.facebook.com. They are not
+         interchangeable, and a token from one is simply rejected by the
+         other's host. */
+      const scopes = scopesFor(platform);
+      const auth = new URL(platform === 'facebook'
+        ? 'https://www.facebook.com/v21.0/dialog/oauth'
+        : 'https://www.instagram.com/oauth/authorize');
+      auth.searchParams.set('client_id', idFor(platform));
+      auth.searchParams.set('redirect_uri', redirectUri);
+      auth.searchParams.set('response_type', 'code');
+
+      /* -- FACEBOOK LOGIN FOR BUSINESS ------------------------------------
+         Meta ships two products both called Facebook Login and they take
+         different dialog parameters. Classic Login is driven by `scope`.
+         Login for Business is driven by a `config_id` naming a configuration
+         built in the app console, and Meta's guidance is explicit that scope
+         should NOT be sent with it -- the configuration decides the
+         permissions, so a scope list is at best redundant and at worst
+         fighting the configuration.
+
+         `override_default_response_type` is the half that is easy to miss. A
+         configuration carries its own default response type. Without this
+         flag the `response_type=code` set above is discarded in favour of
+         that default, which can hand back a token in the URL FRAGMENT rather
+         than a code in the query. A fragment is never sent to the server, so
+         the callback would arrive with nothing to exchange -- failing in
+         exactly the silent way the rest of this file exists to prevent. Meta
+         documents the flag as required whenever response_type is passed
+         alongside a config_id.
+
+         Unset, everything below behaves as it did: classic Login, scope list.
+         Instagram is untouched either way -- config_id is a Facebook Login
+         concept and the Instagram dialog does not accept it. */
+      const usingConfig = platform === 'facebook' && !!fbConfigId;
+      if (usingConfig) {
+        auth.searchParams.set('config_id', fbConfigId);
+        auth.searchParams.set('override_default_response_type', 'true');
+      } else {
+        auth.searchParams.set('scope', scopes.join(','));
+      }
+
+      /* ASK AGAIN, EVERY TIME. Facebook remembers what you granted last time
+         and reuses it silently -- including when what you granted was NOTHING.
+         Authorise once without ticking a Page and /me/accounts returns an
+         empty list; try again and Facebook shows no picker, reuses the empty
+         grant, and returns an empty list again. Forever. There is no way out
+         of that loop from inside the product: the dialog stops asking, and
+         the error looks identical on every attempt.
+
+          makes it re-ask rather than replay. On a first
+         connect it changes nothing, and on every later one it is the
+         difference between a recoverable mistake and a dead end. Facebook is
+         a rare enough thing to connect that showing the picker each time
+         costs nothing worth keeping. */
+      if (platform === 'facebook') auth.searchParams.set('auth_type', 'rerequest');
+
+      auth.searchParams.set('state', state);
+
+      /* `mode` is reported because the two products fail identically from the
+         portal's side -- you come back with nothing connected -- and which
+         dialog was actually built is the first thing worth knowing.
+         `redirectUri` is reported for the same reason: it was wrong once, in
+         a way nothing downstream could see. */
+      /* THE WHOLE REQUEST, minus the one part worth withholding. "Invalid
+         request" is Meta's answer to parameters it did not like, and which
+         parameters those were is not recoverable from the portal -- you come
+         back with nothing connected and no error of ours to read.
+
+         The client id is public: it travels in the dialog URL that the
+         operator's own browser is about to display. Saying WHICH pair it came
+         from matters more than the value -- sending the Facebook app id to
+         instagram.com is a failure that looks like every other failure.
+
+         The state is deliberately not logged: it is signed and carries the
+         agency and profile id. */
+      console.log('social-connect start: platform=' + platform
+        + ' mode=' + (usingConfig ? 'login-for-business' : 'classic')
+        + ' redirect=' + redirectUri
+        + ' client_id=' + (idFor(platform) || '(unset)')
+        + ' creds=' + (platform === 'instagram'
+            ? (Deno.env.get('META_IG_APP_ID') ? 'instagram-pair' : 'facebook-pair-fallback')
+            : 'facebook-pair')
+        + (usingConfig
+            ? ' config_id=' + fbConfigId
+            : ' scope=' + scopes.join(',')));
+
+      return json({
+        url: auth.toString(),
+        platform,
+        mode: usingConfig ? 'login-for-business' : 'classic',
+        redirectUri,
+        ...(usingConfig ? { configId: fbConfigId } : { scopes }),
+        expiresInMinutes: STATE_TTL_MS / 60000,
+      });
+    }
+
+    /* ── step 2: the callback ─────────────────────────────────────────────── */
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+
+    // The person declined, or Meta refused. Both are ordinary outcomes.
+    const denied = url.searchParams.get('error');
+    if (denied) return backToPortal('cancelled', url.searchParams.get('error_description') ?? denied);
+
+    if (!code || !state) return json({ error: 'This endpoint expects an OAuth redirect from Meta.' }, 400);
+
+    const claims = await readState(state);
+    if (!claims) return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+
+    /* TikTok first: it needs neither Meta credential, and the check below
+       would refuse it for lacking one. The platform is read from the state
+       we signed, never from the query. */
+    if (claims.platform === 'tiktok') {
+      if (!ttKey || !ttSecret) return backToPortal('error', 'TikTok is not configured on this project.');
+      return await finishTikTok(code, claims, ttKey, ttSecret, redirectUri);
+    }
+
+    /* AFTER the state is read, because the state is what says which
+       platform this is -- and the two platforms need different
+       credentials. Checking before it meant reading claims.platform one
+       line above the const that declares it. */
+    if (!idFor(claims.platform) || !secretFor(claims.platform) || !redirectUri) {
+      return backToPortal('error',
+        'Meta is not configured for ' + claims.platform + ' on this project.');
+    }
+
+    /* The platform is read from the state we signed, never from the query --
+       the callback's parameters are attacker-reachable and this one decides
+       which token exchange runs and which account gets written. */
+    if (claims.platform === 'facebook') {
+      return await finishFacebook(code, claims, appId, appSecret, redirectUri, fbConfigId);
+    }
+
+    /* short-lived token */
+    const form = new FormData();
+    /* The Instagram pair. This is the exchange that was silently going to
+       fail with the Facebook app's credentials. */
+    form.append('client_id', igAppId);
+    form.append('client_secret', igAppSecret);
+    form.append('grant_type', 'authorization_code');
+    form.append('redirect_uri', redirectUri);
+    form.append('code', code);
+
+    const tokRes = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', body: form });
+    const tok = await tokRes.json().catch(() => ({}));
+    if (!tokRes.ok || !tok.access_token) {
+      return backToPortal('error', tok?.error_message ?? 'Instagram would not issue a token.');
+    }
+
+    /* Exchange for the 60-day token. Skipping this leaves a credential that
+       dies in an hour, and the failure lands days later on a scheduled post. */
+    let accessToken: string = tok.access_token;
+    let expiresAt: string | null = null;
+    const longRes = await fetch(
+      'https://graph.instagram.com/access_token?grant_type=ig_exchange_token'
+        + '&client_secret=' + encodeURIComponent(appSecret)
+        + '&access_token=' + encodeURIComponent(accessToken),
+    );
+    const long = await longRes.json().catch(() => ({}));
+    if (longRes.ok && long.access_token) {
+      accessToken = long.access_token;
+      if (typeof long.expires_in === 'number') {
+        expiresAt = new Date(Date.now() + long.expires_in * 1000).toISOString();
+      }
+    }
+
+    /* Who we just connected, so the portal can name the account rather than
+       show an opaque id. */
+    const meRes = await fetch(
+      'https://graph.instagram.com/v21.0/me?fields=user_id,username&access_token=' + encodeURIComponent(accessToken),
+    );
+    const me = await meRes.json().catch(() => ({}));
+    const accountId = String(me.user_id ?? tok.user_id ?? '');
+    const username = String(me.username ?? '');
+    if (!accountId) return backToPortal('error', 'Connected, but Instagram did not identify the account.');
+
+    /* Into Vault, via the definer function built for exactly this. The token
+       has now touched only this function and the vault. p_connected_by names
+       the operator this callback is acting for: the function re-checks that
+       they are an owner or admin of the agency in the signed state. */
+    const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    const { error: connErr } = await admin.rpc('connect_social_account', {
+      p_agency_id: claims.agency_id as string,
+      p_platform: 'instagram',
+      p_account_id: accountId,
+      p_username: username,
+      p_access_token: accessToken,
+      p_refresh_token: null,
+      p_expires_at: expiresAt,
+      p_scopes: IG_SCOPES,
+      p_connected_by: claims.profile_id as string,
+    });
+    if (connErr) return backToPortal('error', connErr.message);
+
+    return backToPortal('instagram', username ? '@' + username : undefined);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error('social-connect fatal: ' + message);
+    // A thrown error must never leave the operator staring at a raw stack.
+    return url.searchParams.get('action') === 'start' ? json({ error: message }, 500) : backToPortal('error', message);
+  }
+});
