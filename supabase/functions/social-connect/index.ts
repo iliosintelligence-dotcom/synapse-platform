@@ -415,28 +415,33 @@ async function pagesFromGrant(
     }
     out.ids = ids.size;
 
-    /* Same fields as the /me/accounts call, so a Page found this way is
-       indistinguishable from one found the usual way by the time it reaches
-       the chooser. Capped like that call is; nobody runs fifty Pages for one
-       agency, and the cap keeps a strange grant from becoming fifty fetches. */
-    const reads = await Promise.all([...ids].slice(0, 25).map(async (id) => {
-      try {
-        const pr = await fetch(
-          `${graphHost}/${id}?fields=id,name,access_token,instagram_business_account{id,username}`
-            + `&access_token=${encodeURIComponent(userToken)}`,
-        );
-        const p = await pr.json().catch(() => null);
-        if (!pr.ok || !p?.id) {
-          const code = String(p?.error?.code ?? pr.status);
-          out.read_errors[code] = (out.read_errors[code] ?? 0) + 1;
+    /* Read every Page named by the grant: a valid Page after the first 25
+       still needs to reach the chooser, and stale_pages requires checking all
+       named Pages. Keep concurrency bounded so a large grant does not fan out
+       an unbounded number of Graph requests at once. */
+    const pageIds = [...ids];
+    const reads: Array<PageRow | null> = [];
+    for (let i = 0; i < pageIds.length; i += 25) {
+      const batch = await Promise.all(pageIds.slice(i, i + 25).map(async (id) => {
+        try {
+          const pr = await fetch(
+            `${graphHost}/${id}?fields=id,name,access_token,instagram_business_account{id,username}`
+              + `&access_token=${encodeURIComponent(userToken)}`,
+          );
+          const p = await pr.json().catch(() => null);
+          if (!pr.ok || !p?.id) {
+            const code = String(p?.error?.code ?? pr.status);
+            out.read_errors[code] = (out.read_errors[code] ?? 0) + 1;
+            return null;
+          }
+          return p as PageRow;
+        } catch {
+          out.read_errors.network = (out.read_errors.network ?? 0) + 1;
           return null;
         }
-        return p as PageRow;
-      } catch {
-        out.read_errors.network = (out.read_errors.network ?? 0) + 1;
-        return null;
-      }
-    }));
+      }));
+      reads.push(...batch);
+    }
     out.pages = reads.filter((p): p is PageRow => p !== null);
     out.readable = out.pages.length;
   } catch (err) {
@@ -640,17 +645,29 @@ async function finishFacebook(
         { reason: 'missing_permission', facts });
     }
 
-    /* THE GRANT NAMES PAGES THAT ARE NOT THERE. Pages deleted (or handed
-       away) after the first connection stay in the business integration's
-       grant, and Facebook replays that grant without showing its Page list
-       again -- so the new Pages are never offered. Removing the integration
-       on Facebook is the only reset; nothing we send in the dialog forces it
-       under Login for Business. */
-    if (grant && grant.ids > 0 && grant.readable === 0) {
+    /* A failed direct read is not proof that a Page disappeared: Graph can
+       fail temporarily, and a network error tells us nothing about the Page.
+       Only classify the grant as stale when every named Page read returned
+       Graph's object-not-found code (100 or 803). */
+    const pageReadsConfirmMissing = grant && grant.ids > 0 && grant.readable === 0
+      && Object.keys(grant.read_errors).length > 0
+      && Object.keys(grant.read_errors).every((code) => code === '100' || code === '803');
+    if (pageReadsConfirmMissing) {
+      /* Pages deleted (or handed away) after the first connection stay in the
+         business integration's grant, and Facebook replays that grant without
+         showing its Page list again. Removing the integration on Facebook is
+         the only reset under Login for Business. */
       return backToPortal('error',
         'Facebook’s permission still points at Pages that no longer open (deleted?). '
         + 'Remove Synapse in Facebook’s Business integrations, then connect again.',
         { reason: 'stale_pages', facts });
+    }
+
+    if (grant && grant.ids > 0 && grant.readable === 0 && Object.keys(grant.read_errors).length) {
+      return backToPortal('error',
+        'Facebook named Pages, but we could not read them just now. Please try again; '
+        + 'if it keeps happening, tell Synapse.',
+        { reason: 'temporary_failure', facts });
     }
 
     /* SAY SO WHEN WE DO NOT KNOW. This is the branch that was asserting
