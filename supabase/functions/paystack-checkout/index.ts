@@ -217,9 +217,18 @@ async function legacyActivate(
   amount: number | undefined,
   currency: string | undefined,
 ): Promise<{ ok: boolean; tier?: string; missing?: boolean }> {
+  // The generated Database type predates the billing migration, so keep the
+  // dynamic table/RPC typing confined to this migration-compatibility path.
+  const legacyAdmin = admin as unknown as {
+    from: (table: 'subscription_payments') => any;
+    rpc: (
+      name: 'activate_subscription',
+      args: { p_agency_id: string; p_plan_tier: string },
+    ) => Promise<{ error: { message: string } | null }>;
+  };
   // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
   // status='pending' and return a row, so activation cannot double-apply.
-  const { data: updated } = await admin
+  const { data: updated } = await legacyAdmin
     .from('subscription_payments')
     .update({ status: 'success', verified_at: new Date().toISOString() })
     .eq('paystack_reference', reference)
@@ -229,7 +238,7 @@ async function legacyActivate(
     .select('agency_id, plan_tier')
     .maybeSingle();
   if (updated) {
-    const { error: activateError } = await admin.rpc('activate_subscription', {
+    const { error: activateError } = await legacyAdmin.rpc('activate_subscription', {
       p_agency_id: updated.agency_id,
       p_plan_tier: updated.plan_tier,
     });
@@ -239,7 +248,7 @@ async function legacyActivate(
          same end state the new RPC's transaction rolls back to -- and fail,
          so the caller (or Paystack's webhook retry) tries the whole thing
          again. */
-      await admin
+      await legacyAdmin
         .from('subscription_payments')
         .update({ status: 'pending', verified_at: null })
         .eq('paystack_reference', reference)
@@ -249,7 +258,7 @@ async function legacyActivate(
     return { ok: true, tier: updated.plan_tier as string };
   }
   // Already activated by the other path (webhook or client verify).
-  const { data: already } = await admin
+  const { data: already } = await legacyAdmin
     .from('subscription_payments')
     .select('plan_tier, status')
     .eq('paystack_reference', reference)
