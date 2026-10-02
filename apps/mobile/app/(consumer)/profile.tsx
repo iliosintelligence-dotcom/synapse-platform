@@ -1,17 +1,26 @@
-/**
- * Profile — name, phone, saved count, sign out. Deliberately minimal for the
- * MVP. (Supporting screen.) Swap MOCK_PROFILE for useProfile(); wire signOut
- * to useAuth().signOut.
- */
-import React from 'react';
-import { View, ScrollView, StyleSheet, Pressable } from 'react-native';
+/** Profile — name, phone, saved count, and session sign out. */
+import React, { useState } from 'react';
+import { Alert, View, ScrollView, StyleSheet, Pressable } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GlassCard, Avatar, Title, Body, Label, Caption, Button, Icon, color, space } from '@synapse/ui';
 import { MOCK_PROFILE } from '../../src/mock';
+import { useAuth } from '@synapse/auth';
 
 export default function Profile() {
   const router = useRouter();
+  const { signOut } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    try {
+      await signOut();
+    } catch {
+      setSigningOut(false);
+      Alert.alert('Sign out failed', 'Please try again when you have a connection.');
+    }
+  };
   const insets = useSafeAreaInsets();
 
   return (
@@ -42,8 +51,10 @@ export default function Profile() {
         label="Sign out"
         variant="destructive"
         icon="xmark"
+        loading={signingOut}
+        disabled={signingOut}
         style={{ marginTop: space.xl }}
-        onPress={() => router.replace('/(auth)/landing')}
+        onPress={() => void handleSignOut()}
       />
     </ScrollView>
   );
