@@ -105,7 +105,12 @@ async function activatePayment(
   });
   if (error) {
     if (rpcMissing(error)) {
-      await legacyActivate(admin, reference, verifyData.data.amount, verifyData.data.currency);
+      /* A recorded payment that is still pending after the fallback must be
+         retried: answering 200 would stop Paystack resending a charge the
+         customer may never return to verify. A reference with no payment row
+         is not ours to activate and is acknowledged. */
+      const result = await legacyActivate(admin, reference, verifyData.data.amount, verifyData.data.currency);
+      if (!result.ok && !result.missing) throw new Error('payment still pending after fallback activation');
       return;
     }
     throw error;
@@ -129,7 +134,7 @@ async function legacyActivate(
   reference: string,
   amount: number | undefined,
   currency: string | undefined,
-): Promise<{ ok: boolean; tier?: string }> {
+): Promise<{ ok: boolean; tier?: string; missing?: boolean }> {
   // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
   // status='pending' and return a row, so activation cannot double-apply.
   const { data: updated } = await admin
@@ -142,10 +147,23 @@ async function legacyActivate(
     .select('agency_id, plan_tier')
     .maybeSingle();
   if (updated) {
-    await admin.rpc('activate_subscription', {
+    const { error: activateError } = await admin.rpc('activate_subscription', {
       p_agency_id: updated.agency_id,
       p_plan_tier: updated.plan_tier,
     });
+    if (activateError) {
+      /* Paid but not activated must not stick: a retry would find the payment
+         already 'success' and never try again. Put it back to pending -- the
+         same end state the new RPC's transaction rolls back to -- and fail,
+         so the caller (or Paystack's webhook retry) tries the whole thing
+         again. */
+      await admin
+        .from('subscription_payments')
+        .update({ status: 'pending', verified_at: null })
+        .eq('paystack_reference', reference)
+        .eq('status', 'success');
+      throw new Error(`subscription activation failed: ${activateError.message}`);
+    }
     return { ok: true, tier: updated.plan_tier as string };
   }
   // Already activated by the other path (webhook or client verify).
@@ -155,5 +173,6 @@ async function legacyActivate(
     .eq('paystack_reference', reference)
     .maybeSingle();
   if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
-  return { ok: false };
+  // No row at all: not a payment this system started, nothing to retry.
+  return { ok: false, missing: !already };
 }
