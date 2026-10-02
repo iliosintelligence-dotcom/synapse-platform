@@ -34,6 +34,7 @@
  * matched by user_id when a bearer token is present.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isSupportedPushEndpoint } from '../_shared/push-endpoint.ts';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -129,6 +130,10 @@ async function encryptPayload(plaintext: string, p256dhB64: string, authB64: str
 }
 
 async function sendPush(sub: { endpoint: string; p256dh: string; auth_key: string }, payload: unknown) {
+  if (!isSupportedPushEndpoint(sub.endpoint)) {
+    return { ok: false, status: 0, reason: 'unsupported-push-endpoint' };
+  }
+
   const priv = Deno.env.get('VAPID_PRIVATE_KEY');
   const pub = Deno.env.get('VAPID_PUBLIC_KEY');
   const subject = Deno.env.get('VAPID_SUBJECT') ?? 'mailto:partnerships@synapse.ng';
@@ -139,6 +144,7 @@ async function sendPush(sub: { endpoint: string; p256dh: string; auth_key: strin
 
   const res = await fetch(sub.endpoint, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       TTL: '900',                                   // a proximity ping is worthless tomorrow
       'Content-Encoding': 'aes128gcm',

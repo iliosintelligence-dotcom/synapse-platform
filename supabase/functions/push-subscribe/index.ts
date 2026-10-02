@@ -19,6 +19,7 @@
  * verify_jwt = false so an anonymous visitor can reach it at all.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isSupportedPushEndpoint } from '../_shared/push-endpoint.ts';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -63,10 +64,9 @@ Deno.serve(async (req: Request) => {
     if (action === 'subscribe') {
       const sub = (body.subscription ?? {}) as Record<string, string>;
       const endpoint = String(sub.endpoint ?? '');
-      // Only ever a real push service URL: this string is later fetched by
-      // proximity-report, so an attacker-supplied host would turn the sender
-      // into a request forwarder.
-      if (!/^https:\/\/[^\s]+$/i.test(endpoint)) return json({ error: 'bad endpoint' }, 400);
+      // This endpoint is fetched by proximity-report, so only supported push
+      // providers may be stored here.
+      if (!isSupportedPushEndpoint(endpoint)) return json({ error: 'bad endpoint' }, 400);
       const side = body.side === 'agency' ? 'agency' : 'customer';
 
       // One row per endpoint. A browser re-subscribing must update, not
