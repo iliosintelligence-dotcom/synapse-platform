@@ -113,21 +113,26 @@ with the settings below and send me the new ID. It's stored in
 5. Back in the portal, tick the agency's Pages → **Connect**.
 
 If it still fails, the portal now shows which case it is, with steps. To see
-the record, use the query that matches the database migration state.
+the record:
 
-Before migration `20261002090000` is applied, query `detail` only; it includes
-the facts at the end:
+**Read the full record privately**, in the Supabase dashboard's SQL editor
+(Project → SQL Editor), not through CI:
+
+    select at, status, detail, facts
+    from public.social_connect_failures
+    order by at desc limit 5;
+
+(Before migration `20261002090000` is applied there is no `facts` column;
+drop it from the query -- the facts are at the end of `detail` until then.)
+
+**Never print `detail` through the CI workflow.** This repo's CI logs are
+public, and `detail` is free text that can carry Facebook's own error
+description or an upstream error message. The only public-safe query is the
+structured `facts` column -- permission names, counts and error codes, no
+tokens, ids or names -- so it works only after that migration:
 
     gh workflow run migrate.yml --repo iliosintelligence-dotcom/synapse-platform \
-      -f mode=query -f query="select at, status, detail from public.social_connect_failures order by at desc limit 5"
-
-After that migration is applied, `facts` is available as its own column:
-
-    gh workflow run migrate.yml --repo iliosintelligence-dotcom/synapse-platform \
-      -f mode=query -f query="select at, status, detail, facts from public.social_connect_failures order by at desc limit 5"
-
-This repo's CI logs are public, and the record holds counts and permission
-names only.
+      -f mode=query -f query="select at, status, facts from public.social_connect_failures order by at desc limit 5"
 
 ## D. App Review test calls in Graph API Explorer
 
