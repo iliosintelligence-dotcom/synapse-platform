@@ -71,21 +71,41 @@ Deno.serve(async (req: Request) => {
 
       // One row per endpoint. A browser re-subscribing must update, not
       // accumulate, or every future push is sent several times over.
-      const { data: existing } = await db.from('push_subscriptions')
-        .select('id').eq('endpoint', endpoint).limit(1);
+      const { data: existingRows, error: lookupError } = await db.from('push_subscriptions')
+        .select('id, user_id, visitor_id').eq('endpoint', endpoint).limit(1);
+      if (lookupError) return json({ error: lookupError.message }, 500);
+      const existing = existingRows?.[0] ?? null;
+      if (existing) {
+        const sameOwner = userId
+          ? existing.user_id === userId
+          : existing.user_id === null && existing.visitor_id === visitorId;
+        if (!sameOwner) return json({ error: 'subscription belongs to another identity' }, 409);
+      }
 
-      const row = {
-        ...owner,
+      const subscription = {
         endpoint,
         p256dh: sub.p256dh ?? null,
         auth_key: sub.auth ?? sub.auth_key ?? null,
         platform: 'web',
         side,
       };
-      const res = existing?.[0]
-        ? await db.from('push_subscriptions').update(row).eq('id', existing[0].id)
-        : await db.from('push_subscriptions').insert(row);
-      if (res.error) return json({ error: res.error.message }, 500);
+      if (existing) {
+        /* Repeat the owner check in the UPDATE predicate so a concurrent
+           change between lookup and write cannot transfer the endpoint. */
+        const { data: updated, error } = userId
+          ? await db.from('push_subscriptions').update({ ...subscription, user_id: userId })
+            .eq('id', existing.id).eq('user_id', userId).select('id').maybeSingle()
+          : await db.from('push_subscriptions').update({ ...subscription, visitor_id: visitorId })
+            .eq('id', existing.id).eq('visitor_id', visitorId).is('user_id', null)
+            .select('id').maybeSingle();
+        if (error) return json({ error: error.message }, 500);
+        if (!updated) return json({ error: 'subscription ownership changed' }, 409);
+      } else {
+        const { error } = userId
+          ? await db.from('push_subscriptions').insert({ ...subscription, user_id: userId })
+          : await db.from('push_subscriptions').insert({ ...subscription, visitor_id: visitorId });
+        if (error) return json({ error: error.message }, 500);
+      }
       return json({ ok: true });
     }
 
