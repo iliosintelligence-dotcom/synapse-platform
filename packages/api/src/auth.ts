@@ -78,8 +78,16 @@ export async function signInWithApple(redirectTo?: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
+  /* Signing out of THIS device must not need a connection. Offline, the
+     server call fails and supabase-js keeps the stored session, so the person
+     stayed signed in -- and the next launch restored them -- until the
+     network came back. A local sign-out clears the stored session without
+     the network; the server-side refresh token simply expires unused. */
   const { error } = await getDb().auth.signOut();
-  if (error) throw error;
+  if (error) {
+    const local = await getDb().auth.signOut({ scope: 'local' });
+    if (local.error) throw local.error;
+  }
 }
 
 /**

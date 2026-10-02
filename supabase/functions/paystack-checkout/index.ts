@@ -179,17 +179,68 @@ export async function activatePayment(
       args: { p_paystack_reference: string; p_amount_kobo: number; p_currency: string },
     ) => Promise<{
       data: Array<{ payment_status: string; plan_tier: string }> | null;
-      error: { message: string } | null;
+      error: { message: string; code?: string } | null;
     }>;
   }).rpc('confirm_subscription_payment', {
     p_paystack_reference: reference,
     p_amount_kobo: verifyData.data.amount ?? -1,
     p_currency: verifyData.data.currency ?? '',
   });
-  if (error) throw error;
+  if (error) {
+    if (rpcMissing(error)) {
+      return await legacyActivate(admin, reference, verifyData.data.amount, verifyData.data.currency);
+    }
+    throw error;
+  }
   const payment = Array.isArray(confirmation) ? confirmation[0] : confirmation;
   if (payment?.payment_status === 'success') {
     return { ok: true, tier: payment.plan_tier as string };
   }
+  return { ok: false };
+}
+
+/* THE MIGRATION MAY NOT BE THERE YET. confirm_subscription_payment arrives in
+   migration 20261002091500, which is applied by hand, while this function
+   deploys on every push to main -- so for a while after a merge the RPC can be
+   missing. A payment made in that window must still activate, so a missing
+   RPC (and only that) falls back to the compare-and-swap activation this
+   replaced, unchanged. Any other error still fails loudly. */
+function rpcMissing(e: { message?: string; code?: string } | null): boolean {
+  if (!e) return false;
+  return e.code === 'PGRST202' || e.code === '42883'
+    || /could not find the function|function .* does not exist/i.test(e.message ?? '');
+}
+
+async function legacyActivate(
+  admin: ReturnType<typeof createClient>,
+  reference: string,
+  amount: number | undefined,
+  currency: string | undefined,
+): Promise<{ ok: boolean; tier?: string }> {
+  // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
+  // status='pending' and return a row, so activation cannot double-apply.
+  const { data: updated } = await admin
+    .from('subscription_payments')
+    .update({ status: 'success', verified_at: new Date().toISOString() })
+    .eq('paystack_reference', reference)
+    .eq('status', 'pending')
+    .eq('amount_kobo', amount ?? -1)
+    .eq('currency', currency ?? '')
+    .select('agency_id, plan_tier')
+    .maybeSingle();
+  if (updated) {
+    await admin.rpc('activate_subscription', {
+      p_agency_id: updated.agency_id,
+      p_plan_tier: updated.plan_tier,
+    });
+    return { ok: true, tier: updated.plan_tier as string };
+  }
+  // Already activated by the other path (webhook or client verify).
+  const { data: already } = await admin
+    .from('subscription_payments')
+    .select('plan_tier, status')
+    .eq('paystack_reference', reference)
+    .maybeSingle();
+  if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
   return { ok: false };
 }

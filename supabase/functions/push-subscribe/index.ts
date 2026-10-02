@@ -75,11 +75,19 @@ Deno.serve(async (req: Request) => {
         .select('id, user_id, visitor_id').eq('endpoint', endpoint).limit(1);
       if (lookupError) return json({ error: lookupError.message }, 500);
       const existing = existingRows?.[0] ?? null;
+      /* SIGNING IN ON THE SAME BROWSER. A visitor who turned notifications on
+         and then signed in arrives with the account AND the visitor id that
+         owns the row. Holding both the endpoint and that visitor id is proof
+         it is the same browser, so the account takes the row over. Anything
+         else -- another account's row, another visitor's -- stays a 409:
+         that is the takeover this check exists to stop. */
+      const claimable = !!existing && !!userId && existing.user_id === null
+        && !!visitorId && existing.visitor_id === visitorId;
       if (existing) {
         const sameOwner = userId
           ? existing.user_id === userId
           : existing.user_id === null && existing.visitor_id === visitorId;
-        if (!sameOwner) return json({ error: 'subscription belongs to another identity' }, 409);
+        if (!sameOwner && !claimable) return json({ error: 'subscription belongs to another identity' }, 409);
       }
 
       const subscription = {
@@ -92,7 +100,11 @@ Deno.serve(async (req: Request) => {
       if (existing) {
         /* Repeat the owner check in the UPDATE predicate so a concurrent
            change between lookup and write cannot transfer the endpoint. */
-        const { data: updated, error } = userId
+        const { data: updated, error } = claimable
+          ? await db.from('push_subscriptions').update({ ...subscription, user_id: userId })
+            .eq('id', existing.id).is('user_id', null).eq('visitor_id', visitorId)
+            .select('id').maybeSingle()
+          : userId
           ? await db.from('push_subscriptions').update({ ...subscription, user_id: userId })
             .eq('id', existing.id).eq('user_id', userId).select('id').maybeSingle()
           : await db.from('push_subscriptions').update({ ...subscription, visitor_id: visitorId })
