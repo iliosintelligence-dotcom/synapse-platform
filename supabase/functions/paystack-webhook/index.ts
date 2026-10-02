@@ -17,6 +17,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 Deno.serve(async (req: Request) => {
+  let signatureVerified = false;
   if (req.method !== 'POST') return new Response('ok');
 
   try {
@@ -25,10 +26,10 @@ Deno.serve(async (req: Request) => {
     const signature = req.headers.get('x-paystack-signature') ?? '';
 
     if (!paystackKey || !(await validSignature(rawBody, signature, paystackKey))) {
-      // The only case that ever gets a non-200: an unsigned or wrongly-signed
-      // request never reaches the body below.
+      // An unsigned or wrongly-signed request never reaches the body below.
       return new Response('invalid signature', { status: 401 });
     }
+    signatureVerified = true;
 
     const event = JSON.parse(rawBody) as { event?: string; data?: { reference?: string } };
     const reference = event.data?.reference;
@@ -40,15 +41,15 @@ Deno.serve(async (req: Request) => {
       await activatePayment(admin, reference, paystackKey);
     }
 
-    // Always 200 once the signature is trusted -- Paystack retries on
-    // non-2xx, and only a bad signature should ever produce one here, even
-    // for events we don't act on or a reference we don't recognise.
+    // A trusted event that failed during verification or database activation
+    // must be retried. Unknown events and unrecognised references are handled
+    // as no-ops by activatePayment and acknowledged above.
     return new Response('ok', { status: 200 });
   } catch (err) {
     console.error(`paystack-webhook fatal: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    // Still 200: whatever went wrong is on our side, not a signal to Paystack
-    // that it should keep retrying the same event forever.
-    return new Response('ok', { status: 200 });
+    return signatureVerified
+      ? new Response('retry', { status: 500 })
+      : new Response('ok', { status: 200 });
   }
 });
 
@@ -82,24 +83,25 @@ async function activatePayment(
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
-  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') return;
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
-
-  const { data: updated } = await admin
-    .from('subscription_payments')
-    .update({ status: 'success', verified_at: new Date().toISOString() })
-    .eq('paystack_reference', reference)
-    .eq('status', 'pending')
-    .eq('amount_kobo', amount ?? -1)
-    .eq('currency', currency ?? '')
-    .select('agency_id, plan_tier')
-    .maybeSingle();
-
-  if (updated) {
-    await admin.rpc('activate_subscription', { p_agency_id: updated.agency_id, p_plan_tier: updated.plan_tier });
+  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
+    throw new Error('Paystack did not confirm a successful transaction');
   }
-  // If no row was updated, either the client's own verify() already won the
-  // race (fine — same end state), or the reference is unrecognised (also
-  // fine to no-op on).
+
+  /* The database commits payment success and subscription activation in one
+     transaction. On an RPC error the payment remains pending and Paystack
+     can retry this webhook safely. */
+  const { error } = await (admin as unknown as {
+    rpc: (
+      name: 'confirm_subscription_payment',
+      args: { p_paystack_reference: string; p_amount_kobo: number; p_currency: string },
+    ) => Promise<{
+      data: Array<{ payment_status: string; plan_tier: string }> | null;
+      error: { message: string } | null;
+    }>;
+  }).rpc('confirm_subscription_payment', {
+    p_paystack_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) throw error;
 }

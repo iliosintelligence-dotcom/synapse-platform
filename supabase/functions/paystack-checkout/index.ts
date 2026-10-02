@@ -53,7 +53,7 @@ Deno.serve(async (req: Request) => {
     };
 
     if (body.action === 'init') return await handleInit(userClient, admin, user, body.plan, req, paystackKey);
-    if (body.action === 'verify') return await handleVerify(userClient, admin, user, body.reference, paystackKey);
+    if (body.action === 'verify') return await handleVerify(userClient, admin, body.reference, paystackKey);
     return json({ error: 'Unknown action' }, 400);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -126,7 +126,6 @@ async function handleInit(
 async function handleVerify(
   userClient: ReturnType<typeof createClient>,
   admin: ReturnType<typeof createClient>,
-  user: { id: string },
   reference: string | undefined,
   paystackKey: string,
 ) {
@@ -168,42 +167,29 @@ export async function activatePayment(
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
-  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
-    return { ok: false };
+  if (!verifyRes.ok) throw new Error('Paystack verification request failed');
+  if (!verifyData.status || verifyData.data?.status !== 'success') return { ok: false };
+
+  /* This RPC confirms payment and extends the subscription in one database
+     transaction. A failed activation rolls the payment back to pending, so
+     this verification can safely be retried. */
+  const { data: confirmation, error } = await (admin as unknown as {
+    rpc: (
+      name: 'confirm_subscription_payment',
+      args: { p_paystack_reference: string; p_amount_kobo: number; p_currency: string },
+    ) => Promise<{
+      data: Array<{ payment_status: string; plan_tier: string }> | null;
+      error: { message: string } | null;
+    }>;
+  }).rpc('confirm_subscription_payment', {
+    p_paystack_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) throw error;
+  const payment = Array.isArray(confirmation) ? confirmation[0] : confirmation;
+  if (payment?.payment_status === 'success') {
+    return { ok: true, tier: payment.plan_tier as string };
   }
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
-
-  // Atomic compare-and-swap, not read-then-write: the AND status='pending'
-  // is what makes this safe if the webhook and the client's own verify call
-  // land at nearly the same instant — only one UPDATE can ever match and
-  // return a row, so activation cannot double-apply.
-  const { data: updated } = await admin
-    .from('subscription_payments')
-    .update({ status: 'success', verified_at: new Date().toISOString() })
-    .eq('paystack_reference', reference)
-    .eq('status', 'pending')
-    .eq('amount_kobo', amount ?? -1)
-    .eq('currency', currency ?? '')
-    .select('agency_id, plan_tier')
-    .maybeSingle();
-
-  if (updated) {
-    await admin.rpc('activate_subscription', {
-      p_agency_id: updated.agency_id,
-      p_plan_tier: updated.plan_tier,
-    });
-    return { ok: true, tier: updated.plan_tier as string };
-  }
-
-  // Already activated by the other path (webhook or client verify, whichever
-  // won the race) — read back the current tier so both callers see the same
-  // end state.
-  const { data: already } = await admin
-    .from('subscription_payments')
-    .select('plan_tier, status')
-    .eq('paystack_reference', reference)
-    .maybeSingle();
-  if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
   return { ok: false };
 }
