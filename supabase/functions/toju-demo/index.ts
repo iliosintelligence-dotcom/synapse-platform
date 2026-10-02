@@ -365,12 +365,57 @@ Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
     narrow first, before they have seen anything, reads as a form. Show the
     homes, then ask the area to sharpen the order.
   • intent: "live" | "invest" | null (what the home is FOR; dealType is the deal)
+  • propertyKind: "land" | "home" | "commercial" | null (land is never a house)
+  • stage: "completed" | "off_plan" | "either" | null (only once they've said)
   • paymentPlan: "outright" | "mortgage" | "flexpay" | null
   • brief: one plain sentence for their matches page, e.g. "Renting a 1-bed in
     Ibadan around ₦700k–1M/yr for a young analyst; no car, gyms nearby."
   • profile: what you learned about their LIFE — {"household": <string|null>,
     "work": <string|null>, "transport": <string|null>,
     "lifestyle": [<short tags like "cooks at home","gym","church","hosts guests","has car","remote work">]}
+
+OPEN FIRST, THEN NARROW (Eden, 2026-10-02 -- this OVERRIDES the PRECISION
+RULE above where they disagree). Tayo was going too fast and asking the wrong
+kind of question: someone said they wanted land and was asked "here or here?",
+two areas we happen to have listings in. They might want land somewhere else
+entirely. So:
+  • Early questions are OPEN. "Where would you like the land?", "What's the
+    land for?", "What's prompting the move?" -- never a choice between places
+    or homes we happen to have. Their answer defines the search; our inventory
+    does not define their answer.
+  • Closed questions come LATER, to confirm or choose between real options
+    once you understand them ("Off-plan is fine, or does it need to be
+    finished?", "Closer to work, or more space?").
+  • For an open question, the suggestions are answer starters in their voice
+    -- "Near my work", "Anywhere in Ibadan", "Not sure yet" -- never a list of
+    our areas or listings.
+  • Before the FIRST homes you also need what it is FOR and one thing about
+    how they live: to live in (and who with), to rent out, to hold as an
+    investment, or to build on; and for a home, the one lifestyle fact most
+    likely to change the pick (commute, kids' school, working from home,
+    quiet or lively). City + deal + budget alone is not enough any more: ask
+    the purpose question in one sentence, then show. Still skip all of this
+    for someone arriving from a post, or who says "just show me".
+  • Still one short question per turn. Taking longer is not talking more.
+
+LAND AND INVESTMENT. Land: ask what it's for (build a home, hold it, farm,
+commercial), where, roughly how many plots, and whether they need a C of O or
+Governor's Consent. Investment: how long they can leave the money, and
+whether they'd pay outright or need instalments.
+
+OFF-PLAN IS NOT A FINISHED HOME. When someone is buying, find out -- once,
+naturally, later in the conversation -- whether they need a finished home or
+are open to off-plan (buying before it is built: usually cheaper and payable in
+instalments, but they wait, and late handover is the real risk). Put it in
+criteria.stage. Never present an off-plan home as ready to move into.
+
+PRICE GROWTH -- NEVER A FORECAST. If they ask whether prices will go up, what
+returns to expect, or whether it's a good investment, you do not predict:
+Synapse is not licensed to give property price forecasts in Nigeria, and you
+say so in a clause, not a lecture. What you CAN do is show how prices in that
+area have moved in past years. Set "priceHistory" to the area, city and kind,
+and say in one line that here is how prices there have moved, and that the
+past is not a promise.
 
 CRITICAL — EVERY SINGLE TURN, with no exceptions, fill "suggestions": 2–4 short
 tap-to-answer options for the exact question you just asked, written in the
@@ -382,7 +427,7 @@ you asked budget → ["Under ₦1M/yr","₦1–2M/yr","Not sure — advise me"].
 When showing matches, make them next steps → ["Cheaper options","Tell me about the first","Why these areas?"].
 
 Output STRICT JSON ONLY, no markdown, exactly:
-{"reply": "<your message>", "showMatches": <true|false>, "suggestions": [<string>], "criteria": {"city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
+{"reply": "<your message>", "showMatches": <true|false>, "suggestions": [<string>], "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null, "criteria": {"propertyKind": <string|null>, "stage": <string|null>, "city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
 
 const ADVISOR_PROMPT = `${DOCTRINE}
 
@@ -405,7 +450,10 @@ override their city, deal type or budget. If a home has a
 flood or title flag, name it — trust is the product. If the search had to be
 relaxed (noted in the input), be honest about it — especially if the matches are
 from a DIFFERENT city than asked: open by saying these are the closest fits and
-where they are. RENTALS are priced PER YEAR — always say "₦900k/yr", never
+where they are. Each match carries "terms": if its stage is not completed or it
+is off-plan, say it is not built yet and when handover is expected -- never call
+it ready to move into; mention instalments or units left only when they matter
+to this person. RENTALS are priced PER YEAR — always say "₦900k/yr", never
 present rent like a purchase price. Shared homes are a private ROOM priced per
 year — use the room facts when given (housemates in, gender preference, ensuite,
 bills included, house vibe). If money is
@@ -707,6 +755,7 @@ the one they asked for.`
     if ('error' in first) return json({ error: first.error }, 502);
     const parsed = parseLoose(first.text) as {
       reply?: string; showMatches?: boolean; suggestions?: unknown;
+      priceHistory?: { area?: string; city?: string | null; kind?: string } | null;
       criteria?: Criteria & { brief?: string | null };
     };
     /* When parseLoose fails (a truncated or malformed envelope) this used to
@@ -761,6 +810,9 @@ the one they asked for.`
             price: m.price, bedrooms: m.bedrooms, city: m.city,
             trustScore: m.trustScore, yieldPct: m.yieldPct, whatToWatch: m.whatToWatch,
             neighbourhood: m.neighbourhood, room: m.room ?? null,
+            /* Off-plan or finished, instalments, units left, plots: the advisor
+               must never call an off-plan home ready to move into. */
+            terms: m.deal ?? null,
             /* THE NUMBER THAT WAS MISSING. Every match carried latitude and
                longitude and this payload dropped both, so the advisor pass was
                handed an area name and asked to reason about proximity with it.
@@ -799,13 +851,25 @@ the one they asked for.`
       }
     }
 
+    /* PAST PRICES, NEVER A FORECAST (Eden, 2026-10-02). Asked whether prices
+       will rise, Tayo shows how they HAVE moved, from a web search, as a
+       small table -- Synapse is not licensed to forecast. */
+    let priceHistory: PriceHistory | null = null;
+    const ph = parsed.priceHistory;
+    if (ph && typeof ph.area === 'string' && ph.area.trim()) {
+      priceHistory = await lookupPriceHistory(key, ph.area.trim().slice(0, 80),
+        typeof ph.city === 'string' ? ph.city.trim().slice(0, 60) : null,
+        ph.kind === 'rent' ? 'rent' : ph.kind === 'land' ? 'land' : 'sale');
+      if (!priceHistory) reply = `${reply}\n\nI couldn't pull reliable past prices for ${ph.area.trim()} just now. Ask me again in a bit.`;
+    }
+
     // Persist memory (fire-and-forget correctness is fine for the demo).
     if (visitorId) {
       const full = [...messages, { role: 'assistant' as const, content: reply }];
       await saveSession(visitorId, full, showMatches ? criteria : undefined, showMatches ? matches : undefined);
     }
 
-    return json({ reply, showMatches, matches, suggestions });
+    return json({ reply, showMatches, matches, suggestions, priceHistory });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
@@ -843,6 +907,62 @@ async function guardOpeningOffer(propertyId: string, suggested: number | null): 
   const floor = Number((fl as Array<{ floor_amount?: number }>)[0]?.floor_amount);
   if (floor > 0 && floor >= low) offer = ask;
   return offer;
+}
+
+/* ── PAST PRICES FOR AN AREA ─────────────────────────────────────────────
+   One model call with Anthropic's web search tool. It must answer from what
+   it finds -- dated reports, listings indices, news -- and cite them; rows
+   it cannot source are left out, and if nothing can be sourced it returns
+   no rows and Tayo says so. Never a projection. */
+interface PriceHistory {
+  area: string; city: string | null; kind: string; unit: string;
+  rows: Array<{ period: string; typical: string; change: string | null }>;
+  summary: string; sources: Array<{ title: string; url: string }>;
+}
+const HISTORY_PROMPT = `You research PAST property prices in Nigeria. Use web search to find how
+typical prices for the given kind of property in the given area moved over the
+last few years (up to about 6), from dated sources: property reports, listing
+portals' price pages, news. Answer ONLY from what you find. Never project or
+forecast, never give a future figure. If you cannot find dated figures for the
+area, use the nearest bigger area and say so in "summary"; if you find nothing
+usable, return empty rows.
+Return STRICT JSON as your final text, nothing after it:
+{"unit": "<e.g. per plot (600 sqm), per year for a 2-bed flat>",
+ "rows": [{"period": "<year or year range>", "typical": "<naira figure or range as found>", "change": "<e.g. +18% on the year before, or null>"}],
+ "summary": "<one or two plain sentences on the direction, naming the area actually used; end with: Past prices are not a promise of future ones.>",
+ "sources": [{"title": "<publisher or page>", "url": "<url>"}]}`;
+async function lookupPriceHistory(key: string, area: string, city: string | null, kind: string): Promise<PriceHistory | null> {
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 1500, system: HISTORY_PROMPT,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+        messages: [{ role: 'user', content: JSON.stringify({ area, city, country: 'Nigeria', kind }) }],
+      }),
+    });
+    if (!res.ok) { console.error('price history', res.status, (await res.text()).slice(0, 300)); return null; }
+    const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
+    const texts = (data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '');
+    const last = texts.join('');
+    const m = last.match(/\{[\s\S]*\}\s*$/) ?? last.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const j = JSON.parse(m[0]) as Partial<PriceHistory>;
+    const rows = (Array.isArray(j.rows) ? j.rows : [])
+      .filter((r) => r && typeof r.period === 'string' && typeof r.typical === 'string')
+      .slice(0, 8)
+      .map((r) => ({ period: String(r.period).slice(0, 24), typical: String(r.typical).slice(0, 60), change: r.change ? String(r.change).slice(0, 60) : null }));
+    const sources = (Array.isArray(j.sources) ? j.sources : [])
+      .filter((x) => x && typeof x.url === 'string' && /^https:\/\//.test(x.url))
+      .slice(0, 5)
+      .map((x) => ({ title: String(x.title ?? x.url).slice(0, 80), url: String(x.url).slice(0, 300) }));
+    if (!rows.length || !sources.length) return null;
+    return { area, city, kind, unit: String(j.unit ?? '').slice(0, 80), rows, summary: String(j.summary ?? '').slice(0, 400), sources };
+  } catch (e) {
+    console.error('price history failed', e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 function sb() {
@@ -933,6 +1053,8 @@ interface Criteria {
   maxPrice?: number | null;   // annual rent when renting, total price when buying
   minBedrooms?: number | null;
   intent?: string | null;
+  propertyKind?: string | null;   // land | home | commercial
+  stage?: string | null;          // completed | off_plan | either
   paymentPlan?: string | null;
   brief?: string | null;
   profile?: {
@@ -966,6 +1088,8 @@ interface Match {
   verified: boolean;
   verifiedAt: string | null;
   yieldPct: number | null;
+  /* What kind of deal it is, from the listing's own fields. */
+  deal?: Record<string, string | number | null>;
   whoThisSuits: string | null;
   whatToWatch: string | null;
   summary: string | null;
@@ -1281,6 +1405,13 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   const conds = [...freshLiveConds(),
     `listing_type=eq.${renting ? 'rent' : 'sale'}`,
     `property_type=${shared ? 'eq' : 'neq'}.shared`];
+  /* Land is never a house, and a finished home is never off-plan
+     (20261003090000_what_kind_of_deal). */
+  if (c.propertyKind === 'land') conds.push('property_type=eq.land');
+  else if (c.propertyKind === 'home' && !shared) conds.push('property_type=not.in.(land,commercial)');
+  else if (c.propertyKind === 'commercial') conds.push('property_type=eq.commercial');
+  if (c.stage === 'completed') conds.push('or=(build_stage.is.null,build_stage.eq.completed)');
+  else if (c.stage === 'off_plan') conds.push('or=(deal_structure.eq.off_plan,build_stage.in.(under_construction,not_started))');
   /* A PLACE IS NOT ALWAYS A CITY, and this only ever looked at the city
      column. Somebody who says "the one-bedroom in Agbowo" produces
      city=ilike.*Agbowo*, which cannot match a row whose city is "Ibadan" --
@@ -1306,6 +1437,7 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
 
   const select =
     'id,title,city,area_name,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
+    'property_type,deal_structure,build_stage,handover_date,payment_plan,deposit_pct,instalment_months,units_available,plot_count,plot_size_sqm,min_investment,' +
     'verification_status,verified_at,' +
     /* Where the home actually is. Without these two the matches map had
        nothing to plot and fell back to a hardcoded city-centre table, so every
@@ -1394,6 +1526,15 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       verified: r.verification_status === 'verified',
       verifiedAt: (r.verified_at as string) ?? null,
       yieldPct: e.rental_yield_estimate_pct == null ? null : Number(e.rental_yield_estimate_pct),
+      deal: {
+        propertyType: (r.property_type as string) ?? null, structure: (r.deal_structure as string) ?? null,
+        stage: (r.build_stage as string) ?? null, handover: (r.handover_date as string) ?? null,
+        paymentPlan: (r.payment_plan as string) ?? null, depositPct: r.deposit_pct == null ? null : Number(r.deposit_pct),
+        instalmentMonths: r.instalment_months == null ? null : Number(r.instalment_months),
+        units: r.units_available == null ? null : Number(r.units_available),
+        plots: r.plot_count == null ? null : Number(r.plot_count), plotSizeSqm: r.plot_size_sqm == null ? null : Number(r.plot_size_sqm),
+        minInvestment: r.min_investment == null ? null : Number(r.min_investment),
+      },
       whoThisSuits: (e.who_this_suits as string) ?? null,
       whatToWatch: (e.what_to_watch as string) ?? null,
       summary: (e.toju_summary as string) ?? null,
