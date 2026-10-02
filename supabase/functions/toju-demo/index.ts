@@ -507,6 +507,27 @@ const cors = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+/* THE COVER IS A PHOTO (Eden, 2026-10-02). A listing whose first upload was
+   a video sent that video's URL as the card's image, and the Your Matches
+   card went blank. The first photo in display order is the cover; a
+   video-only listing gets a still from its video (Cloudinary renders any
+   frame of an upload as a JPEG from the same path); else null, and the card
+   says the listing has no photo. PostgREST returns media in no particular
+   order, so it is sorted here. */
+type CoverMedia = { url?: string; display_order?: number; media_type?: string };
+const COVER_VIDEO = /\.(mp4|mov|m4v|qt|webm|3gp)(\?|#|$)/i;
+function coverOf(media: CoverMedia[] | undefined | null): string | null {
+  const s = (Array.isArray(media) ? media : [])
+    .filter((m) => typeof m?.url === 'string' && m.url.trim())
+    .slice().sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+  const photo = s.find((m) => m.media_type !== 'video' && !COVER_VIDEO.test(String(m.url)));
+  if (photo) return String(photo.url).trim();
+  const u = s.length ? String(s[0].url).trim() : '';
+  return /res\.cloudinary\.com\/.+\/video\/upload\//.test(u)
+    ? u.replace('/video/upload/', '/video/upload/so_0/').replace(/\.(mp4|mov|m4v|qt|webm|3gp)(\?.*)?$/i, '.jpg')
+    : null;
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
@@ -846,24 +867,19 @@ async function refreshStored(matches: unknown): Promise<unknown[]> {
   if (!ids.length) return matches;
 
   const res = await fetch(
-    `${s.url}/rest/v1/properties?select=id,property_media(url,display_order)`
+    `${s.url}/rest/v1/properties?select=id,property_media(url,display_order,media_type)`
     + `&id=in.(${ids.join(',')})&${freshLiveConds().join('&')}`,
     { headers: s.headers },
   ).catch(() => null);
   if (!res || !res.ok) return matches;         // a failed refresh must not empty the page
 
   const rows = (await res.json().catch(() => [])) as Array<{
-    id: string; property_media?: Array<{ url?: string; display_order?: number }>;
+    id: string; property_media?: CoverMedia[];
   }>;
   if (!Array.isArray(rows)) return matches;
 
   const live = new Map<string, string | null>();
-  for (const r of rows) {
-    const media = Array.isArray(r.property_media) ? r.property_media.slice() : [];
-    media.sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
-    const url = media[0]?.url;
-    live.set(r.id, typeof url === 'string' && url.trim() ? url.trim() : null);
-  }
+  for (const r of rows) live.set(r.id, coverOf(r.property_media));
 
   return matches
     .filter((m) => live.has(String((m as { id?: unknown }).id ?? '')))
@@ -1272,7 +1288,7 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
        photos across three listings; none of them had ever reached Tayo.
        display_order is the primary signal here: property_media has no
        is_primary column. */
-    'property_media(url,display_order),' +
+    'property_media(url,display_order,media_type),' +
     /* The brand kit rides along for the card, never for the model: the
        advisor payload below lists its fields explicitly and none of these
        are among them. */
@@ -1347,14 +1363,8 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
       whoThisSuits: (e.who_this_suits as string) ?? null,
       whatToWatch: (e.what_to_watch as string) ?? null,
       summary: (e.toju_summary as string) ?? null,
-      /* Lowest display_order wins. The array comes back in whatever order
-         PostgREST felt like, so it is sorted here rather than trusted. */
-      img: (function () {
-        const m = (r.property_media ?? []) as Array<{ url?: string; display_order?: number }>;
-        if (!Array.isArray(m) || !m.length) return null;
-        const first = m.slice().sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0))[0];
-        return typeof first?.url === 'string' && first.url.trim() ? first.url.trim() : null;
-      })(),
+      /* The first PHOTO in display order (see coverOf). */
+      img: coverOf(r.property_media as CoverMedia[] | undefined),
       agency: ag.name ?? 'Verified agency',
       tier: ag.verification_tier ?? 'basic',
       /* Who listed it, as the agency designed itself on its Brand page. Null
