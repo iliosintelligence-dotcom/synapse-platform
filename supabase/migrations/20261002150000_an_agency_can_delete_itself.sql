@@ -257,6 +257,29 @@ begin
 end;
 $$;
 
+/* Which deletion this person left unfinished, if any. After the data step
+   the agency row and the membership are both gone, so nothing the portal can
+   read says there is still a login to delete -- a portal opened on another
+   device, or after the browser forgot, would show an empty workspace and no
+   way to finish. The deletion record still knows, by the same hash that lets
+   its owner resume, and this hands back only the agency ids, only to that
+   person. At most two: one is the answer, two means ask. */
+create or replace function public.agency_deletion_unfinished(p_actor uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select coalesce(jsonb_agg(u.agency_id), '[]'::jsonb)
+    from (select agency_id from agency_deletions
+           where p_actor is not null
+             and owner_hash = encode(sha256(p_actor::text::bytea), 'hex')
+             and completed_at is null
+           order by requested_at desc
+           limit 2) u
+$$;
+
 -- ── 4. begin: off the public site, nothing destroyed ─────────────────────
 create or replace function public.agency_deletion_begin(
   p_agency_id         uuid,
@@ -590,12 +613,14 @@ revoke all on function public.agency_confirm_key(text)                          
 revoke all on function public.agency_deletion_owner_blocker(uuid, uuid)         from public, anon, authenticated;
 revoke all on function public.agency_deletion_counts(uuid)                      from public, anon, authenticated;
 revoke all on function public.agency_deletion_preview(uuid, uuid)               from public, anon, authenticated;
+revoke all on function public.agency_deletion_unfinished(uuid)                  from public, anon, authenticated;
 revoke all on function public.agency_deletion_begin(uuid, uuid, text, boolean)  from public, anon, authenticated;
 revoke all on function public.agency_deletion_files_removed(uuid, uuid, integer) from public, anon, authenticated;
 revoke all on function public.agency_deletion_execute(uuid, uuid)               from public, anon, authenticated;
 revoke all on function public.agency_deletion_finish(uuid, uuid, boolean)       from public, anon, authenticated;
 
 grant execute on function public.agency_deletion_preview(uuid, uuid)               to service_role;
+grant execute on function public.agency_deletion_unfinished(uuid)                  to service_role;
 grant execute on function public.agency_deletion_begin(uuid, uuid, text, boolean)  to service_role;
 grant execute on function public.agency_deletion_files_removed(uuid, uuid, integer) to service_role;
 grant execute on function public.agency_deletion_execute(uuid, uuid)               to service_role;

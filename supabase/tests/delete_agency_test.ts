@@ -183,6 +183,8 @@ const execute = (db: PGlite, a: string, actor: string) =>
   one(db, 'select agency_deletion_execute($1, $2) as r', [a, actor]).then((x) => x.r);
 const finish = (db: PGlite, a: string, actor: string, removed: boolean) =>
   one(db, 'select agency_deletion_finish($1, $2, $3) as r', [a, actor, removed]).then((x) => x.r);
+const unfinished = (db: PGlite, actor: string) =>
+  one(db, 'select agency_deletion_unfinished($1) as r', [actor]).then((x) => x.r);
 
 async function user(db: PGlite, role = 'consumer'): Promise<string> {
   const u = id();
@@ -398,6 +400,11 @@ Deno.test('agency deletion', async (t) => {
     assertEquals((await begin(db, f.A, f.O, 'anything')).state, 'data_deleted');
     assertEquals((await preview(db, f.A, f.O)).state, 'data_deleted');
     await assertRejects(() => preview(db, f.A, f.M), Error, 'agency_not_found');
+    // With the agency row gone, the owner -- and only the owner -- can still
+    // find the deletion they have to finish.
+    assertEquals(await unfinished(db, f.O), [f.A]);
+    assertEquals(await unfinished(db, f.M), []);
+    assertEquals(await unfinished(db, f.P), []);
 
     // The login could not be removed: the record stays open, resumable.
     const open = await finish(db, f.A, f.O, false);
@@ -410,6 +417,7 @@ Deno.test('agency deletion', async (t) => {
     const closed = await one(db, 'select * from agency_deletions where agency_id = $1', [f.A]);
     assert(closed.completed_at);
     assertEquals(closed.owner_hash, null, 'nothing pseudonymous is kept once complete');
+    assertEquals(await unfinished(db, f.O), [], 'a finished deletion is not offered again');
     await assertRejects(() => preview(db, f.A, f.O), Error, 'agency_not_found');
     await assertRejects(() => finish(db, f.A, f.O, true), Error, 'agency_not_found');
   });
@@ -501,8 +509,8 @@ Deno.test('agency deletion', async (t) => {
     const fns = [
       'agency_deletion_preview(uuid, uuid)', 'agency_deletion_begin(uuid, uuid, text, boolean)',
       'agency_deletion_files_removed(uuid, uuid, integer)', 'agency_deletion_execute(uuid, uuid)',
-      'agency_deletion_finish(uuid, uuid, boolean)', 'agency_deletion_counts(uuid)',
-      'agency_deletion_owner_blocker(uuid, uuid)', 'agency_confirm_key(text)',
+      'agency_deletion_finish(uuid, uuid, boolean)', 'agency_deletion_unfinished(uuid)',
+      'agency_deletion_counts(uuid)', 'agency_deletion_owner_blocker(uuid, uuid)', 'agency_confirm_key(text)',
     ];
     for (const fn of fns) {
       for (const role of ['anon', 'authenticated']) {
@@ -510,7 +518,7 @@ Deno.test('agency deletion', async (t) => {
         assertEquals(r.ok, false, `${role} can execute ${fn}`);
       }
     }
-    for (const fn of fns.slice(0, 5)) {
+    for (const fn of fns.slice(0, 6)) {
       const r = await one(db, `select has_function_privilege('service_role', $1, 'execute') as ok`, [fn]);
       assertEquals(r.ok, true, `service_role cannot execute ${fn}`);
     }

@@ -105,6 +105,33 @@ Deno.test('preview without an agency id uses the one agency the caller owns, and
   assertEquals(two.calls.length, 0);
 });
 
+Deno.test('preview without an agency id finds the deletion the caller left unfinished, when they own none', async () => {
+  const f = fakes({
+    owned: [],
+    rpc: {
+      agency_deletion_unfinished: () => ({ data: [AGENCY] }),
+      agency_deletion_preview: state('data_deleted', { owner_login: 'pending' }),
+    },
+  });
+  const r = await handle(f.deps, OWNER, { action: 'preview' });
+  assertEquals(r.status, 200);
+  assertEquals(r.body.state, 'data_deleted');
+  assertEquals(f.calls[0], { fn: 'agency_deletion_unfinished', args: { p_actor: OWNER } });
+  assertEquals(f.calls[1].args, { p_agency_id: AGENCY, p_actor: OWNER });
+
+  // Nothing unfinished, or two of them: no guess, and preview is never asked.
+  for (const open of [[], [AGENCY, OTHER]]) {
+    const g = fakes({ owned: [], rpc: { agency_deletion_unfinished: () => ({ data: open }) } });
+    assertEquals((await handle(g.deps, OWNER, { action: 'preview' })).status, 400);
+    assertEquals(g.fns(), ['agency_deletion_unfinished']);
+  }
+
+  // Only preview looks: no other step may act on an agency it was not named.
+  const h = fakes({ owned: [], rpc: { agency_deletion_unfinished: () => ({ data: [AGENCY] }) } });
+  assertEquals((await handle(h.deps, OWNER, { action: 'finish' })).status, 400);
+  assertEquals(h.calls.length, 0);
+});
+
 Deno.test('database refusals become plain answers with the right status', async () => {
   const cases: [string, number][] = [
     ['not_owner', 403], ['name_mismatch', 422], ['plan_not_acknowledged', 409],

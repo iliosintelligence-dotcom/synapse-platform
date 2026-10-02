@@ -6,6 +6,8 @@
  * progress:
  *
  *   POST { action: 'preview', agency_id }                       what would go
+ *        (agency_id may be left out: the one agency the caller owns, or
+ *        failing that the deletion they left unfinished)
  *   POST { action: 'begin',   agency_id, confirm_name,
  *          acknowledge_plan }                                   name checked, listings down
  *   POST { action: 'files',   agency_id }                       Storage folders emptied

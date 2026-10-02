@@ -36,7 +36,9 @@ export interface Deps {
   remove(bucket: string, paths: string[]):
     Promise<{ data: { name: string }[] | null; error: { message: string } | null }>;
   deleteUser(id: string): Promise<{ error: { message: string; status?: number } | null }>;
-  /** Live agencies the caller owns, for a request that names none. */
+  /** Live agencies the caller owns, for a request that names none. (An
+   *  unfinished deletion is found through the agency_deletion_unfinished
+   *  RPC instead, so the hashing stays in SQL, in one place.) */
   ownedAgencies(actor: string): Promise<string[]>;
   sleep(ms: number): Promise<void>;
 }
@@ -218,6 +220,14 @@ export async function handle(deps: Deps, actor: string, body: Body): Promise<Res
          guessing is not something a delete button gets to do. */
       const owned = await deps.ownedAgencies(actor);
       if (owned.length === 1) agencyId = owned[0];
+      else if (owned.length === 0) {
+        /* Past the data step there is no agency left to own, and the portal
+           has no membership to read an id from. The deletion record still
+           knows whose it is: this is how a portal opened on another device
+           finds the login it has yet to delete. */
+        const open = await call(deps, 'agency_deletion_unfinished', { p_actor: actor }) as unknown;
+        if (Array.isArray(open) && open.length === 1 && typeof open[0] === 'string') agencyId = open[0];
+      }
     }
     if (!UUID.test(agencyId)) {
       return { status: 400, body: { error: 'Which agency? The request did not say.', code: 'bad_request' } };
