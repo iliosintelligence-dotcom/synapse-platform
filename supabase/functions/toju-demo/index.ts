@@ -475,18 +475,24 @@ Output STRICT JSON ONLY: {"reply": "<message>", "why": {"<matchId>": "<reason>",
 
 const NEGOTIATE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. No guarantees; if something is
-uncertain or unverified, say so. Here you act as the buyer's
-negotiation assistant. You get one property (price, deal type, city, trust
-score, yield, what-to-watch flags) and, when known,
-the buyer's profile. Ground everything in the data given — never invent comps.
-Anchoring: whole-year rentals typically close 5–10% below ask; sales 3–8% below,
-more when the listing carries flags (title pending, renovation, flood) — name
-the flag you're using as leverage. Nigerian market manners: firm but warmly
-respectful, never insulting, never begging.
+uncertain or unverified, say so. Here you help the buyer open a negotiation
+that the agency will take seriously. You get one property (price, deal type,
+city, trust score, yield, what-to-watch flags) and, when known, the buyer's
+profile. Ground everything in the data given — never invent comps.
+HOW THIS NEGOTIATION WORKS (Eden, 2026-10-02): the asking price is where it
+starts. A seller does not open low and nobody is helped by a lowball: the
+buyer opens AT the asking price and asks what flexibility there is, and any
+movement comes from the agency, step by step. So openingOffer is the asking
+price. Only when the data names a concrete problem (title still pending,
+renovation needed, flooding, a stale listing) may you go below it, by at most
+3%, and you must name that problem as the reason. You never know, guess or
+hint at the lowest price the agency would accept, and you never say a number
+below your openingOffer. Nigerian market manners: firm but warmly respectful,
+never insulting, never begging.
 Output STRICT JSON ONLY:
-{"advice": "<2–3 sentences: the reasonable opening number and exactly why>",
+{"advice": "<2–3 sentences: why to open at this number, and that Tayo puts the offer to the agency, who may have room to move>",
  "openingOffer": <number, whole naira>,
- "draft": "<a ready-to-send negotiation message to the agent, <=80 words, polite Nigerian business tone, states the offer and one data-backed reason, ends open>"}`;
+ "draft": "<a ready-to-send message to the agent, <=80 words, polite Nigerian business tone: serious interest at this number, one data-backed question (what is included, payment terms, any flexibility), ends open>"}`;
 
 const COMPARE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. The user selected up to
@@ -614,9 +620,17 @@ Deno.serve(async (req: Request) => {
       const out = await claude(key, NEGOTIATE_PROMPT, [{ role: 'user', content: input.slice(0, 6000) }], 600);
       if ('error' in out) return json({ error: out.error }, 502);
       const p = parseLoose(out.text) as { advice?: string; openingOffer?: number; draft?: string };
+      /* THE MODEL DOES NOT SET THE NUMBER ALONE. It once opened a 26M house
+         at 23M -- which was also the agency's floor (Eden, 2026-10-02). The
+         asking price is read from the listing itself, not from the page,
+         and the suggestion is held between 97% of it and the asking price.
+         If the agency's floor sits in that band, the suggestion is the
+         asking price, so it can never land on (and give away) the floor. */
+      const opening = await guardOpeningOffer(String((prop as { id?: unknown }).id ?? ''),
+        typeof p.openingOffer === 'number' ? p.openingOffer : null);
       return json({
         advice: p.advice ?? salvageField(out.text, 'advice') ?? '',
-        openingOffer: typeof p.openingOffer === 'number' ? p.openingOffer : null,
+        openingOffer: opening,
         draft: p.draft ?? salvageField(out.text, 'draft') ?? '',
       });
     }
@@ -811,6 +825,26 @@ async function claude(key: string, system: string, messages: Msg[], maxTokens: n
 }
 
 // ── session persistence (demo_chat_sessions, service role) ──
+/* See the negotiate action. Returns a whole-naira opening suggestion inside
+   [97% of asking, asking], never equal to or below the agency's floor's
+   band; null when the listing or its price cannot be read. */
+async function guardOpeningOffer(propertyId: string, suggested: number | null): Promise<number | null> {
+  const s = sb();
+  if (!s || !UUID_RE.test(propertyId)) return null;
+  const [pr, fl] = await Promise.all([
+    fetch(`${s.url}/rest/v1/properties?select=price&id=eq.${propertyId}`, { headers: s.headers }).then((r) => r.ok ? r.json() : []).catch(() => []),
+    fetch(`${s.url}/rest/v1/listing_negotiation_authority?select=floor_amount&property_id=eq.${propertyId}&is_active=eq.true`, { headers: s.headers }).then((r) => r.ok ? r.json() : []).catch(() => []),
+  ]);
+  const ask = Number((pr as Array<{ price?: number }>)[0]?.price);
+  if (!(ask > 0)) return null;
+  const low = Math.ceil(ask * 0.97);
+  let offer = typeof suggested === 'number' && isFinite(suggested) ? Math.round(suggested) : ask;
+  offer = Math.min(ask, Math.max(low, offer));
+  const floor = Number((fl as Array<{ floor_amount?: number }>)[0]?.floor_amount);
+  if (floor > 0 && floor >= low) offer = ask;
+  return offer;
+}
+
 function sb() {
   const url = Deno.env.get('SUPABASE_URL');
   const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
