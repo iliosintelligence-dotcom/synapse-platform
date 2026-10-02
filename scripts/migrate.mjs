@@ -93,13 +93,13 @@ function assertReadOnly(q) {
 
 /** One round trip. Errors carry the server's own words — a migration that
  *  fails is read by a human who needs the Postgres message, not a status. */
-async function sql(query) {
+async function sql(query, { readOnly = false } = {}) {
   let res;
   try {
     res = await fetch(API, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, ...(readOnly ? { read_only: true } : {}) }),
     });
   } catch (err) {
     /* DNS, TLS, a dropped connection. Nothing was applied, and whoever is
@@ -193,10 +193,19 @@ async function ensureTable() {
 /** version -> the name recorded with it, so a file can be checked against the
  *  migration that actually ran under its version. */
 async function applied() {
+  const historyRows = await sql(
+    "select to_regclass('supabase_migrations.schema_migrations')::text as table_name;",
+  );
+  const history = Array.isArray(historyRows) ? historyRows[0] : null;
+  if (!history?.table_name) return { exists: false, done: new Map() };
+
   const rows = await sql(
     'select version, name from supabase_migrations.schema_migrations order by version;',
   );
-  return new Map((Array.isArray(rows) ? rows : []).map((r) => [String(r.version), r.name ?? null]));
+  return {
+    exists: true,
+    done: new Map((Array.isArray(rows) ? rows : []).map((r) => [String(r.version), r.name ?? null])),
+  };
 }
 
 /** Recorded in the same shape the CLI writes, so `db push` reads it correctly.
@@ -226,7 +235,7 @@ if (MODE === 'query') {
     process.exit(1);
   }
   const safe = assertReadOnly(q);
-  const rows = await sql(safe);
+  const rows = await sql(safe, { readOnly: true });
   if (!Array.isArray(rows) || rows.length === 0) console.log('(no rows)');
   else {
     console.log(`${rows.length} row(s)`);
@@ -260,8 +269,10 @@ const { managed: files, legacy, unnamed } = partition();
     process.exit(1);
   }
 
-  await ensureTable();
-  const done = await applied();
+  // Planning is a dry run: check whether migration history exists, but never
+  // create it. The write modes create bookkeeping before reading it.
+  if (MODE !== 'plan') await ensureTable();
+  const { exists: historyExists, done } = await applied();
 
   /* The same collision after the fact: the other file already ran and is
      recorded, and this one — renamed, or written later — carries its version.
@@ -283,6 +294,9 @@ const { managed: files, legacy, unnamed } = partition();
   console.log(`mode      ${MODE}`);
   console.log(`managed   ${files.length} timestamp-named migration(s)`);
   console.log(`legacy    ${legacy.length} number-named, already applied — not managed here`);
+  if (MODE === 'plan' && !historyExists) {
+    console.log('history   no migration table; treating all managed files as pending');
+  }
   console.log(`recorded  ${done.size} in the database`);
   console.log(`pending   ${pending.length}`);
 

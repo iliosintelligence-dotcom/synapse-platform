@@ -19,6 +19,18 @@
  * verify_jwt = false so an anonymous visitor can reach it at all.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isSupportedPushEndpoint } from '../_shared/push-endpoint.ts';
+
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -33,7 +45,7 @@ const DEAL_TYPES = ['rent', 'sale', 'shortlet'];
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
-    const db = createClient(
+    const db = createDbClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
       { auth: { persistSession: false } },
@@ -63,29 +75,60 @@ Deno.serve(async (req: Request) => {
     if (action === 'subscribe') {
       const sub = (body.subscription ?? {}) as Record<string, string>;
       const endpoint = String(sub.endpoint ?? '');
-      // Only ever a real push service URL: this string is later fetched by
-      // proximity-report, so an attacker-supplied host would turn the sender
-      // into a request forwarder.
-      if (!/^https:\/\/[^\s]+$/i.test(endpoint)) return json({ error: 'bad endpoint' }, 400);
+      // This endpoint is fetched by proximity-report, so only supported push
+      // providers may be stored here.
+      if (!isSupportedPushEndpoint(endpoint)) return json({ error: 'bad endpoint' }, 400);
       const side = body.side === 'agency' ? 'agency' : 'customer';
 
       // One row per endpoint. A browser re-subscribing must update, not
       // accumulate, or every future push is sent several times over.
-      const { data: existing } = await db.from('push_subscriptions')
-        .select('id').eq('endpoint', endpoint).limit(1);
+      const { data: existingRows, error: lookupError } = await db.from('push_subscriptions')
+        .select('id, user_id, visitor_id').eq('endpoint', endpoint).limit(1);
+      if (lookupError) return json({ error: lookupError.message }, 500);
+      const existing = existingRows?.[0] ?? null;
+      /* SIGNING IN ON THE SAME BROWSER. A visitor who turned notifications on
+         and then signed in arrives with the account AND the visitor id that
+         owns the row. Holding both the endpoint and that visitor id is proof
+         it is the same browser, so the account takes the row over. Anything
+         else -- another account's row, another visitor's -- stays a 409:
+         that is the takeover this check exists to stop. */
+      const claimable = !!existing && !!userId && existing.user_id === null
+        && !!visitorId && existing.visitor_id === visitorId;
+      if (existing) {
+        const sameOwner = userId
+          ? existing.user_id === userId
+          : existing.user_id === null && existing.visitor_id === visitorId;
+        if (!sameOwner && !claimable) return json({ error: 'subscription belongs to another identity' }, 409);
+      }
 
-      const row = {
-        ...owner,
+      const subscription = {
         endpoint,
         p256dh: sub.p256dh ?? null,
         auth_key: sub.auth ?? sub.auth_key ?? null,
         platform: 'web',
         side,
       };
-      const res = existing?.[0]
-        ? await db.from('push_subscriptions').update(row).eq('id', existing[0].id)
-        : await db.from('push_subscriptions').insert(row);
-      if (res.error) return json({ error: res.error.message }, 500);
+      if (existing) {
+        /* Repeat the owner check in the UPDATE predicate so a concurrent
+           change between lookup and write cannot transfer the endpoint. */
+        const { data: updated, error } = claimable
+          ? await db.from('push_subscriptions').update({ ...subscription, user_id: userId })
+            .eq('id', existing.id).is('user_id', null).eq('visitor_id', visitorId)
+            .select('id').maybeSingle()
+          : userId
+          ? await db.from('push_subscriptions').update({ ...subscription, user_id: userId })
+            .eq('id', existing.id).eq('user_id', userId).select('id').maybeSingle()
+          : await db.from('push_subscriptions').update({ ...subscription, visitor_id: visitorId })
+            .eq('id', existing.id).eq('visitor_id', visitorId).is('user_id', null)
+            .select('id').maybeSingle();
+        if (error) return json({ error: error.message }, 500);
+        if (!updated) return json({ error: 'subscription ownership changed' }, 409);
+      } else {
+        const { error } = userId
+          ? await db.from('push_subscriptions').insert({ ...subscription, user_id: userId })
+          : await db.from('push_subscriptions').insert({ ...subscription, visitor_id: visitorId });
+        if (error) return json({ error: error.message }, 500);
+      }
       return json({ ok: true });
     }
 
@@ -126,7 +169,7 @@ Deno.serve(async (req: Request) => {
        have resumed sending the moment a position was reported again. */
     if (action === 'disable') {
       const { error } = await scope(
-        db.from('geofence_watches').update({ enabled: false }) as never,
+        db.from('geofence_watches').update({ enabled: false }),
       );
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true });

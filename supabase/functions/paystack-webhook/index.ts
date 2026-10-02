@@ -16,7 +16,19 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
 Deno.serve(async (req: Request) => {
+  let signatureVerified = false;
   if (req.method !== 'POST') return new Response('ok');
 
   try {
@@ -25,10 +37,10 @@ Deno.serve(async (req: Request) => {
     const signature = req.headers.get('x-paystack-signature') ?? '';
 
     if (!paystackKey || !(await validSignature(rawBody, signature, paystackKey))) {
-      // The only case that ever gets a non-200: an unsigned or wrongly-signed
-      // request never reaches the body below.
+      // An unsigned or wrongly-signed request never reaches the body below.
       return new Response('invalid signature', { status: 401 });
     }
+    signatureVerified = true;
 
     const event = JSON.parse(rawBody) as { event?: string; data?: { reference?: string } };
     const reference = event.data?.reference;
@@ -36,19 +48,19 @@ Deno.serve(async (req: Request) => {
     if (event.event === 'charge.success' && reference) {
       const url = Deno.env.get('SUPABASE_URL') ?? '';
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-      const admin = createClient(url, serviceKey);
+      const admin = createDbClient(url, serviceKey);
       await activatePayment(admin, reference, paystackKey);
     }
 
-    // Always 200 once the signature is trusted -- Paystack retries on
-    // non-2xx, and only a bad signature should ever produce one here, even
-    // for events we don't act on or a reference we don't recognise.
+    // A trusted event that failed during verification or database activation
+    // must be retried. Unknown events and unrecognised references are handled
+    // as no-ops by activatePayment and acknowledged above.
     return new Response('ok', { status: 200 });
   } catch (err) {
     console.error(`paystack-webhook fatal: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    // Still 200: whatever went wrong is on our side, not a signal to Paystack
-    // that it should keep retrying the same event forever.
-    return new Response('ok', { status: 200 });
+    return signatureVerified
+      ? new Response('retry', { status: 500 })
+      : new Response('ok', { status: 200 });
   }
 });
 
@@ -72,7 +84,7 @@ async function validSignature(rawBody: string, signature: string, secret: string
  *  self-contained by convention (see create-lead, social-generate) rather
  *  than reaching for a shared-lib abstraction for one reused function. */
 async function activatePayment(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   reference: string,
   paystackKey: string,
 ): Promise<void> {
@@ -82,10 +94,60 @@ async function activatePayment(
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
-  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') return;
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
+  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
+    throw new Error('Paystack did not confirm a successful transaction');
+  }
 
+  /* The database commits payment success and subscription activation in one
+     transaction. On an RPC error the payment remains pending and Paystack
+     can retry this webhook safely. */
+  const { error } = await (admin as unknown as {
+    rpc: (
+      name: 'confirm_subscription_payment',
+      args: { p_paystack_reference: string; p_amount_kobo: number; p_currency: string },
+    ) => Promise<{
+      data: Array<{ payment_status: string; plan_tier: string }> | null;
+      error: { message: string; code?: string } | null;
+    }>;
+  }).rpc('confirm_subscription_payment', {
+    p_paystack_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) {
+    if (rpcMissing(error)) {
+      /* A recorded payment that is still pending after the fallback must be
+         retried: answering 200 would stop Paystack resending a charge the
+         customer may never return to verify. A reference with no payment row
+         is not ours to activate and is acknowledged. */
+      const result = await legacyActivate(admin, reference, verifyData.data.amount, verifyData.data.currency);
+      if (!result.ok && !result.missing) throw new Error('payment still pending after fallback activation');
+      return;
+    }
+    throw error;
+  }
+}
+
+/* THE MIGRATION MAY NOT BE THERE YET. confirm_subscription_payment arrives in
+   migration 20261002091500, which is applied by hand, while this function
+   deploys on every push to main -- so for a while after a merge the RPC can be
+   missing. A payment made in that window must still activate, so a missing
+   RPC (and only that) falls back to the compare-and-swap activation this
+   replaced, unchanged. Any other error still fails loudly. */
+function rpcMissing(e: { message?: string; code?: string } | null): boolean {
+  if (!e) return false;
+  return e.code === 'PGRST202' || e.code === '42883'
+    || /could not find the function|function .* does not exist/i.test(e.message ?? '');
+}
+
+async function legacyActivate(
+  admin: DbClient,
+  reference: string,
+  amount: number | undefined,
+  currency: string | undefined,
+): Promise<{ ok: boolean; tier?: string; missing?: boolean }> {
+  // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
+  // status='pending' and return a row, so activation cannot double-apply.
   const { data: updated } = await admin
     .from('subscription_payments')
     .update({ status: 'success', verified_at: new Date().toISOString() })
@@ -95,11 +157,33 @@ async function activatePayment(
     .eq('currency', currency ?? '')
     .select('agency_id, plan_tier')
     .maybeSingle();
-
   if (updated) {
-    await admin.rpc('activate_subscription', { p_agency_id: updated.agency_id, p_plan_tier: updated.plan_tier });
+    const { error: activateError } = await admin.rpc('activate_subscription', {
+      p_agency_id: updated.agency_id,
+      p_plan_tier: updated.plan_tier,
+    });
+    if (activateError) {
+      /* Paid but not activated must not stick: a retry would find the payment
+         already 'success' and never try again. Put it back to pending -- the
+         same end state the new RPC's transaction rolls back to -- and fail,
+         so the caller (or Paystack's webhook retry) tries the whole thing
+         again. */
+      await admin
+        .from('subscription_payments')
+        .update({ status: 'pending', verified_at: null })
+        .eq('paystack_reference', reference)
+        .eq('status', 'success');
+      throw new Error(`subscription activation failed: ${activateError.message}`);
+    }
+    return { ok: true, tier: updated.plan_tier as string };
   }
-  // If no row was updated, either the client's own verify() already won the
-  // race (fine — same end state), or the reference is unrecognised (also
-  // fine to no-op on).
+  // Already activated by the other path (webhook or client verify).
+  const { data: already } = await admin
+    .from('subscription_payments')
+    .select('plan_tier, status')
+    .eq('paystack_reference', reference)
+    .maybeSingle();
+  if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
+  // No row at all: not a payment this system started, nothing to retry.
+  return { ok: false, missing: !already };
 }

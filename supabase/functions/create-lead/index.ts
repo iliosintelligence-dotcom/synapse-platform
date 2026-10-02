@@ -108,6 +108,9 @@ Deno.serve(async (req: Request) => {
       .from('properties')
       .select('id, title, price, city, agency_id')
       .eq('id', body.property_id)
+      .eq('status', 'live')
+      .eq('is_active', true)
+      .is('deleted_at', null)
       .maybeSingle();
     if (pErr || !prop) return json({ error: 'Property not found' }, 404);
 

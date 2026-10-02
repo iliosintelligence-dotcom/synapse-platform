@@ -19,6 +19,17 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
 
+// No generated Database type is checked in; keep migration-backed fluent queries dynamic.
+// deno-lint-ignore no-explicit-any
+type DynamicSupabaseMethod = (...args: any[]) => any;
+type DbClient = Omit<ReturnType<typeof createClient>, 'from' | 'rpc'> & {
+  from: DynamicSupabaseMethod;
+  rpc: DynamicSupabaseMethod;
+};
+function createDbClient(url: string, key: string, options?: Parameters<typeof createClient>[2]): DbClient {
+  return createClient(url, key, options) as unknown as DbClient;
+}
+
 const PLAN_PRICES: Record<string, { amountKobo: number; label: string }> = {
   accelerator: { amountKobo: 7_500_000, label: 'Accelerate' }, // ₦75,000
 };
@@ -41,8 +52,8 @@ Deno.serve(async (req: Request) => {
     // used for is_agency_member()/agency_role() RPCs, since those SECURITY
     // DEFINER functions key off auth.uid() from the request's own JWT — the
     // service-role client has no "current user" and would resolve NULL.
-    const userClient = createClient(url, anonKey, { global: { headers: { Authorization: authHeader } } });
-    const admin = createClient(url, serviceKey);
+    const userClient = createDbClient(url, anonKey, { global: { headers: { Authorization: authHeader } } });
+    const admin = createDbClient(url, serviceKey);
 
     const { data: userData } = await userClient.auth.getUser();
     const user = userData.user;
@@ -53,7 +64,7 @@ Deno.serve(async (req: Request) => {
     };
 
     if (body.action === 'init') return await handleInit(userClient, admin, user, body.plan, req, paystackKey);
-    if (body.action === 'verify') return await handleVerify(userClient, admin, user, body.reference, paystackKey);
+    if (body.action === 'verify') return await handleVerify(userClient, admin, body.reference, paystackKey);
     return json({ error: 'Unknown action' }, 400);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -63,8 +74,8 @@ Deno.serve(async (req: Request) => {
 });
 
 async function handleInit(
-  userClient: ReturnType<typeof createClient>,
-  admin: ReturnType<typeof createClient>,
+  userClient: DbClient,
+  admin: DbClient,
   user: { id: string; email?: string },
   plan: string | undefined,
   req: Request,
@@ -124,9 +135,8 @@ async function handleInit(
 }
 
 async function handleVerify(
-  userClient: ReturnType<typeof createClient>,
-  admin: ReturnType<typeof createClient>,
-  user: { id: string },
+  userClient: DbClient,
+  admin: DbClient,
   reference: string | undefined,
   paystackKey: string,
 ) {
@@ -158,7 +168,7 @@ async function handleVerify(
  * however the confirmation arrives.
  */
 export async function activatePayment(
-  admin: ReturnType<typeof createClient>,
+  admin: DbClient,
   reference: string,
   paystackKey: string,
 ): Promise<{ ok: boolean; tier?: string }> {
@@ -168,16 +178,58 @@ export async function activatePayment(
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
-  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
-    return { ok: false };
-  }
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
+  if (!verifyRes.ok) throw new Error('Paystack verification request failed');
+  if (!verifyData.status || verifyData.data?.status !== 'success') return { ok: false };
 
-  // Atomic compare-and-swap, not read-then-write: the AND status='pending'
-  // is what makes this safe if the webhook and the client's own verify call
-  // land at nearly the same instant — only one UPDATE can ever match and
-  // return a row, so activation cannot double-apply.
+  /* This RPC confirms payment and extends the subscription in one database
+     transaction. A failed activation rolls the payment back to pending, so
+     this verification can safely be retried. */
+  const { data: confirmation, error } = await (admin as unknown as {
+    rpc: (
+      name: 'confirm_subscription_payment',
+      args: { p_paystack_reference: string; p_amount_kobo: number; p_currency: string },
+    ) => Promise<{
+      data: Array<{ payment_status: string; plan_tier: string }> | null;
+      error: { message: string; code?: string } | null;
+    }>;
+  }).rpc('confirm_subscription_payment', {
+    p_paystack_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) {
+    if (rpcMissing(error)) {
+      return await legacyActivate(admin, reference, verifyData.data.amount, verifyData.data.currency);
+    }
+    throw error;
+  }
+  const payment = Array.isArray(confirmation) ? confirmation[0] : confirmation;
+  if (payment?.payment_status === 'success') {
+    return { ok: true, tier: payment.plan_tier as string };
+  }
+  return { ok: false };
+}
+
+/* THE MIGRATION MAY NOT BE THERE YET. confirm_subscription_payment arrives in
+   migration 20261002091500, which is applied by hand, while this function
+   deploys on every push to main -- so for a while after a merge the RPC can be
+   missing. A payment made in that window must still activate, so a missing
+   RPC (and only that) falls back to the compare-and-swap activation this
+   replaced, unchanged. Any other error still fails loudly. */
+function rpcMissing(e: { message?: string; code?: string } | null): boolean {
+  if (!e) return false;
+  return e.code === 'PGRST202' || e.code === '42883'
+    || /could not find the function|function .* does not exist/i.test(e.message ?? '');
+}
+
+async function legacyActivate(
+  admin: DbClient,
+  reference: string,
+  amount: number | undefined,
+  currency: string | undefined,
+): Promise<{ ok: boolean; tier?: string; missing?: boolean }> {
+  // Atomic compare-and-swap, not read-then-write: only one UPDATE can match
+  // status='pending' and return a row, so activation cannot double-apply.
   const { data: updated } = await admin
     .from('subscription_payments')
     .update({ status: 'success', verified_at: new Date().toISOString() })
@@ -187,23 +239,33 @@ export async function activatePayment(
     .eq('currency', currency ?? '')
     .select('agency_id, plan_tier')
     .maybeSingle();
-
   if (updated) {
-    await admin.rpc('activate_subscription', {
+    const { error: activateError } = await admin.rpc('activate_subscription', {
       p_agency_id: updated.agency_id,
       p_plan_tier: updated.plan_tier,
     });
+    if (activateError) {
+      /* Paid but not activated must not stick: a retry would find the payment
+         already 'success' and never try again. Put it back to pending -- the
+         same end state the new RPC's transaction rolls back to -- and fail,
+         so the caller (or Paystack's webhook retry) tries the whole thing
+         again. */
+      await admin
+        .from('subscription_payments')
+        .update({ status: 'pending', verified_at: null })
+        .eq('paystack_reference', reference)
+        .eq('status', 'success');
+      throw new Error(`subscription activation failed: ${activateError.message}`);
+    }
     return { ok: true, tier: updated.plan_tier as string };
   }
-
-  // Already activated by the other path (webhook or client verify, whichever
-  // won the race) — read back the current tier so both callers see the same
-  // end state.
+  // Already activated by the other path (webhook or client verify).
   const { data: already } = await admin
     .from('subscription_payments')
     .select('plan_tier, status')
     .eq('paystack_reference', reference)
     .maybeSingle();
   if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
-  return { ok: false };
+  // No row at all: not a payment this system started, nothing to retry.
+  return { ok: false, missing: !already };
 }
