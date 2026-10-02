@@ -1,16 +1,23 @@
 /**
  * paystack-checkout — start and confirm a Paystack payment for a Synapse
- * agency subscription (Accelerate today; Leader stays "Talk to sales").
+ * agency: a plan (Accelerate or Leader, monthly or annual) or an add-on.
  *
  * No Paystack key ever reaches the browser. Checkout uses Paystack's
  * hosted redirect page: this function calls /transaction/initialize and
  * hands the client an authorization_url to redirect to — card data is
  * collected on Paystack's own domain, never ours.
  *
- * POST { action: 'init', plan: 'accelerator' }
+ * POST { action: 'init', plan: 'accelerator' | 'market_leader', period?: 'monthly' | 'annual' }
+ * POST { action: 'init', addon: 'listing_pack' | ... }
  *   -> { authorization_url, reference }
  * POST { action: 'verify', reference }
- *   -> { ok: true, tier } | { ok: false }
+ *   -> { ok: true, kind, tier?, addon? } | { ok: false }
+ *
+ * The amount is never taken from the request. billing_quote() in the
+ * database prices it for this agency (the annual offer depends on when the
+ * agency joined), and that is what Paystack is asked to charge.
+ *
+ * Enterprise is never sold here: its terms are agreed with Synapse.
  *
  * Deployed with verify_jwt = true — every call must carry a real user JWT.
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
@@ -19,9 +26,15 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
 
-const PLAN_PRICES: Record<string, { amountKobo: number; label: string }> = {
-  accelerator: { amountKobo: 7_500_000, label: 'Accelerate' }, // ₦75,000
+/* The portal's plan ids differ from the database's tier names in one place
+   ('market-leader' vs 'market_leader'); accept both, store the tier. */
+const PLAN_TIERS: Record<string, string> = {
+  accelerator: 'accelerator',
+  market_leader: 'market_leader',
+  'market-leader': 'market_leader',
 };
+
+type Quote = { amount_kobo: number; months: number; label: string; months_free?: number };
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -35,12 +48,8 @@ Deno.serve(async (req: Request) => {
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     const paystackKey = Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
     if (!serviceKey) return json({ error: 'Server misconfigured: no service role key' }, 500);
-    if (!paystackKey) return json({ error: 'Server misconfigured: no Paystack key' }, 500);
+    if (!paystackKey) return json({ error: 'Payments are not switched on yet. Please try again later.' }, 503);
 
-    // Caller-scoped client: identifies the user AND is the one that must be
-    // used for is_agency_member()/agency_role() RPCs, since those SECURITY
-    // DEFINER functions key off auth.uid() from the request's own JWT — the
-    // service-role client has no "current user" and would resolve NULL.
     const userClient = createClient(url, anonKey, { global: { headers: { Authorization: authHeader } } });
     const admin = createClient(url, serviceKey);
 
@@ -49,11 +58,11 @@ Deno.serve(async (req: Request) => {
     if (!user) return json({ error: 'Not authenticated' }, 401);
 
     const body = (await req.json().catch(() => ({}))) as {
-      action?: string; plan?: string; reference?: string;
+      action?: string; plan?: string; period?: string; addon?: string; reference?: string;
     };
 
-    if (body.action === 'init') return await handleInit(userClient, admin, user, body.plan, req, paystackKey);
-    if (body.action === 'verify') return await handleVerify(userClient, admin, user, body.reference, paystackKey);
+    if (body.action === 'init') return await handleInit(userClient, admin, user, body, req, paystackKey);
+    if (body.action === 'verify') return await handleVerify(userClient, admin, body.reference, paystackKey);
     return json({ error: 'Unknown action' }, 400);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -66,12 +75,14 @@ async function handleInit(
   userClient: ReturnType<typeof createClient>,
   admin: ReturnType<typeof createClient>,
   user: { id: string; email?: string },
-  plan: string | undefined,
+  body: { plan?: string; period?: string; addon?: string },
   req: Request,
   paystackKey: string,
 ) {
-  const priced = plan ? PLAN_PRICES[plan] : undefined;
-  if (!priced) return json({ error: 'Unknown or unpurchasable plan' }, 400);
+  const tier = body.plan ? PLAN_TIERS[body.plan] : undefined;
+  const addon = !tier && typeof body.addon === 'string' ? body.addon : undefined;
+  if (!tier && !addon) return json({ error: 'Choose a plan or an add-on' }, 400);
+  const period = body.period === 'annual' ? 'annual' : 'monthly';
 
   const { data: membership } = await admin
     .from('agency_members')
@@ -82,12 +93,27 @@ async function handleInit(
   const agencyId = membership?.[0]?.agency_id as string | undefined;
   if (!agencyId) return json({ error: 'No agency found for this account' }, 404);
 
-  // Billing is sensitive — only owner/admin may start a real charge, not
-  // any invited agent.
   const { data: role } = await userClient.rpc('agency_role', { p_agency_id: agencyId });
   if (role !== 'agency_owner' && role !== 'agency_admin') {
     return json({ error: 'Only an agency owner or admin can manage billing' }, 403);
   }
+
+  if (tier) {
+    const { data: agency } = await admin.from('agencies').select('subscription_tier').eq('id', agencyId).maybeSingle();
+    if (agency?.subscription_tier === 'enterprise') {
+      return json({ error: 'You are on Enterprise. Your terms are agreed with Synapse, so talk to us to change them.' }, 409);
+    }
+  }
+
+  const { data: quote, error: quoteErr } = await admin.rpc('billing_quote', {
+    p_agency_id: agencyId,
+    p_kind: tier ? 'plan' : 'addon',
+    p_code: tier ?? addon,
+    p_period: period,
+  });
+  if (quoteErr) return json({ error: `Could not price this: ${quoteErr.message}` }, 500);
+  const q = quote as Quote | null;
+  if (!q || !(q.amount_kobo > 0)) return json({ error: 'That is not for sale' }, 400);
 
   if (!user.email) return json({ error: 'Account has no email on file' }, 400);
 
@@ -97,10 +123,19 @@ async function handleInit(
     headers: { Authorization: `Bearer ${paystackKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email: user.email,
-      amount: priced.amountKobo,
+      amount: q.amount_kobo,
       currency: 'NGN',
+      /* No fragment and no query: Paystack appends ?reference= to this, and
+         the portal's checkoutReturn() opens Billing once it has verified. */
       callback_url: `${origin}/app/agency.html`,
-      metadata: { agency_id: agencyId, plan },
+      metadata: {
+        agency_id: agencyId,
+        kind: tier ? 'plan' : 'addon',
+        plan: tier ?? null,
+        period: tier ? period : null,
+        addon: addon ?? null,
+        custom_fields: [{ display_name: 'Synapse', variable_name: 'item', value: q.label }],
+      },
     }),
   });
   const paystackData = (await paystackRes.json().catch(() => ({}))) as {
@@ -112,8 +147,12 @@ async function handleInit(
 
   const { error: insertErr } = await admin.from('subscription_payments').insert({
     agency_id: agencyId,
-    plan_tier: plan,
-    amount_kobo: priced.amountKobo,
+    kind: tier ? 'plan' : 'addon',
+    plan_tier: tier ?? null,
+    period: tier ? period : null,
+    months: q.months,
+    addon_code: addon ?? null,
+    amount_kobo: q.amount_kobo,
     currency: 'NGN',
     paystack_reference: paystackData.data.reference,
     initialized_by: user.id,
@@ -126,7 +165,6 @@ async function handleInit(
 async function handleVerify(
   userClient: ReturnType<typeof createClient>,
   admin: ReturnType<typeof createClient>,
-  user: { id: string },
   reference: string | undefined,
   paystackKey: string,
 ) {
@@ -139,11 +177,6 @@ async function handleVerify(
     .maybeSingle();
   if (!row) return json({ error: 'No payment found for that reference' }, 404);
 
-  // Without this, anyone who observed a reference (screenshot, browser
-  // history) could poll another agency's payment status. Activation itself
-  // is already safe regardless — it's driven by Paystack's own response,
-  // never by anything this caller supplies — this closes an info leak, not
-  // a money-safety hole.
   const { data: isMember } = await userClient.rpc('is_agency_member', { p_agency_id: row.agency_id });
   if (!isMember) return json({ error: 'Not authorized for this payment' }, 403);
 
@@ -152,16 +185,18 @@ async function handleVerify(
 }
 
 /**
- * The single place a Paystack-confirmed payment becomes an active
- * subscription. Called from both the client-triggered `verify` action and
- * the webhook — both converge here so activation only ever happens once,
- * however the confirmation arrives.
+ * The single place a Paystack-confirmed payment takes effect. Called from
+ * both the client-triggered `verify` action and the webhook. Paystack's own
+ * verify API is the authority on whether money moved; confirm_billing_payment
+ * then marks the row paid and applies the plan or add-on in ONE transaction,
+ * so a payment can never be marked paid without taking effect, nor take
+ * effect twice when both paths arrive together.
  */
 export async function activatePayment(
   admin: ReturnType<typeof createClient>,
   reference: string,
   paystackKey: string,
-): Promise<{ ok: boolean; tier?: string }> {
+): Promise<{ ok: boolean; kind?: string; tier?: string; addon?: string }> {
   const verifyRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
     headers: { Authorization: `Bearer ${paystackKey}` },
   });
@@ -171,39 +206,18 @@ export async function activatePayment(
   if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
     return { ok: false };
   }
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
 
-  // Atomic compare-and-swap, not read-then-write: the AND status='pending'
-  // is what makes this safe if the webhook and the client's own verify call
-  // land at nearly the same instant — only one UPDATE can ever match and
-  // return a row, so activation cannot double-apply.
-  const { data: updated } = await admin
-    .from('subscription_payments')
-    .update({ status: 'success', verified_at: new Date().toISOString() })
-    .eq('paystack_reference', reference)
-    .eq('status', 'pending')
-    .eq('amount_kobo', amount ?? -1)
-    .eq('currency', currency ?? '')
-    .select('agency_id, plan_tier')
-    .maybeSingle();
-
-  if (updated) {
-    await admin.rpc('activate_subscription', {
-      p_agency_id: updated.agency_id,
-      p_plan_tier: updated.plan_tier,
-    });
-    return { ok: true, tier: updated.plan_tier as string };
+  const { data, error } = await admin.rpc('confirm_billing_payment', {
+    p_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) {
+    /* Thrown, not swallowed: the row stays pending, so the next verify or
+       Paystack's next webhook delivery can try again. */
+    throw new Error(`Could not confirm payment: ${error.message}`);
   }
-
-  // Already activated by the other path (webhook or client verify, whichever
-  // won the race) — read back the current tier so both callers see the same
-  // end state.
-  const { data: already } = await admin
-    .from('subscription_payments')
-    .select('plan_tier, status')
-    .eq('paystack_reference', reference)
-    .maybeSingle();
-  if (already?.status === 'success') return { ok: true, tier: already.plan_tier as string };
+  const r = data as { status?: string; kind?: string; tier?: string; addon?: string } | null;
+  if (r?.status === 'success') return { ok: true, kind: r.kind, tier: r.tier ?? undefined, addon: r.addon ?? undefined };
   return { ok: false };
 }

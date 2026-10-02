@@ -37,12 +37,19 @@ Deno.serve(async (req: Request) => {
       const url = Deno.env.get('SUPABASE_URL') ?? '';
       const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
       const admin = createClient(url, serviceKey);
-      await activatePayment(admin, reference, paystackKey);
+      try {
+        await activatePayment(admin, reference, paystackKey);
+      } catch (err) {
+        /* The one case worth a retry: Paystack says the money moved and our
+           database could not record it. The payment row is still pending, so
+           a redelivery (Paystack retries non-2xx) confirms it then. */
+        console.error(`paystack-webhook confirm failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        return new Response('retry', { status: 500 });
+      }
     }
 
-    // Always 200 once the signature is trusted -- Paystack retries on
-    // non-2xx, and only a bad signature should ever produce one here, even
-    // for events we don't act on or a reference we don't recognise.
+    // 200 once the signature is trusted, for events we don't act on and for
+    // references we don't recognise -- neither gets better on a retry.
     return new Response('ok', { status: 200 });
   } catch (err) {
     console.error(`paystack-webhook fatal: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -66,11 +73,11 @@ async function validSignature(rawBody: string, signature: string, secret: string
   return diff === 0;
 }
 
-/** Same activation path paystack-checkout's `verify` action uses — see that
- *  file for why this is a compare-and-swap, not read-then-write. Duplicated
- *  rather than shared: this codebase's edge functions are each small and
- *  self-contained by convention (see create-lead, social-generate) rather
- *  than reaching for a shared-lib abstraction for one reused function. */
+/** Same confirmation paystack-checkout's `verify` action uses: Paystack's
+ *  verify API says whether money moved, then confirm_billing_payment marks
+ *  the row paid and applies the plan or add-on in one transaction. Kept
+ *  self-contained rather than imported, by this codebase's convention for
+ *  small edge functions. Throws when the database step fails. */
 async function activatePayment(
   admin: ReturnType<typeof createClient>,
   reference: string,
@@ -83,23 +90,13 @@ async function activatePayment(
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
   if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') return;
-  const amount = verifyData.data.amount;
-  const currency = verifyData.data.currency;
 
-  const { data: updated } = await admin
-    .from('subscription_payments')
-    .update({ status: 'success', verified_at: new Date().toISOString() })
-    .eq('paystack_reference', reference)
-    .eq('status', 'pending')
-    .eq('amount_kobo', amount ?? -1)
-    .eq('currency', currency ?? '')
-    .select('agency_id, plan_tier')
-    .maybeSingle();
-
-  if (updated) {
-    await admin.rpc('activate_subscription', { p_agency_id: updated.agency_id, p_plan_tier: updated.plan_tier });
-  }
-  // If no row was updated, either the client's own verify() already won the
-  // race (fine — same end state), or the reference is unrecognised (also
-  // fine to no-op on).
+  const { error } = await admin.rpc('confirm_billing_payment', {
+    p_reference: reference,
+    p_amount_kobo: verifyData.data.amount ?? -1,
+    p_currency: verifyData.data.currency ?? '',
+  });
+  if (error) throw new Error(error.message);
+  // An unrecognised reference, or one the redirect-back verify already
+  // confirmed, returns without effect -- the same end state either way.
 }
