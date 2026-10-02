@@ -93,13 +93,13 @@ function assertReadOnly(q) {
 
 /** One round trip. Errors carry the server's own words — a migration that
  *  fails is read by a human who needs the Postgres message, not a status. */
-async function sql(query) {
+async function sql(query, { readOnly = false } = {}) {
   let res;
   try {
     res = await fetch(API, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, ...(readOnly ? { read_only: true } : {}) }),
     });
   } catch (err) {
     /* DNS, TLS, a dropped connection. Nothing was applied, and whoever is
@@ -235,7 +235,7 @@ if (MODE === 'query') {
     process.exit(1);
   }
   const safe = assertReadOnly(q);
-  const rows = await sql(safe);
+  const rows = await sql(safe, { readOnly: true });
   if (!Array.isArray(rows) || rows.length === 0) console.log('(no rows)');
   else {
     console.log(`${rows.length} row(s)`);
