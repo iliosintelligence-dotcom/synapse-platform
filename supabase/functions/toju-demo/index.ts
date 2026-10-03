@@ -792,7 +792,7 @@ the one they asked for.`
     /* browse implies showing: they asked what there is, so the database is
        asked, whatever the model said about showMatches. */
     const showMatches = parsed.showMatches === true || criteria.browse === true;
-    const more = typeof parsed.more === 'string' && parsed.more.trim() ? parsed.more.trim().slice(0, 600) : null;
+    let more = typeof parsed.more === 'string' && parsed.more.trim() ? parsed.more.trim().slice(0, 600) : null;
     let searched: { where: string | null; live: number; found: number; kinds: string } | null = null;
     let suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
       .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
@@ -921,6 +921,16 @@ the one they asked for.`
       await saveSession(visitorId, full, showMatches ? criteria : undefined, showMatches ? matches : undefined);
     }
 
+    /* SHORT, WITHOUT LOSING ANYTHING: when the model wrote a second paragraph
+       and put nothing in 'more', that paragraph is folded behind "More" -- unless
+       it is a question, which must stay where the buyer can see it. */
+    if (!more) {
+      const parts = reply.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+      if (parts.length > 1 && !/\?\s*$/.test(parts[parts.length - 1])) {
+        reply = parts[0];
+        more = parts.slice(1).join('\n\n').slice(0, 600);
+      }
+    }
     suggestions = stageSuggestions({
       criteria, showMatches, found: matches.length, hasHistory: !!priceHistory,
       cities: liveCities ?? [], here: criteria.city && inv ? rowsIn(inv, parsePlace(criteria.city)?.name ?? criteria.city) : [],
