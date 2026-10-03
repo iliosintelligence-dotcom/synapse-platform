@@ -122,7 +122,12 @@ async function handleInit(
 
   if (!user.email) return json({ error: 'Account has no email on file' }, 400);
 
-  const origin = req.headers.get('origin') || new URL(req.url).origin;
+  /* WHERE THE PAYER RETURNS TO is chosen here, not by the caller (Greptile
+     audit): the Origin header is whatever the request says it is, and the
+     return link carries the payment reference. Only Synapse's own sites. */
+  const ALLOWED = ['https://www.synapsecore.dev', 'https://synapsecore.dev'];
+  const asked = req.headers.get('origin') ?? '';
+  const origin = ALLOWED.includes(asked) || /^http:\/\/localhost:\d+$/.test(asked) ? asked : ALLOWED[0];
   const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
     method: 'POST',
     headers: { Authorization: `Bearer ${paystackKey}`, 'Content-Type': 'application/json' },
