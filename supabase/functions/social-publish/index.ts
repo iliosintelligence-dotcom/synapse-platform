@@ -1133,6 +1133,42 @@ async function refreshTikTok(
   return String(j.access_token);
 }
 
+/* INSTAGRAM LOGIN TOKENS LAST SIXTY DAYS (Greptile audit). Nothing renewed
+   them, so on day sixty every scheduled post for that account failed until
+   somebody reconnected, with the account still shown as connected. Instagram
+   renews a long-lived token that is at least a day old and not yet expired,
+   for another sixty days, with one GET. Renewed here, ten days ahead of the
+   end, and written back. A renewal that fails is not fatal: the current token
+   still works until it ends, and the next run tries again. Facebook-login
+   tokens do not expire this way and are left alone. */
+async function refreshInstagram(
+  admin: ReturnType<typeof createClient>,
+  accountId: string,
+  token: string,
+): Promise<string> {
+  try {
+    const r = await fetch('https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token='
+      + encodeURIComponent(token));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.access_token) {
+      console.error('social-publish: instagram refresh failed for ' + accountId + ': '
+        + JSON.stringify(j.error ?? r.status).slice(0, 200));
+      return token;
+    }
+    const { error } = await admin.rpc('update_social_account_tokens', {
+      p_account_id: accountId,
+      p_access_token: j.access_token,
+      p_refresh_token: null,
+      p_expires_at: new Date(Date.now() + (Number(j.expires_in) || 5184000) * 1000).toISOString(),
+    });
+    if (error) { console.error('social-publish: instagram token not saved for ' + accountId + ': ' + error.message); return token; }
+    return String(j.access_token);
+  } catch (e) {
+    console.error('social-publish: instagram refresh error for ' + accountId, e);
+    return token;
+  }
+}
+
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
@@ -1309,6 +1345,12 @@ async function loadConnections(
           const fresh = await refreshTikTok(admin, a.id);
           if (!fresh) continue;
           token = fresh;
+        }
+      }
+      if (a.platform === 'instagram' && a.auth_source !== 'facebook_login' && a.token_expires_at) {
+        const expIg = Date.parse(a.token_expires_at);
+        if (expIg && expIg - Date.now() < 10 * 24 * 3600 * 1000 && expIg > Date.now()) {
+          token = await refreshInstagram(admin, a.id, token);
         }
       }
     }
