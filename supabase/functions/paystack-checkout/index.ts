@@ -126,8 +126,8 @@ async function handleInit(
      audit): the Origin header is whatever the request says it is, and the
      return link carries the payment reference. Only Synapse's own sites. */
   const ALLOWED = ['https://www.synapsecore.dev', 'https://synapsecore.dev'];
-  const asked = req.headers.get('origin') ?? '';
-  const origin = ALLOWED.includes(asked) || /^http:\/\/localhost:\d+$/.test(asked) ? asked : ALLOWED[0];
+  const askedOrigin = req.headers.get('origin') ?? '';
+  const origin = ALLOWED.includes(askedOrigin) || /^http:\/\/localhost:\d+$/.test(askedOrigin) ? askedOrigin : ALLOWED[0];
   const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
     method: 'POST',
     headers: { Authorization: `Bearer ${paystackKey}`, 'Content-Type': 'application/json' },
