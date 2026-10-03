@@ -1,0 +1,756 @@
+/**
+ * toju-chat — Tayo, the AI property advisor. Deno / Supabase Edge Function.
+ *
+ * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
+ * Property OS" without an architecture rewrite). The LLM backend is swappable
+ * behind an `LLMProvider` adapter, the system prompt comes from a versioned
+ * registry, and tools come from a registry the gateway iterates. Still one
+ * `search_properties` tool, the same mandatory-city rule, the same 30-message
+ * trim and the same no-listings line. The prompt is v2 and the search ranks
+ * rather than filters — both noted where they live, not here.
+ *
+ * Defaults to Claude (`claude-opus-4-8`); OpenAI (`gpt-4o`) remains available
+ * via TOJU_LLM_PROVIDER=openai. Both run with the CALLER's JWT so all
+ * reads/writes obey RLS (chat_sessions is owner-only; properties_select_public
+ * exposes live, active, unexpired rows — it does NOT filter on verification,
+ * which is why this function has to be explicit about that itself).
+ *
+ * Hard constraints:
+ *  - city is MANDATORY on every search. Tayo never shows listings from a
+ *    city the user did not ask about.
+ *  - Recommendation, not catalogue: freshness and verification RANK results
+ *    (build-plan v2.0's intent) rather than filtering them away. As hard
+ *    filters they guaranteed an empty answer at low inventory -- see the note
+ *    on runSearch.
+ *  - No embeddings / vectors / memory service. History lives in
+ *    chat_sessions.messages (jsonb), trimmed to the last 30 messages. Each
+ *    assistant turn records the prompt version + model that produced it.
+ *  - Extracted preferences (city, budget, type) are promoted to columns.
+ *
+ * Env: ANTHROPIC_API_KEY (default provider) and/or OPENAI_API_KEY,
+ *      optional TOJU_LLM_PROVIDER ('anthropic' | 'openai', default 'anthropic'),
+ *      SUPABASE_URL, SUPABASE_ANON_KEY (auto-injected).
+ */
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { corsHeaders, json } from '../_shared/cors.ts';
+
+const MAX_MESSAGES = 30;
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_MAX_TOKENS = 1024;
+
+/* ───────── prompt registry ─────────
+ * Versioned source for Tayo's system prompt. The active version is recorded on
+ * every assistant turn so prompt changes are traceable (and A/B-able later). */
+
+interface PromptVersion {
+  id: string;
+  version: string;
+  text: string;
+}
+
+/* v2 exists because v1 told Tayo to say two things Synapse cannot stand
+   behind, and one of them contradicted our own terms of service.
+
+   "an AI real estate consultant" — consultant reads as a regulated
+   professional. Estate practice in Nigeria is registered (ESVARBON), and
+   terms.html already calls Tayo "an AI advisor". One word, and it is the
+   word that decides whether we are holding an AI out as a practitioner.
+
+   "All listings are independently verified; you can speak to that trust."
+   Two separate problems. It is not INDEPENDENT — Synapse runs those checks
+   itself, first-party, so "independent" claims a third party that does not
+   exist. And it is not ALL — verification_tier starts at unverified and
+   most listings are, so Tayo was instructed to vouch for homes nobody had
+   checked. terms.html says the opposite in as many words: "Verified is a
+   process, not a guarantee." The product was arguing with its own contract.
+
+   What replaces it is not a disclaimer bolted on the end. Tayo states the
+   verification status of the specific home in front of it, which is a fact
+   it actually holds, and stops short of a promise it does not. */
+const TOJU_SYSTEM_V2: PromptVersion = {
+  id: 'toju-system',
+  version: '2026-09-05.2',
+  text: `You are Tayo, an AI property advisor for Synapse in Nigeria.
+You help people think through a decision — you are not a search box. You
+reason out loud and explain WHY a property fits before showing it.
+
+Conversation style:
+- Ask progressive questions in this order when information is missing:
+  1) location (which city/area), 2) budget, 3) lifestyle/needs.
+- Ask ONE focused question at a time. Be warm, concise, and expert.
+
+SOMEBODY WHO ALREADY FOUND THE HOME IS NOT STARTING A SEARCH.
+The intake above is for a person who arrives with nothing. It is wrong for the
+person who arrives holding a specific property, and that is now a common
+arrival: Instagram does not make caption links clickable, so people read a post
+and come here and TYPE what they saw.
+
+"I saw a one-bedroom in Agbowo for 450k on your Instagram" is not a brief. It
+is an identification. Treat it as one:
+- Search IMMEDIATELY on what they gave you. Do not ask a question first.
+- Show what matches and ask them to confirm which one, if more than one fits.
+- Then answer about THAT home -- the charges, the papers, the viewing.
+- Do NOT ask who is moving, when they are moving, or what their budget is.
+  They told you the budget by naming the price of a home they already like, and
+  they did not come here to be qualified. If those things matter later, they
+  will come up when the conversation reaches them.
+
+The signals: a price with an area, or a property type with an area, or any
+mention of having seen it -- "I saw", "your post", "on Instagram", "on TikTok",
+"the one you posted". One is enough.
+
+If nothing matches what they described, say so plainly and say what IS in that
+area, rather than opening an interview.
+
+Hard rules:
+- You may only recommend properties via the search_properties tool.
+- Search needs a PLACE: either city, or area. An area is enough on its own --
+  "Agbowo", "Lekki Phase 1", "Ikate" are how people actually name where they
+  saw something, and demanding the city first is a question asked of somebody
+  who has already answered it. If you have neither, ask — do NOT guess or
+  search a default city.
+- Never mention properties from a place the user did not ask about.
+- If search returns nothing, say exactly: "I don't have any listings in
+  {place} yet — want me to notify you when one comes up?" Do not invent
+  listings or suggest other cities unprompted.
+- Results may include homes Synapse has not checked. Show them, and say
+  which is which: each result carries verification_status. Never quietly
+  drop an unchecked home, and never present one as though it were checked.
+- Naira amounts use the ₦ symbol.
+
+What you must never claim:
+- Do NOT say listings are "independently verified" or imply a third party
+  checked them. Synapse runs its own checks. Say "Synapse checked X" or
+  "not yet checked" — whichever is true of THAT listing.
+- Do NOT describe an unverified listing as verified, safe, or trustworthy.
+  If a home has not been checked, say so plainly when it is relevant.
+- Verification means specific checks passed on a date. It is not a
+  guarantee of title, condition, price, or of any transaction completing.
+  Never imply otherwise.
+- You are not a lawyer, surveyor, broker or financial adviser, and nothing
+  you say is legal, financial or investment advice. Do not forecast prices,
+  promise returns or yields, or call a property a good investment. If asked
+  to, say plainly that you cannot, and say what you can do instead.
+- For anything that turns on title, survey, or money changing hands, tell
+  the person to get their own lawyer's search before they commit. Say it
+  once, where it matters — not as a disclaimer on every message.
+- Never state a number you were not given. No invented yields, crime
+  figures, power-supply statistics or price forecasts.`,
+};
+
+const PROMPT_REGISTRY: Record<string, PromptVersion> = {
+  [TOJU_SYSTEM_V2.version]: TOJU_SYSTEM_V2,
+};
+
+const ACTIVE_PROMPT = TOJU_SYSTEM_V2;
+// `PROMPT_REGISTRY` is the lookup surface for future versioned prompts; the
+// active one is exported via ACTIVE_PROMPT. Referenced to keep it live.
+void PROMPT_REGISTRY;
+
+/* ───────── tool registry ─────────
+ * Gateway-neutral tool definitions. Each provider adapter translates these into
+ * its own wire format, and the gateway dispatches a tool call to `run` by name.
+ * Adding a tool later means appending an entry here — no edits to request bodies. */
+
+interface GatewayTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  // deno-lint-ignore no-explicit-any
+  run(supabase: any, args: Record<string, unknown>): Promise<{ content: string; ids: string[] }>;
+}
+
+const TOOLS: GatewayTool[] = [
+  {
+    name: 'search_properties',
+    description:
+      'Search live Synapse listings by place. Give city, or area, or both -- at least one. '
+      + 'Returns up to 5 properties, best first, each carrying verification_status and whether '
+      + 'it was listed recently. Some results may be unverified -- say so rather than omitting them.',
+    parameters: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City, e.g. Lagos or Ibadan. Optional if area is given.' },
+        area: {
+          type: 'string',
+          description:
+            'Neighbourhood or street, e.g. Agbowo, Ikate, Lekki Phase 1. Use this when the user '
+            + 'names a place smaller than a city -- which is how people describe somewhere they '
+            + 'saw a post about. Matched against the address and the title as well as the city.',
+        },
+        listing_type: { type: 'string', enum: ['sale', 'rent', 'shortlet'] },
+        property_type: {
+          type: 'string',
+          enum: ['apartment', 'house', 'duplex', 'terrace', 'penthouse', 'bungalow', 'land', 'commercial'],
+        },
+        budget_min: { type: 'number', description: 'Minimum price in naira' },
+        budget_max: { type: 'number', description: 'Maximum price in naira' },
+        bedrooms_min: { type: 'number' },
+      },
+      /* Neither is required by the schema, because "one of these two" is not
+         something JSON Schema expresses in a way every provider honours. The
+         check is in runSearch instead, where it can say something useful. */
+      required: [],
+    },
+    async run(supabase, args) {
+      const searchArgs = args as unknown as SearchArgs;
+      /* The place, as the USER said it. An area search was asked for by area,
+         so the no-listings line has to name the area -- telling somebody who
+         asked about Agbowo that there is nothing in Ibadan answers a question
+         they did not ask. */
+      const place = (searchArgs.area || searchArgs.city || '').trim();
+
+      let results: SearchRow[] = [];
+      let ids: string[] = [];
+      try {
+        ({ results, ids } = await runSearch(supabase, searchArgs));
+      } catch (e) {
+        if ((e as Error)?.message === 'NO_PLACE') {
+          return {
+            content: 'NO_PLACE: the user has not named a city or an area yet. Ask which '
+              + 'area or city they mean, in one short question. Do not search.',
+            ids: [],
+          };
+        }
+        throw e;
+      }
+
+      // Feed tool result back for the final natural-language answer.
+      const content =
+        results.length > 0
+          ? JSON.stringify(results)
+          : `NO_RESULTS for "${place}". Use the exact no-listings line, naming ${place}.`;
+      return { content, ids };
+    },
+  },
+];
+
+const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+
+interface SearchArgs {
+  city?: string;
+  area?: string;
+  listing_type?: string;
+  property_type?: string;
+  budget_min?: number;
+  budget_max?: number;
+  bedrooms_min?: number;
+}
+
+/**
+ * A discrete next step Tayo surfaces, kept structurally separate from the
+ * recommendation prose. Layer 9's "half-open door" (docs/layer9.md, instruction
+ * 2) requires the observation/recommendation and the action-to-take to be
+ * distinct labeled fields so the future 9.4 advisory agent extends this contract
+ * rather than rewriting the UI. Mirrors `TojuSuggestedAction` in @synapse/types.
+ */
+interface SuggestedAction {
+  label: string;
+  kind: 'start_conversation' | 'view_property' | 'none';
+  property_id?: string;
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  property_ids?: string[];
+  /** The action surfaced this turn — derived from the tool result, never the prose. */
+  suggested_action?: SuggestedAction | null;
+  prompt_version?: string;
+  model?: string;
+  at: string;
+}
+
+/**
+ * Derive the next-step action from the structured tool outcome — NOT by parsing
+ * the answer text. When the search returned listings, the user's natural next
+ * step is to reach out about the top-ranked one; otherwise there is no action
+ * (Tayo is asking a question or has no listings to act on).
+ */
+function deriveSuggestedAction(ids: string[]): SuggestedAction | null {
+  if (ids.length === 0) return null;
+  return {
+    kind: 'start_conversation',
+    label: 'Start a conversation about this property',
+    property_id: ids[0],
+  };
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  try {
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+
+    let provider: LLMProvider;
+    try {
+      provider = resolveProvider();
+    } catch (e) {
+      return json({ error: `Server misconfigured: ${(e as Error).message}` }, 500);
+    }
+
+    // Caller-scoped client — RLS enforced on every query.
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader } } },
+    );
+
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData.user;
+    if (!user) return json({ error: 'Not authenticated' }, 401);
+
+    const body = (await req.json()) as { session_id?: string; message?: string };
+    if (!body.message || !body.message.trim()) {
+      return json({ error: 'message is required' }, 400);
+    }
+
+    // ── load or create session ──
+    let sessionId = body.session_id ?? null;
+    let history: ChatMessage[] = [];
+    if (sessionId) {
+      const { data } = await supabase
+        .from('chat_sessions')
+        .select('id, messages')
+        .eq('id', sessionId)
+        .maybeSingle();
+      if (data) history = (data.messages as ChatMessage[]) ?? [];
+    }
+    if (!sessionId) {
+      const { data, error } = await supabase
+        .from('chat_sessions')
+        .insert({ consumer_id: user.id, messages: [] })
+        .select('id')
+        .single();
+      if (error) return json({ error: `Could not start session: ${error.message}` }, 500);
+      sessionId = data.id as string;
+    }
+
+    const nowIso = new Date().toISOString();
+    history.push({ role: 'user', content: body.message, at: nowIso });
+
+    // ── run the gateway (may call a tool, then answer) ──
+    const { text: finalText, ids: recommendedIds, toolArgs } = await runGateway(
+      provider,
+      supabase,
+      ACTIVE_PROMPT.text,
+      history,
+    );
+    const extractedPrefs = toolArgs as SearchArgs | null;
+    // Action is derived from the structured tool outcome, kept separate from the
+    // recommendation prose (Layer 9 instruction 2 / the "half-open door").
+    const suggestedAction = deriveSuggestedAction(recommendedIds);
+
+    // ── persist assistant turn + trim ──
+    history.push({
+      role: 'assistant',
+      content: finalText,
+      property_ids: recommendedIds,
+      suggested_action: suggestedAction,
+      prompt_version: ACTIVE_PROMPT.version,
+      model: provider.model,
+      at: new Date().toISOString(),
+    });
+    const trimmed = history.slice(-MAX_MESSAGES);
+
+    const sessionUpdate: Record<string, unknown> = { messages: trimmed };
+    if (extractedPrefs) {
+      sessionUpdate.pref_city = extractedPrefs.city;
+      if (extractedPrefs.budget_min !== undefined) sessionUpdate.pref_budget_min = extractedPrefs.budget_min;
+      if (extractedPrefs.budget_max !== undefined) sessionUpdate.pref_budget_max = extractedPrefs.budget_max;
+      if (extractedPrefs.property_type) sessionUpdate.pref_property_type = extractedPrefs.property_type;
+      if (extractedPrefs.listing_type) sessionUpdate.pref_listing_type = extractedPrefs.listing_type;
+    }
+    await supabase.from('chat_sessions').update(sessionUpdate).eq('id', sessionId);
+
+    return json({
+      message: finalText,
+      property_ids: recommendedIds,
+      session_id: sessionId,
+      suggestedAction,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return json({ error: message }, 500);
+  }
+});
+
+/* ───────── AI gateway ─────────
+ * A normalized conversation model that each provider adapter translates into
+ * its own wire format. This is the swappable seam: the handler talks to
+ * `LLMProvider`, never to a specific vendor's request shape. */
+
+interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+type GatewayMessage =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string }
+  | { role: 'assistant_tool_call'; toolCall: ToolCall }
+  | { role: 'tool_result'; toolCallId: string; toolName: string; content: string };
+
+interface GatewayResponse {
+  text: string;
+  toolCall: ToolCall | null;
+}
+
+interface LLMProvider {
+  readonly id: string;
+  readonly model: string;
+  complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse>;
+}
+
+function resolveProvider(): LLMProvider {
+  const choice = (Deno.env.get('TOJU_LLM_PROVIDER') ?? 'anthropic').toLowerCase();
+  if (choice === 'openai') {
+    const key = Deno.env.get('OPENAI_API_KEY');
+    if (!key) throw new Error('no OpenAI key');
+    return new OpenAIProvider(key);
+  }
+  // Default: Claude. New AI work defaults to the latest Claude models.
+  const key = Deno.env.get('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('no Anthropic key');
+  return new AnthropicProvider(key);
+}
+
+/**
+ * The two-call flow: ask the model (with tools), and if it requests a known
+ * tool, run it and ask again (without tools) for the final answer. Provider-
+ * agnostic — the adapter handles each vendor's message/tool-call shape.
+ */
+async function runGateway(
+  provider: LLMProvider,
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  system: string,
+  history: ChatMessage[],
+): Promise<{ text: string; ids: string[]; toolArgs: Record<string, unknown> | null }> {
+  const messages: GatewayMessage[] = history.map((m) => ({ role: m.role, content: m.content }));
+
+  const first = await provider.complete(system, messages, TOOLS);
+  let finalText = first.text;
+  let ids: string[] = [];
+  let toolArgs: Record<string, unknown> | null = null;
+
+  const call = first.toolCall;
+  if (call && TOOL_BY_NAME.has(call.name)) {
+    const tool = TOOL_BY_NAME.get(call.name)!;
+    toolArgs = call.arguments;
+
+    const { content, ids: foundIds } = await tool.run(supabase, call.arguments);
+    ids = foundIds;
+
+    const followUp: GatewayMessage[] = [
+      ...messages,
+      { role: 'assistant_tool_call', toolCall: call },
+      { role: 'tool_result', toolCallId: call.id, toolName: call.name, content },
+    ];
+    const second = await provider.complete(system, followUp, []);
+    finalText = second.text || finalText;
+  }
+
+  return { text: finalText, ids, toolArgs };
+}
+
+/* ───────── provider adapters ───────── */
+
+interface OpenAIResponse {
+  choices?: {
+    message?: {
+      content?: string;
+      tool_calls?: { id: string; function: { name: string; arguments: string } }[];
+    };
+  }[];
+}
+
+/**
+ * OpenAI Chat Completions: `system` is the first message in the array; an
+ * assistant tool request carries a `tool_calls` array with stringified JSON
+ * arguments; the result returns as a `tool` role message keyed by tool_call_id.
+ */
+class OpenAIProvider implements LLMProvider {
+  readonly id = 'openai';
+  readonly model = 'gpt-4o';
+  constructor(private readonly key: string) {}
+
+  async complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse> {
+    const oaMessages: unknown[] = [
+      { role: 'system', content: system },
+      ...messages.map(toOpenAIMessage),
+    ];
+    const requestBody: Record<string, unknown> = {
+      model: this.model,
+      messages: oaMessages,
+      temperature: 0.4,
+    };
+    if (tools.length > 0) {
+      requestBody.tools = tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+      requestBody.tool_choice = 'auto';
+    }
+
+    const res = await fetch(OPENAI_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+    if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
+
+    const data = (await res.json()) as OpenAIResponse;
+    const choice = data.choices?.[0]?.message;
+    const tc = choice?.tool_calls?.[0];
+    const toolCall: ToolCall | null = tc
+      ? { id: tc.id, name: tc.function.name, arguments: safeJsonParse(tc.function.arguments) }
+      : null;
+    return { text: choice?.content ?? '', toolCall };
+  }
+}
+
+function toOpenAIMessage(m: GatewayMessage): unknown {
+  switch (m.role) {
+    case 'user':
+      return { role: 'user', content: m.content };
+    case 'assistant':
+      return { role: 'assistant', content: m.content };
+    case 'assistant_tool_call':
+      return {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: m.toolCall.id,
+            type: 'function',
+            function: { name: m.toolCall.name, arguments: JSON.stringify(m.toolCall.arguments) },
+          },
+        ],
+      };
+    case 'tool_result':
+      return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+  }
+}
+
+interface AnthropicResponse {
+  content?: {
+    type: string;
+    text?: string;
+    id?: string;
+    name?: string;
+    input?: Record<string, unknown>;
+  }[];
+}
+
+/**
+ * Anthropic Messages API: `system` is a top-level field (not a message); an
+ * assistant tool request is a `tool_use` content block with the arguments as a
+ * parsed `input` object; the result returns as a `user` message containing a
+ * `tool_result` block keyed by tool_use_id. No `temperature` — it is rejected
+ * on claude-opus-4-8.
+ */
+class AnthropicProvider implements LLMProvider {
+  readonly id = 'anthropic';
+  readonly model = 'claude-opus-4-8';
+  constructor(private readonly key: string) {}
+
+  async complete(system: string, messages: GatewayMessage[], tools: GatewayTool[]): Promise<GatewayResponse> {
+    const requestBody: Record<string, unknown> = {
+      model: this.model,
+      max_tokens: ANTHROPIC_MAX_TOKENS,
+      system,
+      messages: messages.map(toAnthropicMessage),
+    };
+    if (tools.length > 0) {
+      requestBody.tools = tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+      }));
+      // tool_choice defaults to auto when tools are present.
+    }
+
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': this.key,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+    if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
+
+    const data = (await res.json()) as AnthropicResponse;
+    let text = '';
+    let toolCall: ToolCall | null = null;
+    for (const block of data.content ?? []) {
+      if (block.type === 'text' && typeof block.text === 'string') {
+        text += block.text;
+      } else if (block.type === 'tool_use' && !toolCall && block.id && block.name) {
+        toolCall = { id: block.id, name: block.name, arguments: block.input ?? {} };
+      }
+    }
+    return { text, toolCall };
+  }
+}
+
+function toAnthropicMessage(m: GatewayMessage): unknown {
+  switch (m.role) {
+    case 'user':
+      return { role: 'user', content: m.content };
+    case 'assistant':
+      return { role: 'assistant', content: m.content };
+    case 'assistant_tool_call':
+      return {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: m.toolCall.id, name: m.toolCall.name, input: m.toolCall.arguments }],
+      };
+    case 'tool_result':
+      return {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.toolCallId, content: m.content }],
+      };
+  }
+}
+
+function safeJsonParse(raw: string | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(raw || '{}') as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/* ───────── search ───────── */
+
+interface SearchRow {
+  id: string;
+  title: string;
+  city: string;
+  price: number;
+  listing_type: string;
+  property_type: string;
+  bedrooms: number | null;
+  trust_score: number | null;
+  /* The prompt instructs Tayo to state whether THIS home was checked. Until
+     these two were selected it had no way to know, so it was being asked to
+     report a fact it had never been given. */
+  verification_status: 'unverified' | 'in_progress' | 'verified';
+  listed_at: string | null;
+  /** Derived, so the model does not have to do date arithmetic. */
+  recently_listed?: boolean;
+}
+
+/** Recency window (build-plan v2.0). It marks a listing as recent; it no
+ *  longer excludes anything. See runSearch. */
+const RECOMMENDATION_WINDOW_DAYS = 14;
+
+/* This returned nothing. To anyone. In any city.
+
+   Two hard filters -- verification_status = 'verified' AND listed in the last
+   14 days -- and at real inventory they had no overlap: the two verified
+   listings were 27 days old and the only recent one was unverified. Every
+   conversation ended on the no-listings line while seven live homes sat in
+   the table. Measured against production, not inferred.
+
+   Both filters were defensible alone and wrong together. Freshness and
+   verification are how you RANK a shortlist, not how you decide a home does
+   not exist. So they order the results now, and nothing is filtered on either:
+
+     verified first          trust is the strongest signal a buyer has
+     then most recently listed   build-plan v2.0's "recommendation, not catalogue"
+     then trust_score        the original tie-break, kept
+
+   Five results, best first. If a city genuinely has nothing live, the tool
+   still returns empty and the no-listings line still fires -- which is now
+   true when it is said, rather than true of almost every query.
+
+   Unverified homes reaching a buyer is the intended design, not a slip:
+   app/toju.html says so where it draws the cards ("Tayo shows checked and
+   unchecked homes alike, so the label is what keeps that honest"), and the
+   prompt requires Tayo to state which is which. The backend was the only
+   part that disagreed.
+
+   Note the old comment here claimed RLS already restricted this to verified.
+   It does not -- properties_select_public is live + active + not expired, and
+   says nothing about verification. */
+async function runSearch(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  args: SearchArgs,
+): Promise<{ results: SearchRow[]; ids: string[] }> {
+  /* A PLACE, WHICH IS NOT ALWAYS A CITY.
+     This was .ilike('city', args.city) and nothing else, so a person who said
+     "the one-bedroom in Agbowo" got either an interrogation about which city
+     Agbowo is in, or a search for a city called Agbowo and the no-listings
+     line -- about a listing we are actively advertising, whose title literally
+     ends in "Agbowo".
+
+     That is the common case now. Instagram captions are not clickable, so
+     people arrive typing what they saw, and what they saw was a neighbourhood.
+
+     An area is matched across address, title and city, which is WIDER in what
+     it looks at and NARROWER in what it returns: "Agbowo" can only match homes
+     that say Agbowo somewhere. The rule it protects -- never show a place the
+     user did not ask about -- is kept, not loosened.
+
+     RLS (properties_select_public) already limits this to live, active,
+     unexpired rows; the filters below are asserted anyway so the query reads
+     as what it means. */
+  const since = Date.now() - RECOMMENDATION_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const city = (args.city ?? '').trim();
+  const area = (args.area ?? '').trim();
+  if (!city && !area) {
+    /* An empty result would be a lie of a different kind -- there are listings,
+       we just were not told where to look -- and the caller turns an empty
+       result into "I don't have any listings in {place} yet". With no place at
+       all that sentence names `undefined`. Throwing gives the caller something
+       to say instead. */
+    throw new Error('NO_PLACE');
+  }
+
+  let query = supabase
+    .from('properties')
+    .select('id, title, city, price, listing_type, property_type, bedrooms, trust_score, verification_status, listed_at')
+    .eq('is_active', true)
+    .eq('status', 'live')
+    // The enum sorts unverified < in_progress < verified, so descending puts
+    // checked homes at the top without a computed column.
+    .order('verification_status', { ascending: false })
+    .order('listed_at', { ascending: false, nullsFirst: false })
+    .order('trust_score', { ascending: false, nullsFirst: false })
+    .limit(5);
+
+  /* Applied after the base filters so the OR groups cleanly. An area search
+     looks in three columns; a city search stays exact, because "Lagos" as a
+     substring of an address would drag in anything mentioning Lagos State. */
+  if (area) {
+    const like = `%${area.replace(/[%,]/g, ' ')}%`;
+    query = query.or(`address.ilike.${like},title.ilike.${like},city.ilike.${like}`);
+  }
+  if (city) query = query.ilike('city', city);
+
+  if (args.listing_type) query = query.eq('listing_type', args.listing_type);
+  if (args.property_type) query = query.eq('property_type', args.property_type);
+  if (args.budget_min !== undefined) query = query.gte('price', args.budget_min);
+  if (args.budget_max !== undefined) query = query.lte('price', args.budget_max);
+  if (args.bedrooms_min !== undefined) query = query.gte('bedrooms', args.bedrooms_min);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Search failed: ${error.message}`);
+  /* recently_listed is computed here rather than left to the model: asking an
+     LLM to compare an ISO timestamp against today is a reliable way to get a
+     confident wrong answer, and the prompt forbids stating numbers it was not
+     given. */
+  const results = ((data ?? []) as SearchRow[]).map((r) => ({
+    ...r,
+    recently_listed: !!r.listed_at && new Date(r.listed_at).getTime() >= since,
+  }));
+  return { results, ids: results.map((r) => r.id) };
+}

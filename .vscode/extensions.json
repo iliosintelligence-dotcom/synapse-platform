@@ -1,0 +1,4 @@
+{
+  "//": "Required for the split language-server setup in settings.json: the Deno extension owns supabase/functions (so `Deno`, std, and https:// imports resolve). Without it, the TypeScript server checks the Edge Functions and reports phantom 'Cannot find name Deno' / unresolved-import errors. ESLint stays for packages/* and apps/*.",
+  "recommendations": ["denoland.vscode-deno", "dbaeumer.vscode-eslint"]
+}

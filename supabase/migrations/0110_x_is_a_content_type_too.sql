@@ -1,0 +1,15 @@
+-- 0110 — X IS A CONTENT TYPE TOO
+--
+-- social_platform has had 'x' all along, and social-publish has had x_post in
+-- its trypost content-type map all along -- which is why Synapse's own X
+-- account has been carrying every listing as a twin. But content_type, the
+-- enum generated_content files a draft under, had no value for it.
+--
+-- So an X caption could be PUBLISHED and could not be SAVED, and the composer
+-- consequently never offered X at all: saveGeneration drops any channel with
+-- no content type, silently, with no error anywhere.
+--
+-- The result was posts going out on X that no agency was ever given the chance
+-- to write -- reworded from a caption meant for a different platform, on the
+-- one channel where length is the whole craft.
+alter type content_type add value if not exists 'x_post';
