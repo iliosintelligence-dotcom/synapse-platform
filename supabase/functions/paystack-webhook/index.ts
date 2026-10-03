@@ -87,7 +87,7 @@ async function activatePayment(
     headers: { Authorization: `Bearer ${paystackKey}` },
   });
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
-    status?: boolean; data?: { status?: string; amount?: number; currency?: string };
+    status?: boolean; data?: { status?: string; amount?: number; currency?: string; authorization?: CardAuth; customer?: { email?: string } };
   };
   /* Could not ask, or Paystack has not settled it yet: throw, so the
      webhook answers 500 and Paystack delivers again (Greptile). Only a final
@@ -105,4 +105,26 @@ async function activatePayment(
   if (error) throw new Error(error.message);
   // An unrecognised reference, or one the redirect-back verify already
   // confirmed, returns without effect -- the same end state either way.
+  await keepCard(admin, reference, verifyData.data?.authorization, verifyData.data?.customer?.email);
+}
+
+interface CardAuth {
+  authorization_code?: string; reusable?: boolean; channel?: string;
+  brand?: string; last4?: string; exp_month?: string; exp_year?: string;
+}
+
+/** After a confirmed plan payment, keep the reusable card so the plan can
+ *  renew itself (billing-renew). Only a reusable card is kept, never a bank
+ *  transfer, and a failure here is logged, not thrown: the plan is already
+ *  applied, and without a saved card it simply does not auto-renew. */
+async function keepCard(
+  admin: ReturnType<typeof createClient>, reference: string, auth?: CardAuth, email?: string,
+): Promise<void> {
+  if (!auth?.authorization_code || !auth.reusable || auth.channel !== 'card' || !email) return;
+  const { error } = await admin.rpc('save_billing_authorization', {
+    p_reference: reference, p_authorization_code: auth.authorization_code, p_email: email,
+    p_brand: auth.brand ?? null, p_last4: auth.last4 ?? null,
+    p_exp: auth.exp_month && auth.exp_year ? `${auth.exp_month}/${auth.exp_year}` : null,
+  });
+  if (error) console.error(`paystack-webhook keepCard failed: ${error.message}`);
 }

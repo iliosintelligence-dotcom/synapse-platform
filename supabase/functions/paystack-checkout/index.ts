@@ -211,7 +211,7 @@ export async function activatePayment(
     headers: { Authorization: `Bearer ${paystackKey}` },
   });
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
-    status?: boolean; data?: { status?: string; amount?: number; currency?: string };
+    status?: boolean; data?: { status?: string; amount?: number; currency?: string; authorization?: CardAuth; customer?: { email?: string } };
   };
   if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
     return { ok: false };
@@ -228,6 +228,29 @@ export async function activatePayment(
     throw new Error(`Could not confirm payment: ${error.message}`);
   }
   const r = data as { status?: string; kind?: string; tier?: string; addon?: string } | null;
-  if (r?.status === 'success') return { ok: true, kind: r.kind, tier: r.tier ?? undefined, addon: r.addon ?? undefined };
+  if (r?.status === 'success') {
+    await keepCard(admin, reference, verifyData.data?.authorization, verifyData.data?.customer?.email);
+    return { ok: true, kind: r.kind, tier: r.tier ?? undefined, addon: r.addon ?? undefined };
+  }
   return { ok: false };
+}
+
+interface CardAuth {
+  authorization_code?: string; reusable?: boolean; channel?: string;
+  brand?: string; last4?: string; exp_month?: string; exp_year?: string;
+}
+
+/** Keep the reusable card after a confirmed plan payment so the plan can
+ *  renew itself (billing-renew). Card only, never a bank transfer. Logged,
+ *  not thrown: the plan is already applied. */
+async function keepCard(
+  admin: ReturnType<typeof createClient>, reference: string, auth?: CardAuth, email?: string,
+): Promise<void> {
+  if (!auth?.authorization_code || !auth.reusable || auth.channel !== 'card' || !email) return;
+  const { error } = await admin.rpc('save_billing_authorization', {
+    p_reference: reference, p_authorization_code: auth.authorization_code, p_email: email,
+    p_brand: auth.brand ?? null, p_last4: auth.last4 ?? null,
+    p_exp: auth.exp_month && auth.exp_year ? `${auth.exp_month}/${auth.exp_year}` : null,
+  });
+  if (error) console.error(`paystack-checkout keepCard failed: ${error.message}`);
 }

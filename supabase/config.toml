@@ -130,3 +130,6 @@ verify_jwt = true
 # Reads an agent's description into the listing form's fields. Members only.
 [functions.listing-extract]
 verify_jwt = true
+
+[functions.billing-renew]
+verify_jwt = true
