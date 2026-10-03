@@ -21,6 +21,19 @@
  *   apply     run every pending migration, oldest first, stopping at the first
  *             failure.
  *   baseline  record every migration file as applied WITHOUT running it.
+ *   query     one read-only SELECT (enforced by Postgres).
+ *   export    write the database's OWN recorded migration history to files.
+ *   bootstrap rebuild a brand-new EMPTY project from an exported history.
+ *
+ * REBUILDING THE DATABASE (Greptile audit). The repo alone cannot do it: the
+ * live history holds 220 migrations and the repo holds files for fewer than
+ * 160 of them -- 64 patches were applied straight to the database, and the
+ * 0001-style files are a rough reconstruction, not what ran. The database
+ * stores the SQL of everything it ran (schema_migrations.statements), so that
+ * is the source: `export` writes it out, `bootstrap` replays it in order into
+ * an empty project, and `apply` then adds whatever the repo has since. See
+ * docs/rebuild-database.md. The exported history is the whole schema and is
+ * NOT committed anywhere public.
  *
  * BASELINE is for a database whose history was never tracked at all: it
  * records the managed files as applied WITHOUT running them. This project does
@@ -32,7 +45,7 @@
  * call rather than ignored. So is a version two files share, and a file whose
  * version the database already holds under another migration's name.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 
 
@@ -50,8 +63,8 @@ if (!TOKEN) {
   console.error('SUPABASE_ACCESS_TOKEN is not set.');
   process.exit(1);
 }
-if (!['plan', 'apply', 'baseline', 'query'].includes(MODE)) {
-  console.error(`Unknown mode "${MODE}". Use plan, apply, baseline or query.`);
+if (!['plan', 'apply', 'baseline', 'query', 'export', 'bootstrap'].includes(MODE)) {
+  console.error(`Unknown mode "${MODE}". Use plan, apply, baseline, query, export or bootstrap.`);
   process.exit(1);
 }
 
@@ -238,6 +251,88 @@ if (MODE === 'query') {
   }
   process.exit(0);
 }
+
+  /* EXPORT: the database's own history, to files. Read-only (a read-only
+     transaction), and written to HISTORY_DIR on whatever machine runs this --
+     never to the repo: it is the entire schema, and the repo is public. */
+  if (MODE === 'export') {
+    const out = process.env.HISTORY_DIR || join(process.cwd(), 'migration-history');
+    const rows = await sql('begin transaction read only;\nselect version, name, statements from supabase_migrations.schema_migrations order by version;');
+    if (!Array.isArray(rows) || !rows.length) {
+      console.error('No recorded migrations to export.');
+      process.exit(1);
+    }
+    mkdirSync(out, { recursive: true });
+    for (const r of rows) {
+      const safe = String(r.name || 'migration').replace(/\.sql$/i, '').replace(/^\d{14}_/, '').replace(/[^A-Za-z0-9_-]+/g, '_');
+      const body = (Array.isArray(r.statements) ? r.statements : [])
+        .map((st) => { const t = String(st).trimEnd(); return /;\s*$/.test(t) ? t : t + '\n;'; })
+        .join('\n') + '\n';
+      writeFileSync(join(out, `${r.version}_${safe}.sql`), body, 'utf8');
+    }
+    console.log(`Exported ${rows.length} migration(s) to ${out}`);
+    console.log('This is the whole schema. Keep it out of the repo and out of public logs.');
+    process.exit(0);
+  }
+
+  /* BOOTSTRAP: replay an exported history into a NEW, EMPTY project. Several
+     refusals, because pointed at the wrong database this could do real damage:
+     the target must be named explicitly, must not be production, and must be
+     empty. Each file runs in its own transaction with its record, so a
+     failure stops cleanly at a known file. */
+  if (MODE === 'bootstrap') {
+    const PROD = 'bhrhejpekmhbhwryjhgk';
+    if (!process.env.SUPABASE_PROJECT_REF) {
+      console.error('Refusing: set SUPABASE_PROJECT_REF to the NEW project. The default is production.');
+      process.exit(1);
+    }
+    if (REF === PROD) {
+      console.error('Refusing: that is the production project. Bootstrap builds a new, empty one.');
+      process.exit(1);
+    }
+    const dir = process.env.HISTORY_DIR || join(process.cwd(), 'migration-history');
+    if (!existsSync(dir)) {
+      console.error(`Refusing: no history at ${dir}. Run "export" against production first.`);
+      process.exit(1);
+    }
+    const hist = readdirSync(dir).filter((f) => TIMESTAMP.test(f)).sort();
+    if (!hist.length) {
+      console.error(`Refusing: ${dir} holds no <14-digit version>_name.sql files.`);
+      process.exit(1);
+    }
+    const tbl = await sql("select count(*)::int as n from information_schema.tables where table_schema = 'public';");
+    const n = Array.isArray(tbl) && tbl[0] ? Number(tbl[0].n) : 0;
+    if (n > 0) {
+      console.error(`Refusing: the target already has ${n} table(s) in public. Bootstrap needs an empty project.`);
+      process.exit(1);
+    }
+    await ensureTable();
+    const had = await applied();
+    if (had.size > 0) {
+      console.error(`Refusing: ${had.size} migration(s) are already recorded in the target.`);
+      process.exit(1);
+    }
+    console.log(`project   ${REF}  (new, empty)`);
+    console.log(`history   ${hist.length} migration(s) from ${dir}`);
+    for (const f of hist) {
+      const version = versionOf(f);
+      const body = readFileSync(join(dir, f), 'utf8');
+      const wrap = !NO_TX.test(body);
+      process.stdout.write(`  ${f} ... `);
+      try {
+        await sql(wrap ? `begin;\n${body}\n${recordSql(version, f, body)}\ncommit;` : body);
+        if (!wrap) await sql(recordSql(version, f, body));
+        console.log('ok');
+      } catch (err) {
+        console.log('FAILED');
+        console.error(`\n${f} did not apply:\n${err.message}\n`);
+        console.error('Stopped. Everything before this file is applied and recorded; nothing after it was attempted.');
+        process.exit(1);
+      }
+    }
+    console.log(`\nBootstrapped ${hist.length} migration(s). Now run mode "apply" to add anything the repo has since.`);
+    process.exit(0);
+  }
 
 const { managed: files, legacy, unnamed } = partition();
 
