@@ -78,8 +78,16 @@ export async function signInWithApple(redirectTo?: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  const { error } = await getDb().auth.signOut();
-  if (error) throw error;
+  /* Ends the session on THIS device whatever the network does (Greptile
+     audit): the global sign-out revokes the token on the server and needs a
+     connection; if it fails, the local one still clears the stored session,
+     so a phone handed to someone else is signed out. */
+  const db = getDb();
+  const { error } = await db.auth.signOut();
+  if (error) {
+    const local = await db.auth.signOut({ scope: 'local' });
+    if (local.error) throw local.error;
+  }
 }
 
 /**

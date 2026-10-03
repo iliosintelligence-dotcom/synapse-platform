@@ -8,11 +8,27 @@ import { View, ScrollView, StyleSheet, Pressable } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GlassCard, Avatar, Title, Body, Label, Caption, Button, Icon, color, space } from '@synapse/ui';
+import { useAuth } from '@synapse/auth';
 import { MOCK_PROFILE } from '../../src/mock';
 
 export default function Profile() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { signOut } = useAuth();
+  const [leaving, setLeaving] = React.useState(false);
+  /* Ends the session first, THEN leaves (Greptile audit): navigating alone
+     left the account signed in, and the root guard sent the person straight
+     back home. */
+  const leave = async () => {
+    if (leaving) return;
+    setLeaving(true);
+    try {
+      await signOut();
+      router.replace('/(auth)/landing');
+    } finally {
+      setLeaving(false);
+    }
+  };
 
   return (
     <ScrollView
@@ -39,11 +55,11 @@ export default function Profile() {
       </GlassCard>
 
       <Button
-        label="Sign out"
+        label={leaving ? 'Signing out…' : 'Sign out'}
         variant="destructive"
         icon="xmark"
         style={{ marginTop: space.xl }}
-        onPress={() => router.replace('/(auth)/landing')}
+        onPress={leave}
       />
     </ScrollView>
   );
