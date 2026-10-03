@@ -226,7 +226,11 @@ if (MODE === 'query') {
     process.exit(1);
   }
   const safe = assertReadOnly(q);
-  const rows = await sql(safe);
+  /* READ-ONLY IN THE DATABASE, NOT ONLY IN A WORD LIST (Greptile audit): a
+     SELECT can call a function that writes. Inside a read-only transaction
+     Postgres itself refuses any write, whatever the query calls. The
+     transaction is never committed, so it ends when the request does. */
+  const rows = await sql('begin transaction read only;\n' + safe + ';');
   if (!Array.isArray(rows) || rows.length === 0) console.log('(no rows)');
   else {
     console.log(`${rows.length} row(s)`);
