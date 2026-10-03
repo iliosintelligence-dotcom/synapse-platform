@@ -1,0 +1,15 @@
+-- Enterprise is a plan.
+--
+-- DECISION (Eden, 2026-10-02): an Enterprise tier for agencies, with no list
+-- price. Terms are negotiated with each agency -- a monthly fee, per project,
+-- or a commission on closed deals -- so nobody buys it at a checkout; Synapse
+-- sets it on the agency once the terms are agreed:
+--
+--   update agencies set subscription_tier = 'enterprise',
+--                       subscription_current_period_end = null
+--    where id = '<agency id>';
+--
+-- The value has to exist and be committed before anything can name it, which
+-- is why it is alone in this file: the next migration teaches the plan
+-- functions what Enterprise includes (everything Leader does, unlimited).
+alter type subscription_tier add value if not exists 'enterprise';
