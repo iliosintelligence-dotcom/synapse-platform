@@ -389,13 +389,33 @@ entirely. So:
   • For an open question, the suggestions are answer starters in their voice
     -- "Near my work", "Anywhere in Ibadan", "Not sure yet" -- never a list of
     our areas or listings.
-  • Before the FIRST homes you also need what it is FOR and one thing about
-    how they live: to live in (and who with), to rent out, to hold as an
-    investment, or to build on; and for a home, the one lifestyle fact most
-    likely to change the pick (commute, kids' school, working from home,
-    quiet or lively). City + deal + budget alone is not enough any more: ask
-    the purpose question in one sentence, then show. Still skip all of this
-    for someone arriving from a post, or who says "just show me".
+  • THE ORDER OF WORK (Eden, 2026-10-03): 1. CONTEXT, 2. DATABASE, 3. RECOMMEND.
+    Context is two things, in this order: WHERE (the city or area), then WHAT
+    THEY WANT TO DO: buy a home, rent, a shared room, a short-let, buy land,
+    or invest. Those two are enough. The moment you have them, set showMatches
+    true THIS turn and let the database answer; do not ask another question
+    first. Lifestyle, household and budget questions come AFTER the homes are on
+    screen, to sharpen them.
+  • INVESTING IS A PURPOSE, NOT A DEAL TYPE. The products are land plots,
+    off-plan homes, and joint-venture or development-financing deals. "Invest
+    in land in Ibadan" is complete: propertyKind "land", dealType "buy",
+    intent "invest", city "Ibadan". Show it. Do not ask what the land is for;
+    they told you.
+  • BROWSING. If they name a place and ask what there is ("what do you have in
+    Ibadan", "show me the listings", "what's available"), or you do not yet know
+    what they want, set browse true: the database returns EVERYTHING live in
+    that place, whatever its kind. Say in one line what is there, taken from
+    LIVE INVENTORY, and let the cards do the rest.
+  • TRUTH. LIVE INVENTORY (at the end of this prompt) is read from the database
+    on every turn. Say only what it says. Never say a kind of listing exists or
+    does not exist unless it is listed there, never give a count that is not
+    there, and never describe the market ("only homes in Ibadan") from memory.
+    A place that is not listed there has nothing.
+  • SHORT, WITHOUT LOSING ANYTHING. "reply" is the answer in one or two short
+    lines. Anything else that matters (the steps you took, what to check, a
+    caveat) goes in "more", at most 70 words, which the app folds behind a
+    "More" button. Never drop a relevant step or caveat to be short: move it to
+    "more".
   • Still one short question per turn. Taking longer is not talking more.
 
 LAND AND INVESTMENT. Land: ask what it's for (build a home, hold it, farm,
@@ -428,7 +448,7 @@ you asked budget → ["Under ₦1M/yr","₦1–2M/yr","Not sure — advise me"].
 When showing matches, make them next steps → ["Cheaper options","Tell me about the first","Why these areas?"].
 
 Output STRICT JSON ONLY, no markdown, exactly:
-{"reply": "<your message>", "showMatches": <true|false>, "suggestions": [<string>], "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null, "criteria": {"propertyKind": <string|null>, "stage": <string|null>, "city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
+{"reply": "<your message>", "more": "<optional: steps and caveats, 70 words max, or null>", "showMatches": <true|false>, "suggestions": [<string>], "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null, "criteria": {"browse": <true|false>, "propertyKind": <string|null>, "stage": <string|null>, "city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
 
 const ADVISOR_PROMPT = `${DOCTRINE}
 
@@ -752,10 +772,11 @@ choice in the first place, and never substitute a different city for`
 the one they asked for.`
       : '';
 
-    const first = await claude(key, SYSTEM_PROMPT + cityGuidance + smallCatalogue, messages, MAX_TOKENS);
+    const inv = await liveInventory();
+    const first = await claude(key, SYSTEM_PROMPT + cityGuidance + smallCatalogue + inventoryText(inv), messages, MAX_TOKENS);
     if ('error' in first) return json({ error: first.error }, 502);
     const parsed = parseLoose(first.text) as {
-      reply?: string; showMatches?: boolean; suggestions?: unknown;
+      reply?: string; more?: string | null; showMatches?: boolean; suggestions?: unknown;
       priceHistory?: { area?: string; city?: string | null; kind?: string } | null;
       criteria?: Criteria & { brief?: string | null };
     };
@@ -767,8 +788,12 @@ the one they asked for.`
     let reply = typeof parsed.reply === 'string' && parsed.reply.trim()
       ? parsed.reply.trim()
       : (salvageReply(first.text) ?? safeFallbackReply(first.text));
-    const showMatches = parsed.showMatches === true;
     const criteria = parsed.criteria ?? {};
+    /* browse implies showing: they asked what there is, so the database is
+       asked, whatever the model said about showMatches. */
+    const showMatches = parsed.showMatches === true || criteria.browse === true;
+    const more = typeof parsed.more === 'string' && parsed.more.trim() ? parsed.more.trim().slice(0, 600) : null;
+    let searched: { where: string | null; live: number; found: number; kinds: string } | null = null;
     let suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
       .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
       .map((s) => s.trim().slice(0, 42))
@@ -837,9 +862,29 @@ the one they asked for.`
         // We did not look, so we cannot say nothing fits. Say that instead.
         reply = `${reply}\n\nOne honest note — I couldn't reach our listings just now, so I haven't checked yet. Ask me again in a moment and I'll pull them up.`;
       } else if (criteria.city) {
-        // Honest zero-state: never show homes from a different city or deal type.
-        const dt = criteria.dealType === 'rent' ? 'rentals' : criteria.dealType === 'shared' ? 'shared homes' : 'homes for sale';
-        reply = `${reply}\n\nOne honest note — I checked our ${dt} in ${criteria.city} and nothing fits that brief yet. Want me to widen the budget or size a little, or alert you the moment something lands?`;
+        /* THE HONEST ZERO-STATE, FROM THE DATABASE (Eden, 2026-10-03). It used
+           to say "nothing fits" and show nothing, even with a plot sitting in
+           the city. Now: if the place has anything live, say plainly what it
+           has and SHOW it; if it has nothing, say so and name where there is
+           something. No homes from another city. */
+        const place = parsePlace(criteria.city)?.name ?? criteria.city;
+        const here = inv ? rowsIn(inv, place) : [];
+        if (inv && here.length) {
+          let shown: Match[] = [];
+          try { shown = await fetchMatches({ city: criteria.city, browse: true }); } catch (_e) { shown = []; }
+          if (shown.length) {
+            matches = shown;
+            reply = criteria.browse
+              ? `Here is everything live in ${place}: ${describeRows(here)}.`
+              : `Nothing matching that in ${place} right now. What we do have there: ${describeRows(here)}.`;
+          } else {
+            reply = `I couldn't load the listings in ${place} just now. Try me again in a moment.`;
+          }
+        } else if (inv) {
+          reply = `We have nothing in ${place} yet.${liveCities && liveCities.length ? ' Right now we have listings in ' + liveCities.join(', ') + '.' : ''} Want me to alert you when something lands?`;
+        } else {
+          reply = `I couldn't check our listings just now, so I won't guess. Try me again in a moment.`;
+        }
       } else {
         // Guardrail: the model set showMatches without a city and the query
         // returned nothing. Pass-1's prose at this point may read like a
@@ -850,6 +895,12 @@ the one they asked for.`
         // [Wording proposed by backend — pending toju-ai sign-off; DOCTRINE untouched.]
         reply = `Before I show you homes, help me get one thing right — which city or area are we searching in? I only describe homes I've actually pulled from our listings, so I won't guess at properties until I know where we're looking.`;
       }
+    }
+
+    if (showMatches && inv) {
+      const placeName = criteria.city ? (parsePlace(criteria.city)?.name ?? criteria.city) : null;
+      const here = rowsIn(inv, placeName);
+      searched = { where: placeName, live: here.length, found: matches.length, kinds: describeRows(here) };
     }
 
     /* PAST PRICES, NEVER A FORECAST (Eden, 2026-10-02). Asked whether prices
@@ -870,7 +921,13 @@ the one they asked for.`
       await saveSession(visitorId, full, showMatches ? criteria : undefined, showMatches ? matches : undefined);
     }
 
-    return json({ reply, showMatches, matches, suggestions, priceHistory });
+    suggestions = stageSuggestions({
+      criteria, showMatches, found: matches.length, hasHistory: !!priceHistory,
+      cities: liveCities ?? [], here: criteria.city && inv ? rowsIn(inv, parsePlace(criteria.city)?.name ?? criteria.city) : [],
+      modelSuggestions: suggestions,
+      lastUser: messages[messages.length - 1]?.content ?? '',
+    });
+    return json({ reply, more, showMatches, matches, suggestions, priceHistory, searched });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
@@ -966,6 +1023,124 @@ async function lookupPriceHistory(key: string, area: string, city: string | null
   }
 }
 
+/* ── WHAT IS ACTUALLY LIVE ──────────────────────────────────────────────
+   Tayo was answering about the market from the conversation and from the
+   model's guesses. It said "only homes in Ibadan" while the only two listings
+   were land, and "no land to invest in" while a plot sat in the database
+   (Eden, 2026-10-03). This reads the real, live inventory (the same filters
+   the search uses) and hands it to the model every turn as the only source of
+   truth, and the server uses it for what it says when a search is empty. */
+interface InvRow {
+  city: string | null; state: string | null; area_name: string | null;
+  property_type: string | null; listing_type: string | null;
+  deal_structure: string | null; build_stage: string | null; min_investment: number | null;
+}
+let INV_CACHE: { at: number; rows: InvRow[] } | null = null;
+async function liveInventory(): Promise<InvRow[] | null> {
+  if (INV_CACHE && Date.now() - INV_CACHE.at < 60_000) return INV_CACHE.rows;
+  const s = sb();
+  if (!s) return null;
+  const res = await fetch(
+    `${s.url}/rest/v1/properties?select=city,state,area_name,property_type,listing_type,deal_structure,build_stage,min_investment&${freshLiveConds().join('&')}&limit=1000`,
+    { headers: s.headers },
+  ).catch(() => null);
+  if (!res || !res.ok) return null;
+  const rows = await res.json().catch(() => null);
+  if (!Array.isArray(rows)) return null;
+  INV_CACHE = { at: Date.now(), rows: rows as InvRow[] };
+  return INV_CACHE.rows;
+}
+function invKind(r: InvRow): string {
+  if (r.property_type === 'land') return 'land plot';
+  if (r.property_type === 'shared') return 'shared room';
+  if (r.property_type === 'commercial') return 'commercial property';
+  if (r.listing_type === 'rent') return 'home for rent';
+  if (r.listing_type === 'shortlet') return 'short-let';
+  return 'home for sale';
+}
+const isOffPlan = (r: InvRow) => r.deal_structure === 'off_plan' || r.build_stage === 'under_construction' || r.build_stage === 'not_started';
+const isJvDev = (r: InvRow) => r.deal_structure === 'joint_venture' || r.deal_structure === 'development_financing' || Number(r.min_investment) > 0;
+function describeRows(rows: InvRow[]): string {
+  const m = new Map<string, number>();
+  for (const r of rows) m.set(invKind(r), (m.get(invKind(r)) ?? 0) + 1);
+  const parts = [...m.entries()].map(([k, n]) => n + ' ' + (n === 1 ? k : k === 'land plot' ? 'land plots' : k === 'short-let' ? 'short-lets' : k.replace('home for', 'homes for').replace('shared room', 'shared rooms').replace('commercial property', 'commercial properties')));
+  const extra: string[] = [];
+  const off = rows.filter(isOffPlan).length, jv = rows.filter(isJvDev).length;
+  if (off) extra.push(off + ' off-plan');
+  if (jv) extra.push(jv + ' joint-venture/financing');
+  return parts.join(', ') + (extra.length ? ' (including ' + extra.join(', ') + ')' : '');
+}
+function rowsIn(rows: InvRow[], place: string | null): InvRow[] {
+  if (!place) return rows;
+  const p = place.toLowerCase().trim();
+  return rows.filter((r) => [r.city, r.area_name, r.state].some((v) => {
+    const x = (v ?? '').toLowerCase();
+    return x && (x.includes(p) || p.includes(x));
+  }));
+}
+function inventoryText(rows: InvRow[] | null): string {
+  if (!rows) return `
+
+LIVE INVENTORY: the database could not be read just now. Do not state what
+exists or does not exist; say you could not check, and ask them to try again.`;
+  const places = new Map<string, InvRow[]>();
+  for (const r of rows) {
+    const k = [r.city, r.state].filter(Boolean).join(', ') || 'unknown place';
+    places.set(k, [...(places.get(k) ?? []), r]);
+  }
+  const lines = [...places.entries()].slice(0, 15).map(([k, rs]) => `- ${k}: ${describeRows(rs)}`);
+  const kinds = ['home for sale', 'home for rent', 'short-let', 'shared room', 'land plot', 'commercial property'];
+  const none = kinds.filter((k) => !rows.some((r) => invKind(r) === k));
+  if (!rows.some(isOffPlan)) none.push('off-plan');
+  if (!rows.some(isJvDev)) none.push('joint-venture or development-financing deals');
+  const inv = [rows.some((r) => r.property_type === 'land') ? 'land plots' : '', rows.some(isOffPlan) ? 'off-plan homes' : '', rows.some(isJvDev) ? 'joint-venture/financing deals' : ''].filter(Boolean);
+  return `
+
+LIVE INVENTORY -- read from the database a moment ago. It is the ONLY source of truth about what exists.
+Total live listings: ${rows.length}.
+${lines.length ? lines.join('\n') : '- (nothing live)'}
+Nothing live anywhere for: ${none.join(', ') || '(every kind has something)'}.
+Investment products live now: ${inv.join(', ') || 'none'}.
+Never say a kind of listing exists, or does not exist, unless this says so. Never give a count that is not above. A place not listed has nothing.`;
+}
+
+/* SUGGESTIONS THAT BELONG TO THE STAGE (Eden, 2026-10-03: they were not
+   relevant to the conversation or its stage). Decided here from what is known,
+   not left to the model:
+     no place yet       -> places we have homes in
+     place, no purpose  -> what is actually live there
+     homes on screen    -> next steps about THOSE homes
+     nothing found      -> what to do about it
+   While Tayo is still asking an open question, its own answer-starters are
+   kept, minus any that ask about something already known. */
+function stageSuggestions(a: {
+  criteria: Criteria; showMatches: boolean; found: number; hasHistory: boolean;
+  cities: string[]; here: InvRow[]; modelSuggestions: string[]; lastUser: string;
+}): string[] {
+  const c = a.criteria;
+  const clip = (xs: string[]) => [...new Set(xs.map((x) => x.trim()).filter(Boolean))].map((x) => x.slice(0, 42)).slice(0, 4);
+  if (a.showMatches && a.found > 0) {
+    const land = c.propertyKind === 'land' || a.here.some((r) => r.property_type === 'land');
+    const out = ['Open the first one'];
+    if (a.found > 1) out.push('Which is the best value?');
+    out.push(land || c.intent === 'invest' ? 'How have prices moved here?' : 'What should I check first?');
+    out.push(a.found > 1 ? 'Show me cheaper options' : 'Is the price negotiable?');
+    return clip(out);
+  }
+  if (a.showMatches) return clip(['Alert me when one lands', a.here.length ? 'Show me what you do have' : 'Try another area', 'Widen my budget']);
+  const known = (t: string) =>
+    (c.dealType && /\b(rent|renting|buy|buying|purchase|shared)\b/i.test(t))
+    || (c.city && /\b(which|what) (area|city)\b|\bwhere\b/i.test(t));
+  const mine = a.modelSuggestions.filter((t) => !known(t) && t.trim().toLowerCase() !== a.lastUser.trim().toLowerCase());
+  if (mine.length >= 2) return clip(mine);
+  if (!c.city) return clip([...a.cities.slice(0, 3), 'Somewhere else']);
+  if (!c.dealType && !c.propertyKind) {
+    const kinds = [...new Set(a.here.map(invKind))].map((k) => k === 'land plot' ? 'Land to invest in' : k === 'home for sale' ? 'A home to buy' : k === 'home for rent' ? 'A place to rent' : k === 'shared room' ? 'A shared room' : 'A short-let');
+    return clip([...kinds, 'Something else']);
+  }
+  return clip(['Show me what you have', 'Tell me more about the area', 'Not sure yet']);
+}
+
 function sb() {
   const url = Deno.env.get('SUPABASE_URL');
   const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -1055,6 +1230,9 @@ interface Criteria {
   minBedrooms?: number | null;
   intent?: string | null;
   propertyKind?: string | null;   // land | home | commercial
+  /* Everything live in the place, whatever its kind: for "what do you have in
+     Ibadan" and for the honest fallback when the asked-for kind has none. */
+  browse?: boolean;
   stage?: string | null;          // completed | off_plan | either
   paymentPlan?: string | null;
   brief?: string | null;
@@ -1403,16 +1581,20 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   // The deal type is a hard wall: buyers see sales, renters see whole-home
   // rentals (₦/yr), and shared means a private ROOM in a shared home.
   // Verification is a label on each match, not a gate — see freshLiveConds().
-  const conds = [...freshLiveConds(),
+  const conds = c.browse
+    ? [...freshLiveConds()]
+    : [...freshLiveConds(),
     `listing_type=eq.${renting ? 'rent' : 'sale'}`,
     `property_type=${shared ? 'eq' : 'neq'}.shared`];
   /* Land is never a house, and a finished home is never off-plan
-     (20261003090000_what_kind_of_deal). */
-  if (c.propertyKind === 'land') conds.push('property_type=eq.land');
-  else if (c.propertyKind === 'home' && !shared) conds.push('property_type=not.in.(land,commercial)');
-  else if (c.propertyKind === 'commercial') conds.push('property_type=eq.commercial');
-  if (c.stage === 'completed') conds.push('or=(build_stage.is.null,build_stage.eq.completed)');
-  else if (c.stage === 'off_plan') conds.push('or=(deal_structure.eq.off_plan,build_stage.in.(under_construction,not_started))');
+     (20261003090000_what_kind_of_deal). Browsing applies none of this. */
+  if (!c.browse) {
+    if (c.propertyKind === 'land') conds.push('property_type=eq.land');
+    else if (c.propertyKind === 'home' && !shared) conds.push('property_type=not.in.(land,commercial)');
+    else if (c.propertyKind === 'commercial') conds.push('property_type=eq.commercial');
+    if (c.stage === 'completed') conds.push('or=(build_stage.is.null,build_stage.eq.completed)');
+    else if (c.stage === 'off_plan') conds.push('or=(deal_structure.eq.off_plan,build_stage.in.(under_construction,not_started))');
+  }
   /* A PLACE IS NOT ALWAYS A CITY, and this only ever looked at the city
      column. Somebody who says "the one-bedroom in Agbowo" produces
      city=ilike.*Agbowo*, which cannot match a row whose city is "Ibadan" --
@@ -1433,8 +1615,8 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      the Area field the agent fills in, stored since 20260927160000. */
   const place = parsePlace(c.city);
   if (place) conds.push(placeCond(place));
-  if (typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
-  if (typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
+  if (!c.browse && typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
+  if (!c.browse && typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
     'id,title,city,area_name,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
