@@ -151,6 +151,11 @@ async function sendPush(sub: { endpoint: string; p256dh: string; auth_key: strin
   return { ok: res.ok, status: res.status, reason: res.ok ? null : await res.text().catch(() => '') };
 }
 
+async function sha256Hex(s: string): Promise<string> {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+  return [...d].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /* ── handler ─────────────────────────────────────────────────────────────── */
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -159,7 +164,7 @@ Deno.serve(async (req: Request) => {
     const svc = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const db = createClient(url, svc, { auth: { persistSession: false } });
 
-    const body = await req.json().catch(() => ({})) as { lat?: number; lon?: number; visitorId?: string };
+    const body = await req.json().catch(() => ({})) as { lat?: number; lon?: number; visitorId?: string; watchSecret?: string };
     const lat = Number(body.lat), lon = Number(body.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
       return json({ error: 'lat/lon required' }, 400);
@@ -181,13 +186,20 @@ Deno.serve(async (req: Request) => {
 
     // Move the watch. No watch means proximity was never switched on: say so
     // rather than quietly creating one — consent is granted in the app, not here.
-    const sel = db.from('geofence_watches').select('id, enabled').limit(1);
+    const sel = db.from('geofence_watches').select('id, enabled, secret_hash').limit(1);
     const { data: watches } = userId
       ? await sel.eq('user_id', userId)
       : await sel.eq('visitor_id', visitorId!);
     const watch = watches?.[0];
     if (!watch) return json({ ok: true, matched: 0, note: 'no active watch' });
     if (!watch.enabled) return json({ ok: true, matched: 0, note: 'watch disabled' });
+    /* An anonymous watch moves only for the browser holding its secret
+       (Greptile): otherwise anyone with a visitor id could relocate it,
+       trigger alerts and spend the buyer's daily allowance. */
+    if (!userId && watch.secret_hash) {
+      const given = typeof body.watchSecret === 'string' ? body.watchSecret : '';
+      if (watch.secret_hash !== (given ? await sha256Hex(given) : '')) return json({ error: 'not your watch' }, 403);
+    }
 
     const { error: upErr } = await db
       .from('geofence_watches')
@@ -199,7 +211,9 @@ Deno.serve(async (req: Request) => {
     if (upErr) return json({ error: upErr.message }, 500);
 
     // Postgres owns the policy. Whatever comes back is already allowed to send.
-    const { data: candidates, error: cErr } = await db.rpc('proximity_candidates', { p_watch_id: watch.id });
+    /* Picked AND recorded in one locked step (claim_proximity_alerts), so
+       two reports at once cannot exceed the daily cap (Greptile). */
+    const { data: candidates, error: cErr } = await db.rpc('claim_proximity_alerts', { p_watch_id: watch.id });
     if (cErr) return json({ error: cErr.message }, 500);
     if (!candidates?.length) return json({ ok: true, matched: 0 });
 
@@ -236,18 +250,8 @@ Deno.serve(async (req: Request) => {
       // Record first. If the send fails the row still blocks a re-send of the
       // same property, which is the behaviour we want: better a missed ping
       // than the same house twice.
-      const { data: nRow, error: nErr } = await db.from('notifications').insert({
-        recipient_id: userId,
-        visitor_id: userId ? null : visitorId,
-        channel: 'push',
-        kind: 'proximity_match',
-        side: 'customer',
-        route: payload.route,
-        property_id: propertyId,
-        payload,
-        status: 'pending',
-      }).select('id').single();
-      if (nErr || !nRow) continue;
+      // Already recorded by claim_proximity_alerts.
+      const nRow = { id: c.notification_id };
 
       let anySent = false;
       for (const s of subs ?? []) {

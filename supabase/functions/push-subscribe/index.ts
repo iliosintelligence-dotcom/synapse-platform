@@ -30,6 +30,22 @@ const json = (b: unknown, s = 200) =>
 
 const DEAL_TYPES = ['rent', 'sale', 'shortlet'];
 
+/* A WATCH IS HELD BY A SECRET (Greptile). A visitor id alone is not proof:
+   anyone who learned one could switch off or move that buyer's alerts. The
+   first time a browser sets up its watch it is given a random secret; only
+   its sha-256 is stored, and every later change to an anonymous watch must
+   present it. A signed-in buyer is proved by their session instead. A watch
+   from before this rule is claimed by the next browser to touch it. */
+async function sha256Hex(s: string): Promise<string> {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+  return [...d].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function newSecret(): string {
+  const b = crypto.getRandomValues(new Uint8Array(24));
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
@@ -72,7 +88,16 @@ Deno.serve(async (req: Request) => {
       // One row per endpoint. A browser re-subscribing must update, not
       // accumulate, or every future push is sent several times over.
       const { data: existing } = await db.from('push_subscriptions')
-        .select('id').eq('endpoint', endpoint).limit(1);
+        .select('id, user_id, visitor_id, auth_key').eq('endpoint', endpoint).limit(1);
+      /* An endpoint already held by someone else changes hands only when the
+         caller also holds its auth secret -- i.e. is the same browser
+         subscription -- never on the endpoint URL alone (Greptile). */
+      const cur = existing?.[0] as { user_id?: string | null; visitor_id?: string | null; auth_key?: string | null } | undefined;
+      if (cur) {
+        const sameOwner = userId ? cur.user_id === userId : (cur.visitor_id === visitorId && !cur.user_id);
+        const sameKey = !!cur.auth_key && cur.auth_key === (sub.auth ?? sub.auth_key ?? null);
+        if (!sameOwner && !sameKey) return json({ error: 'This browser is subscribed by someone else' }, 403);
+      }
 
       const row = {
         ...owner,
@@ -109,15 +134,27 @@ Deno.serve(async (req: Request) => {
         // 500 to match the column default and the client. A fallback that
         // disagrees with both is a third opinion nobody is reading.
         radius_m: num(c.radiusM, 200, 5000) ?? 500,
+        /* The buyer's own "checked homes only" choice (Greptile: it was
+           dropped, so everyone got unverified homes too). */
+        verified_only: c.verifiedOnly === true,
         enabled: true,
       };
 
-      const { data: existing } = await scope(db.from('geofence_watches').select('id')).limit(1);
-      const res = existing?.[0]
-        ? await db.from('geofence_watches').update(row).eq('id', existing[0].id)
+      const { data: existing } = await scope(db.from('geofence_watches').select('id, secret_hash')).limit(1);
+      const cur = existing?.[0] as { id: string; secret_hash: string | null } | undefined;
+      let secret: string | null = null;
+      if (!userId) {
+        const given = typeof body.watchSecret === 'string' ? body.watchSecret : '';
+        if (cur?.secret_hash && cur.secret_hash !== (given ? await sha256Hex(given) : '')) {
+          return json({ error: 'not your watch' }, 403);
+        }
+        if (!cur?.secret_hash) { secret = given || newSecret(); row.secret_hash = await sha256Hex(secret); }
+      }
+      const res = cur
+        ? await db.from('geofence_watches').update(row).eq('id', cur.id)
         : await db.from('geofence_watches').insert(row);
       if (res.error) return json({ error: res.error.message }, 500);
-      return json({ ok: true });
+      return json({ ok: true, ...(secret ? { watchSecret: secret } : {}) });
     }
 
     /* ── switch it off ───────────────────────────────────────────────
@@ -125,6 +162,12 @@ Deno.serve(async (req: Request) => {
        it only cleared the local watch, so the row stayed enabled and would
        have resumed sending the moment a position was reported again. */
     if (action === 'disable') {
+      if (!userId) {
+        const { data: w } = await scope(db.from('geofence_watches').select('secret_hash')).limit(1);
+        const h = (w?.[0] as { secret_hash?: string | null } | undefined)?.secret_hash;
+        const given = typeof body.watchSecret === 'string' ? body.watchSecret : '';
+        if (h && h !== (given ? await sha256Hex(given) : '')) return json({ error: 'not your watch' }, 403);
+      }
       const { error } = await scope(
         db.from('geofence_watches').update({ enabled: false }) as never,
       );

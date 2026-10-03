@@ -431,7 +431,9 @@ function pickField(o: Record<string, unknown> | null | undefined, ...keys: strin
   return null;
 }
 
-async function confirmDelivery(limit: number, h: Record<string, string>, days = 3) {
+/* 30 days, not 3 (Greptile): a delivery still pending keeps being checked
+   until it settles as live or failed, rather than staying "published". */
+async function confirmDelivery(limit: number, h: Record<string, string>, days = 30) {
   const since = new Date(Date.now() - days * 86400e3).toISOString();
   const q = `${SB_URL}/rest/v1/social_posts`
     + '?select=id,platform,platform_post_id,published_at,payload'
@@ -582,14 +584,19 @@ async function sweep(limit: number): Promise<Response> {
       if (m.ok) payload = await m.json().catch(() => null);
     } catch { /* unreachable: leave payload null and move on */ }
 
-    const platforms = Array.isArray((payload as { platforms?: unknown })?.platforms)
-      ? ((payload as { platforms: Array<Record<string, unknown>> }).platforms)
-      : [];
+    /* No usable answer: leave the figures and the timestamp alone, so the
+       next sweep asks again instead of writing nulls over real numbers. */
+    if (!Array.isArray((payload as { platforms?: unknown })?.platforms)) {
+      for (const row of group) results.push({ id: row.id, platform: row.platform, written: false, reason: 'metrics unavailable' });
+      continue;
+    }
+    const platforms = (payload as { platforms: Array<Record<string, unknown>> }).platforms;
 
     for (const row of group) {
       const entry = platforms.find(
         (p) => String(p.platform ?? '').toLowerCase() === String(row.platform).toLowerCase(),
       );
+      if (!entry) { results.push({ id: row.id, platform: row.platform, written: false, reason: 'not in answer' }); continue; }
       const metrics = entry?.metrics;
       const patch = {
         likes: metricValue(metrics, 'Likes'),

@@ -53,9 +53,9 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { status: 200 });
   } catch (err) {
     console.error(`paystack-webhook fatal: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    // Still 200: whatever went wrong is on our side, not a signal to Paystack
-    // that it should keep retrying the same event forever.
-    return new Response('ok', { status: 200 });
+    // 500 once the signature was valid: whatever failed is on our side, and
+    // a redelivery is how a paid-for plan still gets applied.
+    return new Response('retry', { status: 500 });
   }
 });
 
@@ -89,12 +89,18 @@ async function activatePayment(
   const verifyData = (await verifyRes.json().catch(() => ({}))) as {
     status?: boolean; data?: { status?: string; amount?: number; currency?: string };
   };
-  if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') return;
+  /* Could not ask, or Paystack has not settled it yet: throw, so the
+     webhook answers 500 and Paystack delivers again (Greptile). Only a final
+     answer that it did not succeed is accepted as final. */
+  if (!verifyRes.ok || !verifyData.status) throw new Error('Paystack verify unavailable (' + verifyRes.status + ')');
+  const st = verifyData.data?.status;
+  if (st === 'ongoing' || st === 'pending' || st === 'processing' || st === 'queued') throw new Error('Paystack has not settled ' + st);
+  if (st !== 'success') return;
 
   const { error } = await admin.rpc('confirm_billing_payment', {
     p_reference: reference,
-    p_amount_kobo: verifyData.data.amount ?? -1,
-    p_currency: verifyData.data.currency ?? '',
+    p_amount_kobo: verifyData.data?.amount ?? -1,
+    p_currency: verifyData.data?.currency ?? '',
   });
   if (error) throw new Error(error.message);
   // An unrecognised reference, or one the redirect-back verify already

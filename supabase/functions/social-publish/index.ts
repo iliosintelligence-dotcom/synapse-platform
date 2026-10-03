@@ -1538,17 +1538,30 @@ Deno.serve(async (req: Request) => {
       if (post.dry_run || !live) dryRun++;
 
       if (result.ok) {
-        await admin
-          .from('social_posts')
-          .update({
-            status: 'published',
-            platform_post_id: result.postId,
-            provider: result.provider,
-            payload: result.payload,
-            published_at: new Date().toISOString(),
-            failure_reason: null,
-          })
-          .eq('id', post.id);
+        /* The provider has the post. Saving that is what stops it being sent
+           again, so it is retried, and a save that still fails is reported
+           rather than counted as a clean publish (Greptile). */
+        const donePatch = {
+          status: 'published',
+          platform_post_id: result.postId,
+          provider: result.provider,
+          payload: result.payload,
+          published_at: new Date().toISOString(),
+          failure_reason: null,
+        };
+        let saveErr: unknown = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const { error } = await admin.from('social_posts').update(donePatch).eq('id', post.id);
+          saveErr = error;
+          if (!error) break;
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
+        if (saveErr) {
+          console.error('social-publish: provider accepted ' + post.id + ' but the save failed', saveErr);
+          results.push({ id: post.id, platform: post.platform, leg: post.leg, status: 'published_unsaved',
+            provider: result.provider, dryRun: post.dry_run, postId: result.postId });
+          continue;
+        }
         published++;
         /* A Telegram post gets its Story kit: see sendStoryKit. Never allowed
            to fail the post it follows -- the post is already out. */

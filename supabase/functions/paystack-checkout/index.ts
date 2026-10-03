@@ -58,7 +58,7 @@ Deno.serve(async (req: Request) => {
     if (!user) return json({ error: 'Not authenticated' }, 401);
 
     const body = (await req.json().catch(() => ({}))) as {
-      action?: string; plan?: string; period?: string; addon?: string; reference?: string;
+      action?: string; plan?: string; period?: string; addon?: string; reference?: string; agencyId?: string;
     };
 
     if (body.action === 'init') return await handleInit(userClient, admin, user, body, req, paystackKey);
@@ -75,7 +75,7 @@ async function handleInit(
   userClient: ReturnType<typeof createClient>,
   admin: ReturnType<typeof createClient>,
   user: { id: string; email?: string },
-  body: { plan?: string; period?: string; addon?: string },
+  body: { plan?: string; period?: string; addon?: string; agencyId?: string },
   req: Request,
   paystackKey: string,
 ) {
@@ -84,14 +84,19 @@ async function handleInit(
   if (!tier && !addon) return json({ error: 'Choose a plan or an add-on' }, 400);
   const period = body.period === 'annual' ? 'annual' : 'monthly';
 
+  /* The agency being paid for is the one the portal is working in, named
+     by it -- never the first of several memberships (Greptile). */
   const { data: membership } = await admin
     .from('agency_members')
     .select('agency_id')
     .eq('profile_id', user.id)
-    .is('deleted_at', null)
-    .limit(1);
-  const agencyId = membership?.[0]?.agency_id as string | undefined;
-  if (!agencyId) return json({ error: 'No agency found for this account' }, 404);
+    .is('deleted_at', null);
+  const mine = (membership ?? []).map((m) => String(m.agency_id));
+  if (!mine.length) return json({ error: 'No agency found for this account' }, 404);
+  const asked = typeof body.agencyId === 'string' ? body.agencyId : '';
+  if (asked && !mine.includes(asked)) return json({ error: 'You are not a member of that agency' }, 403);
+  if (!asked && mine.length > 1) return json({ error: 'Choose which agency to pay for' }, 400);
+  const agencyId = asked || mine[0];
 
   const { data: role } = await userClient.rpc('agency_role', { p_agency_id: agencyId });
   if (role !== 'agency_owner' && role !== 'agency_admin') {

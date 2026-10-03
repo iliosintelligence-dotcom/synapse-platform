@@ -679,7 +679,12 @@ Deno.serve(async (req: Request) => {
        for no safety that the null-strip does not already provide. */
     const pr = p as Record<string, any>;
     const addr = typeof pr.address === 'string' ? pr.address : '';
-    const street = addr.replace(/^[\s]*[0-9]+[a-zA-Z]?[,\s/-]+/, '').trim() || null;
+    /* The street is no longer sent at all (Greptile): door numbers come in
+       too many shapes ("Number 4, Ekiti street", "Plot 12B", "No. 7") to strip
+       reliably, and a caption is public and permanent. Area and city say
+       where a home is without saying who lives there. */
+    void addr;
+    const street: string | null = null;
 
     const daysSince = (v: unknown) => {
       const t = v ? Date.parse(String(v)) : NaN;
