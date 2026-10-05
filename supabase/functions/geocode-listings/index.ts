@@ -33,6 +33,7 @@
  *   { "limit": 25 }      how many unplaced listings to work through
  *   { "dryRun": true }   report what it would do, write nothing
  */
+import { callerManagesAgency, isServiceCall } from '../_shared/caller.ts';
 const SB_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
@@ -139,6 +140,20 @@ Deno.serve(async (req: Request) => {
   const dryRun = body.dryRun === true;
 
   const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
+
+  /* The sweep (no id) is the platform's own job and the id form is the portal's, for a listing
+     the caller's agency owns. Anything else would let a signed-in stranger spend the shared
+     geocoding allowance and patch another agency's listing. The id also goes into a query
+     string below, so it must be a uuid and nothing that could add a filter. */
+  if (body.id !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(body.id))) {
+    return json({ error: 'id must be a listing id' }, 400);
+  }
+  if (!isServiceCall(req, SERVICE_KEY)) {
+    if (!body.id) return json({ error: 'Not allowed' }, 403);
+    const own = await fetch(`${SB_URL}/rest/v1/properties?select=agency_id&id=eq.${body.id}&limit=1`, { headers: h });
+    const rows = own.ok ? await own.json().catch(() => []) : [];
+    if (!(await callerManagesAgency(req, SB_URL, rows?.[0]?.agency_id))) return json({ error: 'Not allowed' }, 403);
+  }
 
   /* Only rows that need it: live, not deleted, carrying an address, and with
      NO coordinates. That last clause is what makes this safe to run on a

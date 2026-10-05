@@ -34,6 +34,7 @@
  * a guessed one is not.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { callerManagesAgency, isServiceCall } from '../_shared/caller.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -357,6 +358,14 @@ Deno.serve(async (req: Request) => {
     const admin = createClient(url, serviceKey);
     const body = (await req.json().catch(() => ({}))) as
       { property_id?: string; refresh?: boolean; city?: string; limit?: number };
+
+    /* Looking up places costs money and replaces what is stored. The platform (its drain) may
+       do any listing or a whole city; a person only a listing their own agency owns. */
+    if (!isServiceCall(req, serviceKey)) {
+      if (!body.property_id) return json({ error: 'Not allowed' }, 403);
+      const { data: owner } = await admin.from('properties').select('agency_id').eq('id', body.property_id).maybeSingle();
+      if (!(await callerManagesAgency(req, url, owner?.agency_id))) return json({ error: 'Not allowed' }, 403);
+    }
 
     // Which listings to do: one, or every live one in a city.
     let targets: Array<{ id: string; latitude: number; longitude: number; title: string; city: string }> = [];

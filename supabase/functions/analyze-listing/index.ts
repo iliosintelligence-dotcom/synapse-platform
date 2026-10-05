@@ -21,6 +21,7 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
+import { callerManagesAgency, isServiceCall } from '../_shared/caller.ts';
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -70,6 +71,13 @@ Deno.serve(async (req: Request) => {
     if (!body.property_id) return json({ error: 'property_id is required' }, 400);
 
     const admin = createClient(url, serviceKey);
+
+    /* The platform may analyse any listing; a person only their own agency's. Without this
+       any signed-in user could pass another agency's public listing id and have it rewritten. */
+    if (!isServiceCall(req, serviceKey)) {
+      const { data: owner } = await admin.from('properties').select('agency_id').eq('id', body.property_id).maybeSingle();
+      if (!(await callerManagesAgency(req, url, owner?.agency_id))) return json({ error: 'Not allowed' }, 403);
+    }
 
     // Read the agency's input + media filenames for context.
     const { data: property, error: pErr } = await admin
