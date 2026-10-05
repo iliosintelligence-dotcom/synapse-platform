@@ -76,8 +76,11 @@ Deno.serve(async (req: Request) => {
     const { data: role } = await userClient.rpc('synapse_staff_role');
     if (!role) return json({ error: 'Not allowed' }, 403);
 
+    /* A founder (platform admin) or a studio admin may manage who is on the team. */
+    const canManage = role === 'platform_admin' || role === 'admin';
+
     switch (action) {
-      case 'me': return json({ role });
+      case 'me': return json({ role, can_manage: canManage });
       case 'overview': return json(await overview(admin));
       case 'activity': return json(await rpc(admin, 'synapse_activity', { p_limit: 50 }));
       case 'trypost_accounts': return await trypostAccounts(admin);
@@ -90,9 +93,9 @@ Deno.serve(async (req: Request) => {
       case 'posts': return await posts(admin);
       case 'post_cancel': return await postCancel(admin, body);
       case 'suggest_caption': return await suggestCaption(body);
-      case 'staff_list': return role === 'platform_admin' ? await staffList(admin) : json({ error: 'Founders only' }, 403);
-      case 'staff_add': return role === 'platform_admin' ? await staffAdd(admin, user.id, body) : json({ error: 'Founders only' }, 403);
-      case 'staff_remove': return role === 'platform_admin' ? await staffRemove(admin, body) : json({ error: 'Founders only' }, 403);
+      case 'staff_list': return canManage ? await staffList(admin) : json({ error: 'Admins only' }, 403);
+      case 'staff_add': return canManage ? await staffAdd(admin, user.id, body) : json({ error: 'Admins only' }, 403);
+      case 'staff_remove': return canManage ? await staffRemove(admin, body) : json({ error: 'Admins only' }, 403);
       default: return json({ error: 'Unknown action' }, 400);
     }
   } catch (err) {
