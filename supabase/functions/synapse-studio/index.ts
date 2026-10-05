@@ -124,22 +124,32 @@ async function trypostAccounts(admin: Admin): Promise<Response> {
     return json({ error: 'Could not reach TryPost: ' + (e instanceof Error ? e.message : String(e)) }, 502);
   }
   const raw = await res.json().catch(() => null) as unknown;
-  if (!res.ok) return json({ error: 'TryPost answered HTTP ' + res.status }, 502);
+  if (!res.ok) {
+    /* TryPost's own words, so a 422 says what it objected to rather than only that it did. */
+    return json({ error: 'TryPost answered HTTP ' + res.status + ': ' + JSON.stringify(raw).slice(0, 300) }, 502);
+  }
   const list = (Array.isArray(raw) ? raw : (raw as Row)?.data ?? []) as Row[];
 
   const { data: mapped } = await admin.from('city_channels').select('trypost_account_id').not('trypost_account_id', 'is', null);
   const { data: legacy } = await admin.from('synapse_channels').select('trypost_account_id');
   const taken = new Set<string>([...(mapped ?? []), ...(legacy ?? [])].map((r) => String((r as Row).trypost_account_id)));
 
+  /* TryPost names a Facebook-linked Instagram 'instagram-facebook' and a
+     company LinkedIn 'linkedin-page'; both post as ours. */
+  const NAME: Record<string, string> = { twitter: 'x', 'instagram-facebook': 'instagram', 'linkedin-page': 'linkedin' };
   const accounts = list.map((a) => {
-    const platform = String(a.platform ?? '').toLowerCase().replace(/^twitter$/, 'x');
+    const rawPlatform = String(a.platform ?? '').toLowerCase();
+    const platform = NAME[rawPlatform] ?? rawPlatform;
+    const status = String(a.status ?? 'connected').toLowerCase();
     return {
       id: String(a.id ?? ''),
       platform,
       name: String(a.display_name ?? a.name ?? a.username ?? ''),
       username: String(a.username ?? a.handle ?? ''),
       avatar: a.avatar ?? a.avatar_url ?? null,
-      enabled: a.enabled !== false,
+      enabled: a.is_active !== false && a.enabled !== false,
+      /* connected, token_expired or disconnected: only a connected one can post. */
+      status,
       added: taken.has(String(a.id ?? '')),
       supported: Boolean(CONTENT_TYPE[platform]),
     };
@@ -411,13 +421,23 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     const res = await fetch(TRYPOST_URL + '/api/posts', {
       method: 'POST', headers: tpHeaders(),
       body: JSON.stringify({
-        platforms: [{ social_account_id: accountId, content_type: contentType }],
+        platforms: [{
+          social_account_id: accountId, content_type: contentType,
+          /* TikTok publishes only with a privacy level. */
+          ...(platform === 'tiktok' ? { meta: { privacy_level: 'PUBLIC_TO_EVERYONE' } } : {}),
+        }],
         content, media: media.map((url) => ({ url })),
       }),
     });
     const body = await res.json().catch(() => ({})) as Row;
     draftId = String(body.id ?? '');
-    if (!res.ok || !draftId) return await retry('TryPost refused the post (HTTP ' + res.status + '): ' + JSON.stringify(body).slice(0, 240));
+    if (!res.ok || !draftId) {
+      const why = 'TryPost refused the post (HTTP ' + res.status + '): ' + JSON.stringify(body).slice(0, 300);
+      /* A 422 is TryPost saying the post itself is wrong (an expired account, a
+         missing picture, a bad type); sending it again will not change that. */
+      if (res.status === 422) { await settle({ status: 'failed', failure_reason: why }); return false; }
+      return await retry(why);
+    }
   } catch (e) {
     return await retry('Could not reach TryPost: ' + (e instanceof Error ? e.message : String(e)));
   }
