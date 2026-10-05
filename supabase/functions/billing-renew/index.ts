@@ -58,8 +58,15 @@ Deno.serve(async (req: Request) => {
 });
 
 async function renewOne(
-  admin: ReturnType<typeof createClient>, sub: Sub, paystackKey: string,
+  admin: ReturnType<typeof createClient>, claimed: Sub, paystackKey: string,
 ): Promise<{ ok: boolean }> {
+  /* ASKED AGAIN AT THE MOMENT OF CHARGING. Between the claim and here the
+     owner may have turned auto-renew off, removed the card or changed plan;
+     charge what is true now, and nothing if nothing is. */
+  const { data: still } = await admin.rpc('renewal_recheck', { p_agency_id: claimed.agency_id });
+  const sub = (Array.isArray(still) ? still[0] : null) as Sub | null;
+  if (!sub) return { ok: false };
+
   const fail = async (why: string) => {
     await admin.rpc('record_renewal_result', { p_agency_id: sub.agency_id, p_ok: false, p_error: why });
     return { ok: false };
