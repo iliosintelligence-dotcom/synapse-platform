@@ -169,13 +169,19 @@ jobs:
             # it points at a page on the allowed site that knows the token.
             SUBJ=$(jq -r '.recovery_subject // empty' supabase/auth-urls.json)
             ISUBJ=$(jq -r '.invite_subject // empty' supabase/auth-urls.json)
-            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" --arg isubj "$ISUBJ" \
+            # Supabase refuses ANY email-template change (400, and the whole
+            # PATCH with it, URLs included) on a project that has no SMTP
+            # provider of its own. So the wording travels only once there is
+            # one; the URLs always go.
+            SMTP=$(jq -r '((.smtp_host // "") != "") | tostring' "$TMP")
+            echo "templates will be applied: $SMTP (needs a custom SMTP provider)"
+            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" --arg isubj "$ISUBJ" --arg smtp "$SMTP" \
                      --rawfile tpl supabase/templates/recovery.html --rawfile itpl supabase/templates/invite.html '
               {site_url: $s, uri_allow_list: $u}
-              + (if $subj != "" then {mailer_subjects_recovery: $subj} else {} end)
-              + (if ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)
-              + (if $isubj != "" then {mailer_subjects_invite: $isubj} else {} end)
-              + (if ($itpl | length) > 0 then {mailer_templates_invite_content: $itpl} else {} end)')
+              + (if $smtp == "true" and $subj != "" then {mailer_subjects_recovery: $subj} else {} end)
+              + (if $smtp == "true" and ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)
+              + (if $smtp == "true" and $isubj != "" then {mailer_subjects_invite: $isubj} else {} end)
+              + (if $smtp == "true" and ($itpl | length) > 0 then {mailer_templates_invite_content: $itpl} else {} end)')
 
             call -X PATCH \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \

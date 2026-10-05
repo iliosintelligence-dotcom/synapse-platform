@@ -406,10 +406,19 @@ async function staffInvite(admin: Admin, uid: string, b: Row): Promise<Response>
     return json({ ok: true, status: 'pending', link: j.link ?? null });
   }
 
-  /* A new person: Supabase creates the account and emails the invitation (supabase/templates/invite.html). */
-  const sent = await admin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: SITE + '/app/synapse-join.html', data: { synapse_team: true },
-  });
+  /* A new person. EMAIL IS A SWITCH, NOT AN ASSUMPTION. The invitation email only works once the project
+     sends mail through its own provider and carries supabase/templates/invite.html: Supabase's default
+     sender reaches its own team members only and will not accept a custom template. Until a founder has
+     done that and switched platform_settings.synapse_invite_email on, the invitation is a link to pass on. */
+  const { data: flag } = await admin.from('platform_settings').select('value').eq('key', 'synapse_invite_email').maybeSingle();
+  const emailReady = (flag?.value as Row | undefined)?.enabled === true;
+  let sent: { error: { message?: string } | null; data?: { user?: { id: string } | null } | null } =
+    { error: { message: 'Email invitations are not switched on yet: the project has no mail provider of its own.' } };
+  if (emailReady) {
+    sent = await admin.auth.admin.inviteUserByEmail(email, {
+      redirectTo: SITE + '/app/synapse-join.html', data: { synapse_team: true },
+    }) as typeof sent;
+  }
   if (!sent.error && sent.data?.user) {
     const err = await give(sent.data.user.id);
     if (err) return json({ error: err.message }, 400);
