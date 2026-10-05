@@ -273,7 +273,7 @@ export function mergeProfile(prev: Profile, u: Understood, userText: string): Pr
 
 /* ───────────────────────── what to ask next ───────────────────────── */
 
-export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'contact' | 'stage' | null;
+export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | null;
 
 export interface Ask { slot: Slot; hint: string; closed: string[] }
 
@@ -281,8 +281,8 @@ export interface Ask { slot: Slot; hint: string; closed: string[] }
  * The next thing a good advisor would find out. One at a time, in an order that
  * earns each answer: where and what first (so the database can answer at once),
  * then the money and the timing, then who is moving, and only once there is
- * something on screen their name and a way for the agency to reach them. A slot
- * already asked twice is not asked a third time.
+ * something on screen their name. A phone number is not asked for here: it is
+ * collected when they create an account. A slot already asked twice is not asked a third time.
  */
 export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
   const tried = (s: string) => (profile.asked[s] ?? 0) >= 2;
@@ -301,9 +301,6 @@ export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
     return { slot: 'stage', hint: 'Ask whether it must be a finished home or whether off-plan (built later, paid in instalments) is fine.', closed: ['Finished only', 'Off-plan is fine'] };
   }
   if (shown > 0 && !profile.name && !tried('name')) return { slot: 'name', hint: 'Ask what you should call them.', closed: [] };
-  if (shown > 0 && profile.name && !profile.phone && !profile.email && !profile.contactDeclined && !tried('contact')) {
-    return { slot: 'contact', hint: 'Ask for the best phone number or email for the listing agency to reach them once they pick a home, and say plainly that nothing is sent to any agency until they choose to send it.', closed: [] };
-  }
   return { slot: null, hint: 'Nothing more is needed. Offer one concrete next step about the homes on screen: open one, compare two, or book a viewing.', closed: [] };
 }
 
@@ -428,7 +425,6 @@ function plainQuestion(a: Ask): string {
     case 'landUse': return 'What is the land for?';
     case 'stage': return 'Does it have to be finished, or is off-plan fine?';
     case 'name': return 'What should I call you?';
-    case 'contact': return 'What is the best number or email for the agency to reach you once you pick one? Nothing goes to an agency until you choose to send it.';
     default: return '';
   }
 }

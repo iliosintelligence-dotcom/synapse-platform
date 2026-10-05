@@ -49,7 +49,7 @@ Deno.test('old saved sessions still load', () => {
   assertEquals([b.place, b.dealType, b.maxPrice, b.propertyKind], ['Ibadan', 'buy', 150000000, 'land']);
 });
 
-Deno.test('what to ask next: where, what, money, timing, household, then who they are', () => {
+Deno.test('what to ask next: where, what, money, timing, household, then their name', () => {
   const p = { ...EMPTY_PROFILE };
   assertEquals(nextAsk(EMPTY_BRIEF, p, 0).slot, 'place');
   assertEquals(nextAsk({ ...EMPTY_BRIEF, place: 'Ibadan' }, p, 0).slot, 'purpose');
@@ -60,9 +60,7 @@ Deno.test('what to ask next: where, what, money, timing, household, then who the
   const known = { ...p, timeline: 'next month', household: 'couple' };
   assertEquals(nextAsk(b, known, 0).slot, null);       // nothing on screen yet: no name or contact asked
   assertEquals(nextAsk(b, known, 3).slot, 'name');
-  assertEquals(nextAsk(b, { ...known, name: 'Joshua' }, 3).slot, 'contact');
-  assertEquals(nextAsk(b, { ...known, name: 'Joshua', contactDeclined: true }, 3).slot, null);
-  assertEquals(nextAsk(b, { ...known, name: 'Joshua', asked: { contact: 2 } }, 3).slot, null);
+  assertEquals(nextAsk(b, { ...known, name: 'Joshua' }, 3).slot, null);   // no phone or email is asked for: that comes with the account
   const land = { ...EMPTY_BRIEF, place: 'Ibadan', propertyKind: 'land' as const, dealType: 'buy' as const, maxPrice: 4_000_000 };
   assertEquals(nextAsk(land, { ...p, timeline: 'soon' }, 0).slot, 'landUse');
 });
