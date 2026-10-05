@@ -214,6 +214,28 @@ async function channelUpdate(admin: Admin, b: Row): Promise<Response> {
   if ('city' in b) { const c = String(b.city ?? '').trim().slice(0, 60); patch.city = c || null; }
   for (const k of ['is_active', 'autopilot']) if (k in b) patch[k] = b[k] === true;
   if ('mirror' in b) patch.mirror_agency_posts = b.mirror === true;
+  /* Which listings this channel takes: the studio's routing rules. Empty or absent means "anything". */
+  const KINDS = ['sale', 'rent', 'shared', 'land', 'commercial', 'shortlet', 'offplan'];
+  if ('route_kinds' in b) {
+    const k = Array.isArray(b.route_kinds) ? (b.route_kinds as unknown[]).map(String).filter((x) => KINDS.includes(x)) : [];
+    patch.route_kinds = k.length ? [...new Set(k)] : null;
+  }
+  const optInt = (v: unknown, lo: number, hi: number): number | null | undefined => {
+    if (v === null || v === '' || v === undefined) return null;
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= lo && n <= hi ? n : undefined;
+  };
+  for (const [key, lo, hi, label] of [['route_min_beds', 0, 20, 'Fewest bedrooms'], ['route_max_beds', 0, 20, 'Most bedrooms'],
+    ['route_min_price', 0, 1e12, 'Lowest price'], ['route_max_price', 0, 1e12, 'Highest price']] as Array<[string, number, number, string]>) {
+    if (key in b) { const n = optInt(b[key], lo, hi); if (n === undefined) return json({ error: `${label}: a whole number from ${lo} to ${hi}.` }, 400); patch[key] = n; }
+  }
+  if (patch.route_min_beds != null && patch.route_max_beds != null && Number(patch.route_min_beds) > Number(patch.route_max_beds)) return json({ error: 'Fewest bedrooms is more than the most.' }, 400);
+  if (patch.route_min_price != null && patch.route_max_price != null && Number(patch.route_min_price) > Number(patch.route_max_price)) return json({ error: 'Lowest price is more than the highest.' }, 400);
+  if ('route_areas' in b) {
+    const ar = (Array.isArray(b.route_areas) ? b.route_areas : String(b.route_areas ?? '').split(','))
+      .map((x) => String(x).trim().slice(0, 60)).filter(Boolean).slice(0, 12);
+    patch.route_areas = ar.length ? ar : null;
+  }
   if ('daily_cap' in b) { const n = int(b.daily_cap, 1, 24); if (n === null) return json({ error: 'Posts a day: 1 to 24.' }, 400); patch.daily_cap = n; }
   if ('min_gap_minutes' in b) { const n = int(b.min_gap_minutes, 30, 1440); if (n === null) return json({ error: 'Gap: 30 minutes to 24 hours.' }, 400); patch.min_gap = `${n} minutes`; }
   if ('window_start' in b) { const n = int(b.window_start, 0, 23); if (n === null) return json({ error: 'Start hour: 0 to 23.' }, 400); patch.window_start = n; }
