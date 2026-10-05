@@ -133,3 +133,6 @@ verify_jwt = true
 
 [functions.billing-renew]
 verify_jwt = true
+
+[functions.synapse-studio]
+verify_jwt = true
