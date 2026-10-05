@@ -496,6 +496,12 @@ function pick(o: Row | null | undefined, ...keys: string[]): unknown {
 /** "Sent" means TryPost accepted it. This asks whether it went live. */
 async function confirmDelivery(admin: Admin) {
   if (!trypostOn()) return { error: 'TryPost is not configured', settled: 0 };
+  /* Thirty days is as long as we keep asking. A post still unsettled then is
+     closed as unconfirmed, so it does not sit as 'sent' for ever. */
+  await admin.from('synapse_posts').update({
+    status: 'failed', updated_at: new Date().toISOString(),
+    failure_reason: 'TryPost never confirmed this one. Check it in TryPost.',
+  }).eq('status', 'sent').lt('sent_at', new Date(Date.now() - 30 * 86400e3).toISOString());
   const { data } = await admin.from('synapse_posts').select('id, platform, trypost_post_id, payload, sent_at')
     .eq('status', 'sent').not('trypost_post_id', 'is', null)
     .gt('sent_at', new Date(Date.now() - 30 * 86400e3).toISOString())
@@ -523,6 +529,14 @@ async function confirmDelivery(admin: Admin) {
       await admin.from('synapse_posts').update({
         status: 'live', published_at: liveAt ?? new Date().toISOString(), payload: { ...payload, delivery: 'live', live_url: url ?? null },
         updated_at: new Date().toISOString(),
+      }).eq('id', r.id);
+      settled++;
+    } else if (status === 'draft' && Date.now() - Date.parse(String(r.sent_at)) > 15 * 60e3) {
+      /* Still a draft a quarter of an hour on: the publish request never
+         reached TryPost. It is not going out by itself. */
+      await admin.from('synapse_posts').update({
+        status: 'failed', payload: { ...payload, delivery: 'failed' }, updated_at: new Date().toISOString(),
+        failure_reason: 'TryPost still has this as a draft: the publish request did not reach it. Publish it in TryPost, or send it again here.',
       }).eq('id', r.id);
       settled++;
     } else if (status === 'failed') {
