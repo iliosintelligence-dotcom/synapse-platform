@@ -1,0 +1,24 @@
+-- Applied to the live project on 2026-08-25.
+--
+-- Inviting a teammate. The button existed and did nothing, because an email
+-- address cannot be resolved to a profile from the browser: `profiles` holds no
+-- email and auth.users is not readable client-side. So the invite is a record
+-- with a token, and the match happens server-side when the invitee accepts.
+--
+-- Email delivery is not configured and this does not pretend otherwise — the
+-- agency shares the link itself. Everything after the link is real.
+--
+--   agency_invites          agency_id, email, role, token, expiry, accepted/revoked.
+--                           A partial unique index on (agency_id, lower(email))
+--                           WHERE unaccepted AND unrevoked is the real rule
+--                           about duplicates: re-inviting someone who has not
+--                           accepted cannot quietly stack up rows that all
+--                           resolve to the same person.
+--   RLS                     members read; only agency_owner/agency_admin write,
+--                           so an agent cannot add colleagues.
+--   accept_agency_invite    SECURITY DEFINER, because the invitee is not a
+--                           member yet and so cannot write agency_members under
+--                           RLS. Not a hole: the token must be live AND belong
+--                           to this caller's own address, read from auth.users
+--                           rather than taken from the client. A forwarded link
+--                           returns `wrong_account`.
