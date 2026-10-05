@@ -115,32 +115,32 @@ async function overview(admin: Admin) {
 
 /* ── accounts ──────────────────────────────────────────────────────────── */
 
-async function trypostAccounts(admin: Admin): Promise<Response> {
-  if (!trypostOn()) return json({ error: 'TryPost is not configured on the server.' }, 503);
+type Acct = {
+  id: string; platform: string; name: string; username: string; avatar: unknown;
+  enabled: boolean; status: string; supported: boolean;
+};
+
+/** What TryPost holds, with its own platform names mapped to ours. */
+async function fetchAccounts(): Promise<{ accounts: Acct[]; error?: string }> {
+  if (!trypostOn()) return { accounts: [], error: 'TryPost is not configured on the server.' };
   let res: Response;
   try {
     res = await fetch(TRYPOST_URL + '/api/social-accounts', { headers: tpHeaders() });
   } catch (e) {
-    return json({ error: 'Could not reach TryPost: ' + (e instanceof Error ? e.message : String(e)) }, 502);
+    return { accounts: [], error: 'Could not reach TryPost: ' + (e instanceof Error ? e.message : String(e)) };
   }
   const raw = await res.json().catch(() => null) as unknown;
   if (!res.ok) {
     /* TryPost's own words, so a 422 says what it objected to rather than only that it did. */
-    return json({ error: 'TryPost answered HTTP ' + res.status + ': ' + JSON.stringify(raw).slice(0, 300) }, 502);
+    return { accounts: [], error: 'TryPost answered HTTP ' + res.status + ': ' + JSON.stringify(raw).slice(0, 300) };
   }
   const list = (Array.isArray(raw) ? raw : (raw as Row)?.data ?? []) as Row[];
-
-  const { data: mapped } = await admin.from('city_channels').select('trypost_account_id').not('trypost_account_id', 'is', null);
-  const { data: legacy } = await admin.from('synapse_channels').select('trypost_account_id');
-  const taken = new Set<string>([...(mapped ?? []), ...(legacy ?? [])].map((r) => String((r as Row).trypost_account_id)));
-
   /* TryPost names a Facebook-linked Instagram 'instagram-facebook' and a
      company LinkedIn 'linkedin-page'; both post as ours. */
   const NAME: Record<string, string> = { twitter: 'x', 'instagram-facebook': 'instagram', 'linkedin-page': 'linkedin' };
   const accounts = list.map((a) => {
     const rawPlatform = String(a.platform ?? '').toLowerCase();
     const platform = NAME[rawPlatform] ?? rawPlatform;
-    const status = String(a.status ?? 'connected').toLowerCase();
     return {
       id: String(a.id ?? ''),
       platform,
@@ -149,28 +149,45 @@ async function trypostAccounts(admin: Admin): Promise<Response> {
       avatar: a.avatar ?? a.avatar_url ?? null,
       enabled: a.is_active !== false && a.enabled !== false,
       /* connected, token_expired or disconnected: only a connected one can post. */
-      status,
-      added: taken.has(String(a.id ?? '')),
+      status: String(a.status ?? 'connected').toLowerCase(),
       supported: Boolean(CONTENT_TYPE[platform]),
     };
   }).filter((a) => a.id);
-  return json({ accounts });
+  return { accounts };
+}
+
+async function trypostAccounts(admin: Admin): Promise<Response> {
+  const r = await fetchAccounts();
+  if (r.error) return json({ error: r.error }, r.error.startsWith('TryPost is not configured') ? 503 : 502);
+  const { data: mapped } = await admin.from('city_channels').select('trypost_account_id').not('trypost_account_id', 'is', null);
+  const { data: legacy } = await admin.from('synapse_channels').select('trypost_account_id');
+  const taken = new Set<string>([...(mapped ?? []), ...(legacy ?? [])].map((x) => String((x as Row).trypost_account_id)));
+  return json({ accounts: r.accounts.map((a) => ({ ...a, added: taken.has(a.id) })) });
 }
 
 const PLATFORMS = Object.keys(CONTENT_TYPE);
 
 async function channelAdd(admin: Admin, uid: string, b: Row): Promise<Response> {
-  const platform = String(b.platform ?? '').toLowerCase();
   const accountId = String(b.trypost_account_id ?? '').trim();
-  if (!PLATFORMS.includes(platform)) return json({ error: 'That platform cannot be added yet.' }, 400);
   if (!accountId) return json({ error: 'Choose an account first.' }, 400);
-  const label = String(b.label ?? '').trim().slice(0, 80) || null;
-  const handle = String(b.handle ?? '').trim().slice(0, 80) || null;
+  /* Trust TryPost's record of the account, not the page's: the platform, name
+     and handle come from there, so a request cannot pair an id with the wrong
+     network. */
+  const r = await fetchAccounts();
+  if (r.error) return json({ error: r.error }, 502);
+  const acct = r.accounts.find((x) => x.id === accountId);
+  if (!acct) return json({ error: 'TryPost does not have that account.' }, 400);
+  if (!acct.supported) return json({ error: 'That platform cannot be added yet.' }, 400);
+  if (!acct.enabled || acct.status !== 'connected') {
+    return json({ error: 'That account needs reconnecting in TryPost before it can be added.' }, 400);
+  }
+  const label = String(b.label ?? '').trim().slice(0, 80) || acct.name.slice(0, 80) || null;
+  const handle = acct.username.slice(0, 80) || null;
   const city = String(b.city ?? '').trim().slice(0, 60) || null;
   /* A new channel starts quiet: connected, but neither posting on its own nor
      receiving agencies' posts until the manager switches those on. */
   const { data, error } = await admin.from('city_channels').insert({
-    platform, trypost_account_id: accountId, label, handle, title: label, city,
+    platform: acct.platform, trypost_account_id: accountId, label, handle, title: label, city,
     is_active: true, autopilot: false, mirror_agency_posts: false, added_by: uid,
     daily_cap: 3, min_gap: '3 hours', window_start: 9, window_end: 20,
   }).select('id').single();
@@ -452,10 +469,16 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
         failure_reason: 'TryPost made the draft but would not publish it (HTTP ' + res.status + '). It is still in TryPost: publish or delete it there.' });
       return false;
     }
-  } catch (e) {
-    await settle({ status: 'failed', trypost_post_id: draftId,
-      failure_reason: 'TryPost made the draft but the publish call failed (' + (e instanceof Error ? e.message : String(e)) + '). It is still in TryPost.' });
-    return false;
+  } catch (_e) {
+    /* THE REPLY WAS LOST, NOT THE REQUEST. TryPost may well have started
+       publishing. Calling this a failure would invite someone to send it
+       again, so it is 'sent' with its outcome unknown, and the delivery check
+       asks TryPost what became of it. */
+    await settle({
+      status: 'sent', trypost_post_id: draftId, sent_at: new Date().toISOString(), failure_reason: null,
+      payload: { ...(p.payload as Row ?? {}), delivery: 'pending', uncertain: true },
+    });
+    return true;
   }
   await settle({
     status: 'sent', trypost_post_id: draftId, sent_at: new Date().toISOString(), failure_reason: null,
@@ -475,7 +498,8 @@ async function confirmDelivery(admin: Admin) {
   if (!trypostOn()) return { error: 'TryPost is not configured', settled: 0 };
   const { data } = await admin.from('synapse_posts').select('id, platform, trypost_post_id, payload, sent_at')
     .eq('status', 'sent').not('trypost_post_id', 'is', null)
-    .gt('sent_at', new Date(Date.now() - 3 * 86400e3).toISOString()).order('sent_at').limit(25);
+    .gt('sent_at', new Date(Date.now() - 30 * 86400e3).toISOString())
+    .order('checked_at', { ascending: true, nullsFirst: true }).limit(25);
   let settled = 0;
   for (const r of (data ?? []) as Row[]) {
     let post: Row | null = null;
@@ -483,6 +507,8 @@ async function confirmDelivery(admin: Admin) {
       const res = await fetch(TRYPOST_URL + '/api/posts/' + encodeURIComponent(String(r.trypost_post_id)), { headers: tpHeaders() });
       if (res.ok) post = await res.json().catch(() => null) as Row | null;
     } catch { /* ask again next time */ }
+    /* Asked now, whether or not TryPost answered: an unreachable post must not keep the front of the queue. */
+    await admin.from('synapse_posts').update({ checked_at: new Date().toISOString() }).eq('id', r.id);
     if (!post) continue;
     const platforms = Array.isArray(post.platforms) ? post.platforms as Row[] : [];
     const entry = platforms.find((x) => String(x.platform ?? '').toLowerCase() === String(r.platform)) ?? (platforms.length === 1 ? platforms[0] : null);
