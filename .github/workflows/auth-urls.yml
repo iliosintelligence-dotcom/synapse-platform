@@ -151,6 +151,15 @@ jobs:
           jq -r '"subject: \(.mailer_subjects_recovery // "(default)")",
                  "template: \(if (.mailer_templates_recovery_content // "") == "" then "(default)" else .mailer_templates_recovery_content end)"' "$TMP"
 
+          # Whether the project sends mail through its own SMTP provider. Only
+          # the fact is printed, never the host, user or password: on the
+          # default sender Supabase delivers to its own team members only, so a
+          # customer or a new colleague would never receive an invitation.
+          echo "── invitation email ──"
+          jq -r '"custom smtp: \(((.smtp_host // "") != ""))",
+                 "invite subject: \(.mailer_subjects_invite // "(default)")",
+                 "invite template: \(if (.mailer_templates_invite_content // "") == "" then "(default)" else "(custom)" end)"' "$TMP"
+
           if [ "$MODE" = "apply" ]; then
             SITE=$(jq -r '.site_url' supabase/auth-urls.json)
             MERGED=$(jq -rn --argjson cur "$CURRENT" --slurpfile want supabase/auth-urls.json '
@@ -159,11 +168,14 @@ jobs:
             # The reset email travels with the URLs: its link is only right if
             # it points at a page on the allowed site that knows the token.
             SUBJ=$(jq -r '.recovery_subject // empty' supabase/auth-urls.json)
-            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" \
-                     --rawfile tpl supabase/templates/recovery.html '
+            ISUBJ=$(jq -r '.invite_subject // empty' supabase/auth-urls.json)
+            BODY=$(jq -n --arg s "$SITE" --arg u "$MERGED" --arg subj "$SUBJ" --arg isubj "$ISUBJ" \
+                     --rawfile tpl supabase/templates/recovery.html --rawfile itpl supabase/templates/invite.html '
               {site_url: $s, uri_allow_list: $u}
               + (if $subj != "" then {mailer_subjects_recovery: $subj} else {} end)
-              + (if ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)')
+              + (if ($tpl | length) > 0 then {mailer_templates_recovery_content: $tpl} else {} end)
+              + (if $isubj != "" then {mailer_subjects_invite: $isubj} else {} end)
+              + (if ($itpl | length) > 0 then {mailer_templates_invite_content: $itpl} else {} end)')
 
             call -X PATCH \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -176,4 +188,6 @@ jobs:
             echo "── after ──"; jq '{site_url, uri_allow_list}' "$TMP"
             jq -r '"reset subject: \(.mailer_subjects_recovery // "(default)")",
                    "reset template: \(.mailer_templates_recovery_content // "(default)")"' "$TMP"
+            jq -r '"invite subject: \(.mailer_subjects_invite // "(default)")",
+                   "invite template: \(if (.mailer_templates_invite_content // "") == "" then "(default)" else "(custom)" end)"' "$TMP"
           fi

@@ -94,7 +94,9 @@ Deno.serve(async (req: Request) => {
       case 'post_cancel': return await postCancel(admin, body);
       case 'suggest_caption': return await suggestCaption(body);
       case 'staff_list': return canManage ? await staffList(admin) : json({ error: 'Admins only' }, 403);
-      case 'staff_add': return canManage ? await staffAdd(admin, user.id, body) : json({ error: 'Admins only' }, 403);
+      case 'staff_add':
+      case 'staff_invite': return canManage ? await staffInvite(admin, user.id, body) : json({ error: 'Admins only' }, 403);
+      case 'staff_link': return canManage ? await staffLink(admin, body) : json({ error: 'Admins only' }, 403);
       case 'staff_remove': return canManage ? await staffRemove(admin, body) : json({ error: 'Admins only' }, 403);
       default: return json({ error: 'Unknown action' }, 400);
     }
@@ -351,22 +353,91 @@ async function suggestCaption(b: Row): Promise<Response> {
 async function staffList(admin: Admin): Promise<Response> {
   const { data } = await admin.from('synapse_staff').select('profile_id, role, created_at').order('created_at');
   const out: Row[] = [];
-  for (const s of (data ?? []) as Row[]) {
-    const { data: u } = await admin.auth.admin.getUserById(String(s.profile_id));
-    out.push({ profile_id: s.profile_id, role: s.role, email: u?.user?.email ?? null, added: s.created_at });
+  for (const x of (data ?? []) as Row[]) {
+    const { data: u } = await admin.auth.admin.getUserById(String(x.profile_id));
+    const usr = u?.user as Row | undefined;
+    /* Joined = they have signed in at least once. An invitation they have not opened shows as pending. */
+    out.push({
+      profile_id: x.profile_id, role: x.role, email: usr?.email ?? null, added: x.created_at,
+      joined: Boolean(usr?.last_sign_in_at),
+    });
   }
   return json({ staff: out });
 }
 
-async function staffAdd(admin: Admin, uid: string, b: Row): Promise<Response> {
+const SITE = 'https://www.synapsecore.dev';
+
+/** A link that lets the person create their account, with no email involved:
+ *  the same token the invitation email carries, built into our own join page. */
+async function joinLink(admin: Admin, email: string): Promise<{ link?: string; error?: string }> {
+  /* A brand-new address gets an 'invite'; an address that exists but never joined gets a 'magiclink'.
+     Both are verified by synapse-join.html with verifyOtp. */
+  for (const type of ['invite', 'magiclink'] as const) {
+    const { data, error } = await admin.auth.admin.generateLink({
+      type, email, options: { redirectTo: SITE + '/app/synapse-join.html', data: { synapse_team: true } },
+    } as never);
+    const props = (data as Row | null)?.properties as Row | undefined;
+    if (!error && props?.hashed_token) {
+      return { link: SITE + '/app/synapse-join.html?type=' + encodeURIComponent(String(props.verification_type ?? type))
+        + '&token_hash=' + encodeURIComponent(String(props.hashed_token)) };
+    }
+  }
+  return { error: 'Could not make a link for that address.' };
+}
+
+async function staffInvite(admin: Admin, uid: string, b: Row): Promise<Response> {
   const email = String(b.email ?? '').trim();
   const role = b.role === 'admin' ? 'admin' : 'social_manager';
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: 'That does not look like an email address.' }, 400);
-  const found = await rpc(admin, 'synapse_find_user', { p_email: email });
-  if (!found) return json({ error: 'Nobody has an account with that email yet. Ask them to sign up first, then add them.' }, 404);
-  const { error } = await admin.from('synapse_staff').upsert({ profile_id: found, role, created_by: uid }, { onConflict: 'profile_id' });
-  if (error) return json({ error: error.message }, 400);
-  return json({ ok: true });
+  const give = async (id: unknown) => {
+    const { error } = await admin.from('synapse_staff').upsert({ profile_id: id, role, created_by: uid }, { onConflict: 'profile_id' });
+    return error;
+  };
+
+  /* Someone who already has a Synapse account needs no invitation: they get access and sign in as usual. */
+  const existing = await rpc(admin, 'synapse_find_user', { p_email: email });
+  if (existing) {
+    const err = await give(existing);
+    if (err) return json({ error: err.message }, 400);
+    const { data: u } = await admin.auth.admin.getUserById(String(existing));
+    if ((u?.user as Row | undefined)?.last_sign_in_at) return json({ ok: true, status: 'existing' });
+    /* Invited before, never opened it: a fresh link for them. */
+    const j = await joinLink(admin, email);
+    return json({ ok: true, status: 'pending', link: j.link ?? null });
+  }
+
+  /* A new person: Supabase creates the account and emails the invitation (supabase/templates/invite.html). */
+  const sent = await admin.auth.admin.inviteUserByEmail(email, {
+    redirectTo: SITE + '/app/synapse-join.html', data: { synapse_team: true },
+  });
+  if (!sent.error && sent.data?.user) {
+    const err = await give(sent.data.user.id);
+    if (err) return json({ error: err.message }, 400);
+    return json({ ok: true, status: 'emailed' });
+  }
+
+  /* The email could not go (usually: the project has no mail provider of its own, and Supabase's default
+     one delivers to its own team only). The account may or may not have been made; either way, give the
+     admin a link to pass on, and say plainly why. */
+  const why = String(sent.error?.message ?? 'The email could not be sent.');
+  let id: unknown = await rpc(admin, 'synapse_find_user', { p_email: email });
+  const j = await joinLink(admin, email);
+  if (!j.link) return json({ error: 'The invitation email could not be sent (' + why + ') and a link could not be made either.' }, 502);
+  if (!id) id = await rpc(admin, 'synapse_find_user', { p_email: email });
+  if (!id) return json({ error: 'The invitation email could not be sent (' + why + ').' }, 502);
+  const err = await give(id);
+  if (err) return json({ error: err.message }, 400);
+  return json({ ok: true, status: 'link', link: j.link, reason: why });
+}
+
+/** A fresh join link for someone still holding an invitation. */
+async function staffLink(admin: Admin, b: Row): Promise<Response> {
+  const { data: u } = await admin.auth.admin.getUserById(String(b.profile_id ?? ''));
+  const email = (u?.user as Row | undefined)?.email;
+  if (!email) return json({ error: 'No such person.' }, 404);
+  const j = await joinLink(admin, String(email));
+  if (!j.link) return json({ error: j.error ?? 'Could not make a link.' }, 502);
+  return json({ ok: true, link: j.link });
 }
 
 async function staffRemove(admin: Admin, b: Row): Promise<Response> {
