@@ -41,10 +41,13 @@ const tpHeaders = () => ({
 const CONTENT_TYPE: Record<string, string> = {
   instagram: 'instagram_feed', facebook: 'facebook_post', tiktok: 'tiktok_photo',
   linkedin: 'linkedin_page_post', x: 'x_post',
+  /* A video: vertical, up to 3 minutes, MP4 or MOV (TryPost's YouTube Shorts type). */
+  youtube: 'youtube_short',
 };
+const VIDEO_URL = /\.(mp4|mov)(\?|#|$)/i;
 const NEEDS_MEDIA = new Set(['instagram', 'tiktok']);
 const LABEL: Record<string, string> = {
-  instagram: 'Instagram', facebook: 'Facebook', tiktok: 'TikTok', linkedin: 'LinkedIn', x: 'X', telegram: 'Telegram',
+  instagram: 'Instagram', facebook: 'Facebook', tiktok: 'TikTok', linkedin: 'LinkedIn', x: 'X', telegram: 'Telegram', youtube: 'YouTube',
 };
 
 Deno.serve(async (req: Request) => {
@@ -213,6 +216,10 @@ async function channelUpdate(admin: Admin, b: Row): Promise<Response> {
   if ('label' in b) { const l = String(b.label ?? '').trim().slice(0, 80); patch.label = l || null; patch.title = l || null; }
   if ('city' in b) { const c = String(b.city ?? '').trim().slice(0, 60); patch.city = c || null; }
   for (const k of ['is_active', 'autopilot']) if (k in b) patch[k] = b[k] === true;
+  if (patch.autopilot === true || b.mirror === true) {
+    const { data: cur } = await admin.from('city_channels').select('platform').eq('id', id).maybeSingle();
+    if (String((cur as Row | null)?.platform) === 'youtube') return json({ error: 'YouTube takes videos you post yourself. It cannot post homes by itself or share agencies\u2019 posts.' }, 400);
+  }
   if ('mirror' in b) patch.mirror_agency_posts = b.mirror === true;
   /* Which listings this channel takes: the studio's routing rules. Empty or absent means "anything". */
   const KINDS = ['sale', 'rent', 'shared', 'land', 'commercial', 'shortlet', 'offplan'];
@@ -309,6 +316,12 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
     if (!c || c.is_active !== true) return json({ error: `${name} is switched off.` }, 400);
     const p = String(c.platform);
     if (!c.trypost_account_id || !CONTENT_TYPE[p]) return json({ error: `${name} cannot take studio posts yet.` }, 400);
+    const hasVideo = media.some((u) => VIDEO_URL.test(u));
+    if (p === 'youtube') {
+      if (media.length !== 1 || !hasVideo) return json({ error: `${name} takes one video (MP4 or MOV, vertical, up to 3 minutes) and nothing else. Add the video, remove any pictures, or untick ${name}.` }, 400);
+    } else if (hasVideo) {
+      return json({ error: `${name} cannot take a video from here yet. Only YouTube does. Remove the video, or untick ${name}.` }, 400);
+    }
     if (NEEDS_MEDIA.has(p) && !media.length) return json({ error: `${LABEL[p] ?? p} needs a picture. Add one, or untick ${name}.` }, 400);
     rows.push({
       group_id: group, channel_id: id, platform: p, caption, media_urls: media,
@@ -548,7 +561,7 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
           /* TikTok publishes only with a privacy level. */
           ...(platform === 'tiktok' ? { meta: { privacy_level: 'PUBLIC_TO_EVERYONE' } } : {}),
         }],
-        content, media: media.map((url) => ({ url })),
+        content, media: media.map((url) => (VIDEO_URL.test(url) ? { url, type: 'video' } : { url })),
       }),
     });
     const body = await res.json().catch(() => ({})) as Row;
