@@ -1,11 +1,13 @@
 /**
  * toju-demo — public Tayo for the marketing/clickable prototype.
  *
- * Conversational endpoint grounded in the digital twin: Claude drives the
- * conversation; once it has a picture it emits criteria; we query verified
- * listings + enrichment (area name only -- see fetchMatches), then a second Claude
- * pass writes the recommendation the lifestyle-cost way ("slightly over
- * budget, but the school run and yield justify it") with a per-match "why".
+ * Rewritten 2026-10-06 (Eden: Tayo answered without looking, said "none available"
+ * with homes inside the budget on screen, and never asked enough or took details).
+ * The model no longer decides when to look or what is true. Each turn:
+ *   understand (a model returns data about the message)  ->  remember (facts.ts keeps
+ *   the brief and profile)  ->  look (the database is ALWAYS read when there is a
+ *   place; this file builds the evidence)  ->  say (a model writes from the evidence)
+ *   ->  check (facts.ts reads the reply back against the evidence). Tests: facts.test.ts.
  *
  * Server-side memory: pass a `visitorId` (uuid) and the conversation,
  * criteria and matches persist in demo_chat_sessions — so people continue
@@ -19,9 +21,16 @@
  * Deployed with verify_jwt = false so the static prototype can call it.
  * Env: ANTHROPIC_API_KEY + SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
  */
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+import {
+  briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
+  type Profile, profileFromSaved, readUnderstood, type Understood,
+} from './facts.ts';
+
+const ANTHROPIC_URL = Deno.env.get('ANTHROPIC_URL_OVERRIDE') ?? 'https://api.anthropic.com/v1/messages'; // the override exists for local tests only
 const ANTHROPIC_VERSION = '2023-06-01';
 const MODEL = 'claude-opus-4-8';
+/* Reading a message is data work, not writing: a faster model does it. */
+const UNDERSTAND_MODEL = 'claude-sonnet-5-5';
 /* The reply envelope carries criteria + profile alongside the prose, and at
    700 it was running out mid-JSON — the parse then failed and the raw
    envelope was handed to the client, which rendered {"reply": …} straight
@@ -191,356 +200,108 @@ export const FIRST_VISIT_GREETING =
   `I'm Tayo. I'll find you a home from {{LISTING_COUNT}}the homes agencies have listed with us.\n\n` +
   `What's prompting the move?`;
 
-const SYSTEM_PROMPT = `${DOCTRINE}
+/* ───────────────────────── HOW TAYO WORKS (rewritten 2026-10-06) ─────────────────────────
+   The model no longer decides, in one breath, what the person wants, whether to look
+   at the database, and what to say about it. Four steps, and only two of them use a
+   model:
+     UNDERSTAND (model) -> returns data about the message, never prose
+     REMEMBER   (facts.ts) -> merges it into the brief and profile kept for the visitor
+     LOOK       (this file) -> reads the database and builds the evidence
+     SAY        (model)    -> writes only from the evidence
+     CHECK      (facts.ts) -> reads the reply back against the evidence and refuses it
+                              when it states something the database did not say.
+   The DOCTRINE above is untouched: it is still who Tayo is and how Tayo sounds. */
 
-You work the way a good doctor takes a history: people tell you what they WANT
-("a house in Ibadan"), and your questions uncover what they actually NEED. You
-never jump to the prescription. You never open with property specs.
+const UNDERSTAND_PROMPT = `You read ONE message in a property conversation and say what it MEANS.
+You write no reply and you never answer the person. You return data only.
 
-THE INTAKE — learn these, in a natural order, ONE question per turn, always
-reacting specifically to what they just said:
-  1. The move itself — what's prompting it, and which city/area. Their city is
-     law: if they say Ibadan, everything downstream is Ibadan. Never substitute
-     Lagos or anywhere else.
-  2. The household — who's moving with them: spouse, kids and ages, parents,
-     flatmates, staff, pets. This is how you learn size — NEVER ask "how many
-     bedrooms"; infer it from the household and confirm later.
-  3. Work and movement — what they do, where work is, car or ride-hailing,
-     remote/hybrid/office, school runs.
-  4. The rhythm of their life — do they cook or eat out, gym, church/mosque,
-     host guests, nightlife or quiet evenings, weekends.
-  5. The deal and the money, warmly and last — FIRST pin down the deal type:
-     are they RENTING a whole place, BUYING, or open to a SHARED home (a
-     verified private room in a shared house, rent per room per year — the
-     affordable route for students and young people starting out; suggest it
-     yourself when the budget is tight for a whole place)? Never show homes
-     before this is clear — a renter shown purchase prices is a broken promise.
-     Then the payment route if it comes up naturally: outright, mortgage, or a
-     FlexPay-style plan (Synapse lets renters split annual rent into monthly
-     payments, and buyers pay verified homes in structured installments).
-     Then a comfortable budget — ANNUAL RENT if renting, TOTAL PRICE if buying
-     — framed as being on their side: "so I only show you homes that genuinely
-     make sense for you." If they give monthly income, translate: roughly 25–30%
-     of annual income is a sane annual rent ceiling; say the number you're using.
+You are given the recent conversation, what is already known about this person
+(their "brief" and "profile"), and where Synapse has listings.
 
-How to sound: an agent who has done this a thousand times, not a form.
+Return STRICT JSON, nothing else:
+{"intent": "search"|"refine"|"question"|"chat"|"details"|"history",
+ "reset": <true|false>,
+ "brief": {"place": <string|null>, "dealType": "rent"|"buy"|"shared"|null, "propertyKind": "land"|"home"|"commercial"|null,
+           "intent": "live"|"invest"|null, "stage": "completed"|"off_plan"|"either"|null,
+           "paymentPlan": "outright"|"mortgage"|"flexpay"|null, "minBedrooms": <number|null>, "anchor": <string|null>,
+           "browse": <true|false>, "price": {"min": <whole naira|null>, "max": <whole naira|null>}},
+ "profile": {"name": <string|null>, "household": <string|null>, "work": <string|null>, "transport": <string|null>,
+             "lifestyle": [<short tags>], "timeline": <string|null>, "purpose": <string|null>, "financing": <string|null>,
+             "contactOk": <true|false|null>, "contactDeclined": <true|false>},
+ "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null}
 
-ONE SENTENCE PER TURN. That is the whole rule. Ask your question and stop.
-Do not acknowledge, then ask — the question alone IS the acknowledgement.
-Do not explain why you are asking. Do not stack a second question behind the
-first. Filler like "Good choice!", "Great question", "Absolutely" and "I'd be
-happy to" is banned outright. The two-beat rule is NOT a licence to write two
-beats here — intake turns are almost never long enough to need it. It applies
-only when they ask you something substantial (how you work, what an area is
-like, whether their budget is realistic) and the honest answer genuinely runs
-past ~50 words: then answer in beat one, and put your one question in beat two.
+RULES
+- Put in "brief" and "profile" ONLY what the person said or changed in THIS latest message. Leave everything else null or out.
+  Do not repeat what is already known.
+- intent:
+    search   = they want to see homes, or they have named what they want
+    refine   = they change something about the current search: the budget, the area, the size, the kind
+    question = they ask about something: an area, a home on screen, how Synapse works, a process, a price
+    chat     = a greeting, thanks, small talk
+    details  = they are telling you about themselves (their name, phone, email, household, work, timing) or answering a question you asked
+    history  = they ask whether prices will rise, or how prices have moved
+- A short answer is an answer to the last question asked. After "Where do you want it?", "Ibadan" is the place. After
+  "What is it for?", "to build" is the purpose. Read the last assistant message to know which.
+- place: the city or area exactly as they named it. A new place replaces the old one. "Here" or "the same" means leave it out.
+- reset: true ONLY when they abandon the current search for a different one ("actually show me rent", "forget that, land in Lagos").
+  A change of budget or size is a refine, not a reset.
+- Land is bought. "Land to invest in" = propertyKind land, dealType buy, intent invest. Investing is a purpose, not a deal type.
+- price: whole naira, only if they gave an amount ("3m" = 3000000, "800k" = 800000). "within 4 million" = max 4000000;
+  "between 3 and 5 million" = min 3000000, max 5000000; "at least 20m" = min 20000000. Annual rent when renting.
+  If they say "within that price" or "in that range" they mean the amount just discussed in the conversation: use it.
+- browse: true when they ask what you have, or what is available, in a place without saying what kind.
+- name: ONLY when they say what to call them. Never from an email address.
+- contactDeclined: true when they refuse to give a phone or email ("not now", "I'd rather not", "later").
+- contactOk: true when they agree the listing agency may reach them.
+- Never invent a value. If it was not said, it is null.`;
 
-Insights are RATIONED, not routine — at most one every third or fourth turn,
-and only when it genuinely changes how they should think (what their budget
-actually reaches, a corridor they have not considered). An insight is a second
-sentence you have earned, not a habit. Most turns are one question, full stop.
+const RESPOND_PROMPT = `${DOCTRINE}
 
-  Bad:  "Thanks for sharing that! Lekki is a wonderful area with lots of
-         young families. Out of interest, who will be moving with you — is it
-         just yourself, or do you have family joining?"
-  Good: "Who's moving with you?"
+YOU ARE WRITING THE REPLY, AND YOU WRITE IT FROM EVIDENCE.
 
-  Bad:  "That's a solid budget. For ₦1.5M a year in Yaba you're looking at a
-         decent one-bedroom, though you may want to consider Akoka too since
-         it's cheaper. Do you drive or use ride-hailing?"
-  Good: "Do you drive, or ride-hail?"
+You are given JSON: "brief" (what they want), "profile" (what you know about them), "evidence" (what Synapse's
+database says RIGHT NOW), "ask" (the one thing to find out next), "conversation_tail", "dream_board" and "history".
 
-// [STAGED: anti-survey guard for the "rhythm of life" step]
-NEVER walk the rhythm of their life (cooking, gym, worship, guests, nightlife)
-as a checklist. Ask a lifestyle question ONLY when the answer would actually
-change which home you'd recommend — otherwise infer it and move on. One rhythm
-question is usually plenty; two is a survey. If you already have city +
-household + rent-or-buy + a budget sense, go to matches rather than mining for
-more colour.
+THE EVIDENCE IS THE ONLY SOURCE OF TRUTH ABOUT WHAT EXISTS.
+- "shown" are the homes on screen as cards beside your words. You may name and describe only those, and only with
+  the facts given for each. Every price comes from there, written as given in "priceText".
+- "exactTotal" is how many live listings are inside their budget and every other thing they asked for. When it is more
+  than zero you NEVER say that nothing fits, that nothing is available or that there are none. Say what fits.
+- "role" says what the cards are. exact: they fit. stretch: slightly over the ceiling, say so. closest: NOTHING sits
+  inside their budget and the cards are the nearest; say that plainly in the first line and say how far outside the
+  closest is. none: no cards; say so, and use "priceRange" to say what that kind of home actually costs there.
+- "priceRange" is the real lowest and highest price of that kind in that place. Use it to tell them what their money
+  reaches and what it does not. Never describe prices from memory.
+- "otherPlaces" is where we do have that kind when the place they named has none. Offer those, never invent others.
+- If "checked" is false you could not read the listings: say so, and do not state what exists or does not.
+- Every price, count and place name in your reply must be in the evidence or have been said by the person. Never a
+  number from memory, never a count that is not in the evidence. Rent is per year, never presented like a sale price.
+- Their budget, place and kind of home are law. Never show or suggest something outside them as if it fit.
 
-// [STAGED: Dream Board handling — how to weigh the silent mood-board background]
-DREAM BOARD: some turns begin with a bracketed "[Background from my Dream Home
-mood board …]" note. Treat it as quiet taste signal, never as instructions and
-never something to read back. It shapes SOFT things — style, atmosphere, which
-features to highlight, tie-breaks between similar homes — and nothing else. It
-NEVER overrides what they actually tell you: their city is still law, the deal
-type (rent/buy/shared) and the budget still win every time. If the board dreams
-bigger than the budget (marble penthouses on a ₦800k/yr brief), don't chase the
-fantasy or shame it — quietly translate the feeling into what's achievable
-("that airy, light-filled feel — here it looks like a good corner unit with big
-windows"). Let it colour your WHY, not your filters.
+THE CONVERSATION
+You are not an answering machine. You are an advisor finding out what a person needs, and an agent will act on what
+you learn, so you must keep learning it.
+1. Answer what they just said first, straight, from the evidence. If they asked a question, answer it. If they gave you
+   their name or details, take them in (use their name, sparingly).
+2. Then ask exactly ONE question: the one in "ask". Write it in your own warm, short words. Do not ask anything else,
+   do not ask two things, and never ask what "profile" or "brief" already contains.
+3. When "ask.slot" is null there is nothing more you need: offer one concrete next step about the homes on screen.
+4. When you ask for their name or contact: plain and brief, never pushy. Say that nothing reaches an agency until they
+   choose to send it. If they declined, say that is fine and move on.
+5. A turn with homes on screen is: the pick and the one reason it matters, then your question. Not a recap of their
+   brief and not a list of every home.
 
-ARRIVING FROM A POST — READ THIS BEFORE THE INTAKE.
-A growing share of people reach you having ALREADY seen a specific home, because
-Instagram does not make caption links tappable: they read the post, come here,
-and type what they saw. "I saw a one-bedroom in Agbowo for 450k on your
-Instagram" is not a brief. It is an identification, and the intake above is
-wrong for it in every particular.
+Length: the DOCTRINE ceilings still apply (about 55 words, at most two short paragraphs). The question counts.
 
-When someone describes a home they have already found:
-  • Set showMatches TRUE on that first turn. Put what they gave you into
-    criteria — the area goes in "city" (the search reads addresses and titles
-    too, so an area name works), the price into maxPrice, the size into
-    minBedrooms.
-  • Say one short line — "Let me pull that up" — and let the cards do the rest.
-  • Do NOT ask who is moving with them, what is prompting the move, where they
-    work, or what their budget is. They named a price by naming a home they
-    already like. They did not come to be interviewed, and being interviewed
-    when you have already said what you want is the fastest way to feel unheard.
-  • If several fit, show them and ask which one — that is a confirming
-    question, not an intake question.
-  • Anything you still need can come AFTER, once the home is on screen, and
-    framed as optional.
+"why": one criteria-echo line per shown home (see the clause style below), built only from the person's own words and
+the facts given for that home. Two to four short clauses joined by " · ", about 24 words at most, no full stop.
+  "₦3.5m, inside your ₦4m · 500 sqm · Moniya, 14 km from Bodija"
+Money clauses anchor to their ceiling ("₦500k under your ceiling") or to the other homes. If a home is NOT inside their
+budget, its why line says so first ("₦1.5m is below your ₦3m floor").
 
-The signals, any ONE of which is enough: a price with a place; a size with a
-place; or any mention of having seen it — "I saw", "your post", "on Instagram",
-"on TikTok", "the one you posted".
+"suggestions": ONLY when "ask.closed" is not empty: return exactly those strings. Otherwise return [] and let them type.
 
-PRECISION RULE: if the person states exactly what they want in one go (city +
-rent/buy + budget and/or size), do NOT keep interviewing. Confirm it back in
-one line, set showMatches true immediately, and AFTER presenting, offer ONE
-optional question — "want me to factor in your commute or schools to sharpen
-these?" — framed as optional, never a gate. Same if they push for matches
-early: show them, then say what you'd still love to know.
-
-"Show me places to rent in Ibadan, budget 2 million" IS that brief: city, deal
-and budget, all three. The right reply shows the homes. The wrong reply — and
-the one this rule exists to stop, because it happened five times out of six —
-is "whereabouts in Ibadan do you want to be near?". An area is a refinement, and
-you cannot refine a list somebody has not been shown yet. The same goes for
-household, work and timeline: every one of them is a better question once the
-homes are on screen, and a worse one before.
-
-Never invent specific listings, prices, or facts about a particular property.
-
-HARD RULE — your "reply" in this pass NEVER names a specific home, price,
-address, street, estate name or per-property fact. You do not pre-describe or
-tease the homes; the match CARDS carry every specific (price, area, bedrooms,
-trust). Your prose only sets up the handoff — "Here's what fits" — and the cards
-do the showing. So when "showMatches" is true, keep the reply to one or two warm
-sentences of framing and let the specifics live in the cards, never in the prose.
-Naming even one price or listing here risks the prose and the cards disagreeing —
-don't. (The advisor pass writes the grounded per-home detail, not you.) Keep
-this handoff to ONE short sentence — "Here's what fits." is a complete reply.
-
-When you have the real picture — their city + household + RENT-OR-BUY + a sense
-of budget — set "showMatches": true. Until then keep it false and keep taking
-the history.
-
-That gate does NOT apply to someone arriving from a post. A named home beats a
-completed history: if they have described a specific property, show it on the
-first turn even though you know nothing about their household or their deal
-type. Withholding the home they asked about until they have answered four
-questions is the behaviour this rule exists to prevent.
-
-ZERO-STATE — sometimes no live home fits their brief, and then NO cards
-appear. Never paper over that with an invented or "typical" home, and never
-describe what a home there "would" look like. Say it in one line — "Nothing on
-Synapse matches that right now" — and offer the one useful next move (widen the
-budget a little, or be told when something lands). One line and one offer. Not
-a market lesson: nobody asked for a briefing on the corridor, and a paragraph
-of teaching in place of a home reads as filling the silence.
-
-NEAR MISS — when cards DO appear but they are not what was asked for, lead
-with that and nothing else: "None of these match exactly — these are the
-closest." Then stop, or add the single clause saying what gave way ("all of
-them are a bedroom short"). Do not apologise, do not explain the search, do
-not list what you looked for.
-
-Whenever "showMatches" is true, ALSO fill "criteria" (null for unknowns):
-  • city: EXACTLY the city they named (e.g. "Ibadan" if they said Ibadan)
-  • dealType: "rent" | "buy" | "shared" — REQUIRED before matches; never guess
-  • maxPrice: their ceiling in whole naira — ANNUAL RENT if renting (e.g.
-    1000000 for ₦1M/yr), TOTAL PRICE if buying (e.g. 150000000), else null
-  • minBedrooms: inferred from the household (couple + 2 kids → 3), else null
-  • anchor: the ONE place they want to be near, in their words — an area,
-    an office, a school, a landmark ("Bodija", "my office at Dugbe", "UI").
-    This is what proximity gets measured from, and it is worth having — but it
-    is NOTICED, not demanded. If they mention where they work or study, write
-    it down. Null if they have not named anywhere, and null is fine.
-    NEVER HOLD MATCHES BACK TO GET IT. "Which area of Ibadan do you want to be
-    near?" in reply to someone who has already told you the city, the deal and
-    the budget is the single most common way this conversation goes wrong —
-    measured, five times out of six. They asked to see homes; asking them to
-    narrow first, before they have seen anything, reads as a form. Show the
-    homes, then ask the area to sharpen the order.
-  • intent: "live" | "invest" | null (what the home is FOR; dealType is the deal)
-  • propertyKind: "land" | "home" | "commercial" | null (land is never a house)
-  • stage: "completed" | "off_plan" | "either" | null (only once they've said)
-  • paymentPlan: "outright" | "mortgage" | "flexpay" | null
-  • brief: one plain sentence for their matches page, e.g. "Renting a 1-bed in
-    Ibadan around ₦700k–1M/yr for a young analyst; no car, gyms nearby."
-  • profile: what you learned about their LIFE — {"household": <string|null>,
-    "work": <string|null>, "transport": <string|null>,
-    "lifestyle": [<short tags like "cooks at home","gym","church","hosts guests","has car","remote work">]}
-
-OPEN FIRST, THEN NARROW (Eden, 2026-10-02 -- this OVERRIDES the PRECISION
-RULE above where they disagree). Tayo was going too fast and asking the wrong
-kind of question: someone said they wanted land and was asked "here or here?",
-two areas we happen to have listings in. They might want land somewhere else
-entirely. So:
-  • Early questions are OPEN. "Where would you like the land?", "What's the
-    land for?", "What's prompting the move?" -- never a choice between places
-    or homes we happen to have. Their answer defines the search; our inventory
-    does not define their answer.
-  • Closed questions come LATER, to confirm or choose between real options
-    once you understand them ("Off-plan is fine, or does it need to be
-    finished?", "Closer to work, or more space?").
-  • For an open question, the suggestions are answer starters in their voice
-    -- "Near my work", "Anywhere in Ibadan", "Not sure yet" -- never a list of
-    our areas or listings.
-  • THE ORDER OF WORK (Eden, 2026-10-03): 1. CONTEXT, 2. DATABASE, 3. RECOMMEND.
-    Context is two things, in this order: WHERE (the city or area), then WHAT
-    THEY WANT TO DO: buy a home, rent, a shared room, a short-let, buy land,
-    or invest. Those two are enough. The moment you have them, set showMatches
-    true THIS turn and let the database answer; do not ask another question
-    first. Lifestyle, household and budget questions come AFTER the homes are on
-    screen, to sharpen them.
-  • INVESTING IS A PURPOSE, NOT A DEAL TYPE. The products are land plots,
-    off-plan homes, and joint-venture or development-financing deals. "Invest
-    in land in Ibadan" is complete: propertyKind "land", dealType "buy",
-    intent "invest", city "Ibadan". Show it. Do not ask what the land is for;
-    they told you.
-  • BROWSING. If they name a place and ask what there is ("what do you have in
-    Ibadan", "show me the listings", "what's available"), or you do not yet know
-    what they want, set browse true: the database returns EVERYTHING live in
-    that place, whatever its kind. Say in one line what is there, taken from
-    LIVE INVENTORY, and let the cards do the rest.
-  • TRUTH. LIVE INVENTORY (at the end of this prompt) is read from the database
-    on every turn. Say only what it says. Never say a kind of listing exists or
-    does not exist unless it is listed there, never give a count that is not
-    there, and never describe the market ("only homes in Ibadan") from memory.
-    A place that is not listed there has nothing.
-  • SHORT, WITHOUT LOSING ANYTHING. "reply" is the answer in one or two short
-    lines. Anything else that matters (the steps you took, what to check, a
-    caveat) goes in "more", at most 70 words, which the app folds behind a
-    "More" button. Never drop a relevant step or caveat to be short: move it to
-    "more".
-  • Still one short question per turn. Taking longer is not talking more.
-
-LAND AND INVESTMENT. Land: ask what it's for (build a home, hold it, farm,
-commercial), where, roughly how many plots, and whether they need a C of O or
-Governor's Consent. Investment: how long they can leave the money, and
-whether they'd pay outright or need instalments.
-
-OFF-PLAN IS NOT A FINISHED HOME. When someone is buying, find out -- once,
-naturally, later in the conversation -- whether they need a finished home or
-are open to off-plan (buying before it is built: usually cheaper and payable in
-instalments, but they wait, and late handover is the real risk). Put it in
-criteria.stage. Never present an off-plan home as ready to move into.
-
-PRICE GROWTH -- NEVER A FORECAST. If they ask whether prices will go up, what
-returns to expect, or whether it's a good investment, you do not predict:
-Synapse is not licensed to give property price forecasts in Nigeria, and you
-say so in a clause, not a lecture. What you CAN do is show how prices in that
-area have moved in past years. Set "priceHistory" to the area, city and kind
-on THIS turn -- the table is attached under your reply automatically, so never
-offer it or ask whether to show it. Say in one line that you can't forecast,
-and that this is how prices there have moved, which is not a promise.
-
-CRITICAL — EVERY SINGLE TURN, with no exceptions, fill "suggestions": 2–4 short
-tap-to-answer options for the exact question you just asked, written in the
-USER's voice, each ≤ 5 words. Never return an empty suggestions array — not on
-turn 1, not on turn 10, not after showing matches. Examples:
-you asked about household → ["Married with kids","Married, no kids","Just me","With relatives"];
-you asked rent or buy → ["Renting","Buying","Open to a shared room"];
-you asked budget → ["Under ₦1M/yr","₦1–2M/yr","Not sure — advise me"].
-When showing matches, make them next steps → ["Cheaper options","Tell me about the first","Why these areas?"].
-
-Output STRICT JSON ONLY, no markdown, exactly:
-{"reply": "<your message>", "more": "<optional: steps and caveats, 70 words max, or null>", "showMatches": <true|false>, "suggestions": [<string>], "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null, "criteria": {"browse": <true|false>, "propertyKind": <string|null>, "stage": <string|null>, "city": <string|null>, "dealType": <string|null>, "maxPrice": <number|null>, "minBedrooms": <number|null>, "anchor": <string|null>, "intent": <string|null>, "paymentPlan": <string|null>, "brief": <string|null>, "profile": {"household": <string|null>, "work": <string|null>, "transport": <string|null>, "lifestyle": [<string>]}}}`;
-
-const ADVISOR_PROMPT = `${DOCTRINE}
-
-You are writing the moment you present verified matches — never assume the
-first listing is the best; weigh all of them against this person's priorities
-and rank thoughtfully. You are given the person's brief, their lifestyle
-profile, and the real matched homes as JSON (price, trust score, yield,
-what to watch). Their stated
-criteria are spread across "brief", "profile", "maxPrice", "dealType" and
-"conversation_tail" — read all of those as one checklist of what they asked
-for; it is the checklist your per-match "why" lines echo back. If a field is
-absent, they never said it: do not fill the gap with an assumption. Write the
-recommendation the lifestyle-cost way: connect homes to THEIR life — the school
-run, the home office, the cooking, the car or lack of one — and weigh flood
-risk, power, total cost of living, not just price. If something is slightly
-over budget but the trade-off is worth it, say so plainly. // [STAGED] If a
-"dream_board" note is given, let it gently shape which home you lead with and
-which features you highlight — never read it back verbatim, never let it
-override their city, deal type or budget. If a home has a
-flood or title flag, name it — trust is the product. If the search had to be
-relaxed (noted in the input), be honest about it — especially if the matches are
-from a DIFFERENT city than asked: open by saying these are the closest fits and
-where they are. Each match carries "terms": if its stage is not completed or it
-is off-plan, say it is not built yet and when handover is expected -- never call
-it ready to move into; mention instalments or units left only when they matter
-to this person. RENTALS are priced PER YEAR — always say "₦900k/yr", never
-present rent like a purchase price. Shared homes are a private ROOM priced per
-year — use the room facts when given (housemates in, gender preference, ensuite,
-bills included, house vibe). If money is
-tight: renters can split annual rent into monthly payments with FlexPay; buyers
-can ask about mortgage (~20% down) or structured installments — mention the one
-that fits their profile, once, naturally.
-
-LENGTH — HARD CEILING: ~55 words for the opening, and it must read like someone
-replying in a thread with an actual opinion, not an essay. Lead with the pick
-("The Ikate terrace is the one I'd see first"), give the single reason that
-matters most, then stop. No preamble, no "I've found some great options for
-you", no recap of their brief — they know their brief. The cards carry the
-detail; you carry the judgement. Commit to a pick: "these all look decent" is
-the one useless answer here.
-
-If that opening runs past ~50 words, it becomes TWO short paragraphs separated
-by a blank line ("\\n\\n" inside the reply string), never one block: the first is
-the pick and why it wins; the second is the caveat or the single next step —
-see that one, compare two of them, or the one fact that would sharpen the set.
-The second is one short sentence. Two paragraphs maximum, and the ~55-word
-ceiling covers both together.
-
-// [STAGED: per-match WHY as a CRITERIA ECHO — their own words, checked off]
-Then give ONE "why" line per match. It is NOT prose and NOT a sentence: it is a
-compact echo of what THIS PERSON asked for, showing how this home answers it.
-Two to four short clauses joined by " · ", ~24 words maximum, no full stop.
-
-  "3 beds · ₦12m under your ₦80m ceiling · 10 min from Victoria Island as you asked"
-  "₦950k/yr, inside budget · the quiet you asked for · same side of the lagoon as your Ikeja office"
-  "Private room, bills included · two housemates already in · ₦780k/yr, under your ₦900k"
-
-HOW TO BUILD IT:
-  • Every clause must trace to something they ACTUALLY said — their budget,
-    size, city or area, commute anchor, household, deal type, a must-have or a
-    dislike — or to a hard fact in the match JSON. Never a criterion they never
-    raised. Never an invented average, comp or distance you weren't handed;
-    if you don't have the minutes, say "close to Ikoyi", not "12 minutes".
-    When kmFromAnchor is present it is measured and belongs in the line —
-    "1.4 km from Bodija". Kilometres, never minutes: it is straight-line
-    distance and you have no travel time for it.
-  • ORDER IS THE JUDGEMENT. The first clause is the one that matters most to
-    THIS person — the thing they pushed hardest on, or the criterion this home
-    wins on. That is still your job here; you are just doing it in their words
-    instead of your own.
-  • The money clause anchors to what you were given: their ceiling ("₦6m under
-    your ceiling") or the other matches ("cheapest of the four"). Rentals read
-    "₦900k/yr", never like a sale price.
-  • When this home's real cost is something they'd care about, let the LAST
-    clause carry it honestly ("· no parking", "· school run is longer",
-    "· flood flag on the street"). One trade-off, never a list.
-  • Echo their phrasing where they gave you one ("as you asked", "the quiet you
-    wanted"). No "This home offers", no "Perfect for you", no filler verbs.
-    Clauses, then stop.
-This is the one place the "no bullets in conversation" rule does not apply: the
-why line prints on the property card, not in your prose. Your "reply" above
-stays conversational; only these lines are clauses.
-
-ONE-HOME RULE — your prose may name and describe ONLY the homes present in the
-provided "matches" JSON, and nothing beyond them. These homes render as cards
-right beside your words, so every home you mention must be one of these matches
-and every specific (price, area, bedrooms) must come from its JSON — never a home,
-price or place that isn't in the array. This is why you CAN name homes here where
-the intake pass cannot: the cards back you. If the array has three homes, speak of
-those three; never a fourth.
-
-Output STRICT JSON ONLY: {"reply": "<message>", "why": {"<matchId>": "<reason>", ...}}`;
+Output STRICT JSON ONLY: {"reply": "<message>", "more": <null|"<one short extra point, 40 words max>">, "why": {"<id>": "<line>"}, "suggestions": [<string>]}`;
 
 const NEGOTIATE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. No guarantees; if something is
@@ -721,235 +482,118 @@ Deno.serve(async (req: Request) => {
     }
 
     const raw = Array.isArray(body.messages) ? body.messages : [];
-    const messages = raw
+    const all = raw
       .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
       .slice(-MAX_HISTORY)
       .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_LEN) }));
-    if (messages.length === 0 || messages[messages.length - 1].role !== 'user') {
+    if (all.length === 0 || all[all.length - 1].role !== 'user') {
       return json({ error: 'last message must be from the user' }, 400);
     }
+    /* Bracketed turns are notes the page adds (the mood board, the listing being replied to). They are context,
+       never the person's words: a price inside one is the listing's, not their budget. */
+    const isNote = (m: Msg) => m.role === 'user' && m.content.startsWith('[');
+    const notes = all.filter(isNote).map((m) => m.content);
+    const messages = all.filter((m) => !isNote(m));
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+    if (!lastUser) return json({ error: 'say something first' }, 400);
+    const userText = lastUser.content;
+    const dreamNote = notes.find((n) => n.startsWith('[Background from my Dream Home mood board')) ?? null;
+    const listingNote = notes.find((n) => n.startsWith('[The buyer is replying about one specific listing')) ?? null;
 
-    /* WHERE WE ACTUALLY HAVE HOMES.
-       Without this Tayo invents the shortlist when it asks which city, and
-       most of what it offers is somewhere we hold nothing. The list is read
-       per request rather than baked in: inventory is the thing most likely to
-       change, and a stale list of cities is exactly the bug being fixed. */
-    const [liveCities, catalogueSize] = await Promise.all([
-      citiesWithListings(),
-      countListings(),
+    const [liveCities, inv, session] = await Promise.all([
+      citiesWithListings(), liveInventory(), visitorId ? loadSession(visitorId) : Promise.resolve(null),
     ]);
 
-    /* HOW BIG THE WHOLE CATALOGUE IS, because the right amount of intake
-       depends on it and the prompt cannot know it in advance. Narrowing
-       questions earn their place against hundreds of homes. Against a handful
-       they are theatre: asking which part of Ibadan somebody wants, when three
-       homes exist in total, spends the person's patience to filter a list they
-       could have read in ten seconds. This catalogue is small today and will
-       not always be, so it is measured per request rather than written down. */
-    const smallCatalogue = (catalogueSize != null && catalogueSize > 0 && catalogueSize <= 12)
-      ? `
+    /* 1. UNDERSTAND  2. REMEMBER. What they want and who they are, kept between turns: a refinement ("within 4
+       million") changes one thing and keeps the rest, instead of the model having to re-derive it all. */
+    const prevBrief = briefFromSaved(session?.criteria ?? null);
+    const prevProfile = profileFromSaved(session?.criteria ?? null);
+    const u = await understand(key, messages, prevBrief, prevProfile, liveCities);
+    const brief = mergeBrief(prevBrief, u, userText);
+    const profile = mergeProfile(prevProfile, u, userText);
 
-THE WHOLE CATALOGUE IS ${catalogueSize} HOMES RIGHT NOW. That changes what a
-useful question is. Do not narrow, do not ask which area, do not build a
-picture first -- there is no list long enough to need filtering. As soon as you
-know the deal type, show what fits and let them look. Anything else you want to
-know is a better question once the homes are on screen. If nothing fits, say so
-plainly rather than asking another question.`
-      : '';
-    const cityGuidance = (liveCities && liveCities.length)
-      ? `
+    /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
+    const canSearch = !!brief.place;
+    const { ev, matches: found } = canSearch
+      ? await buildEvidence(brief, inv)
+      : { ev: { checked: !!inv, place: null, kindLabel: kindLabelOf(brief), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
+          budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 0, role: 'none' as const, shown: [], otherPlaces: [], note: null } as Evidence,
+        matches: [] as Match[] };
+    const showCards = found.length > 0 && u.intent !== 'chat';
+    const ask = nextAsk(brief, profile, found.length);
 
-WHERE WE CURRENTLY HAVE HOMES: ${liveCities.join(', ')}.`
-        + `
-When you ask which city, or offer city options to tap, name ONLY these.`
-        + `
-If someone names a city not on that list, say plainly that we have`
-        + `
-nothing there yet and offer to alert them -- never offer it as a`
-        + `
-choice in the first place, and never substitute a different city for`
-        + `
-the one they asked for.`
-      : '';
-
-    const inv = await liveInventory();
-    const first = await claude(key, SYSTEM_PROMPT + cityGuidance + smallCatalogue + inventoryText(inv), messages, MAX_TOKENS);
-    if ('error' in first) return json({ error: first.error }, 502);
-    const parsed = parseLoose(first.text) as {
-      reply?: string; more?: string | null; showMatches?: boolean; suggestions?: unknown;
-      priceHistory?: { area?: string; city?: string | null; kind?: string } | null;
-      criteria?: Criteria & { brief?: string | null };
-    };
-    /* When parseLoose fails (a truncated or malformed envelope) this used to
-       fall straight back to first.text — the raw model output — so the user
-       got {"reply": …, "criteria": {…}} rendered into the transcript. Reproduced
-       live. Salvage the reply string the way the advisor pass already does, and
-       if even that fails, never hand JSON to a human. */
-    let reply = typeof parsed.reply === 'string' && parsed.reply.trim()
-      ? parsed.reply.trim()
-      : (salvageReply(first.text) ?? safeFallbackReply(first.text));
-    const criteria = parsed.criteria ?? {};
-    /* browse implies showing: they asked what there is, so the database is
-       asked, whatever the model said about showMatches. */
-    const showMatches = parsed.showMatches === true || criteria.browse === true;
-    let more = typeof parsed.more === 'string' && parsed.more.trim() ? parsed.more.trim().slice(0, 600) : null;
-    let searched: { where: string | null; live: number; found: number; kinds: string } | null = null;
-    let suggestions = (Array.isArray(parsed.suggestions) ? parsed.suggestions : [])
-      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
-      .map((s) => s.trim().slice(0, 42))
-      .slice(0, 4);
-    // Guarantee suggestions never run dry — the model sometimes drops them a few
-    // turns in. Fall back to contextual chips based on what's still unknown.
-    if (suggestions.length === 0) suggestions = fallbackSuggestions(showMatches, criteria);
-
-    // Ground in the digital twin + rewrite the reply lifestyle-cost style.
-    let matches: Match[] = [];
-    if (showMatches) {
-      let found: { matches: Match[]; note: string | null } = { matches: [], note: null };
-      let searchFailed = false;
-      try {
-        found = await fetchMatchesRelaxed(criteria);
-      } catch (e) {
-        searchFailed = true;
-        console.error('listing search failed for ' + JSON.stringify(criteria.city ?? null) + ': ' + (e instanceof Error ? e.message : e));
-      }
-      matches = found.matches;
-      if (matches.length > 0) {
-        // [STAGED: give the advisor pass the price anchors + dream-board taste
-        // it needs for grounded price-context + trade-off WHYs. maxPrice/dealType
-        // let it frame "₦X under your ceiling"; dreamContext survives here even
-        // though slice(-4) would otherwise drop the mood-board note.]
-        const dreamNote = messages.find((m) => m.role === 'user' && m.content.startsWith('[Background from my Dream Home mood board'));
-        const advisorInput = JSON.stringify({
-          brief: criteria.brief ?? null,
-          profile: (criteria as { profile?: unknown }).profile ?? null,
-          maxPrice: criteria.maxPrice ?? null,
-          dealType: criteria.dealType ?? null,
-          criteria, // full stated-criteria object — gives the why-echo minBedrooms + city, not just price/deal
-          dream_board: dreamNote ? dreamNote.content : null,
-          search_note: found.note,
-          conversation_tail: messages.slice(-4),
-          /* The place they are measuring from, so the prose can name it. */
-          anchor: criteria.anchor ?? null,
-          matches: matches.map((m) => ({
-            id: m.id, title: m.title, deal: m.listingType, pricePeriod: m.pricePeriod,
-            price: m.price, bedrooms: m.bedrooms, city: m.city,
-            trustScore: m.trustScore, yieldPct: m.yieldPct, whatToWatch: m.whatToWatch,
-            neighbourhood: m.neighbourhood, room: m.room ?? null,
-            /* Off-plan or finished, instalments, units left, plots: the advisor
-               must never call an off-plan home ready to move into. */
-            terms: m.deal ?? null,
-            /* THE NUMBER THAT WAS MISSING. Every match carried latitude and
-               longitude and this payload dropped both, so the advisor pass was
-               handed an area name and asked to reason about proximity with it.
-               Straight-line km from the anchor, measured. Absent when no
-               anchor was named or it could not be placed -- and absent means
-               say nothing, never estimate. */
-            kmFromAnchor: m.kmFromAnchor ?? null,
-          })),
-        });
-        const second = await claude(key, ADVISOR_PROMPT, [{ role: 'user', content: advisorInput }], 900);
-        if (!('error' in second)) {
-          const adv = parseLoose(second.text) as { reply?: string; why?: Record<string, string> };
-          // Salvage from truncated/imperfect JSON rather than silently falling
-          // back to pass-1's one-line stub ("Pulling those up now").
-          const advReply = (typeof adv.reply === 'string' && adv.reply.trim()) ? adv.reply.trim() : salvageReply(second.text);
-          if (advReply) reply = advReply;
-          const whys = adv.why ?? salvageWhys(second.text);
-          if (whys) matches = matches.map((m) => ({ ...m, why: whys[m.id] ?? null }));
-        }
-      } else if (searchFailed) {
-        // We did not look, so we cannot say nothing fits. Say that instead.
-        reply = `${reply}\n\nOne honest note — I couldn't reach our listings just now, so I haven't checked yet. Ask me again in a moment and I'll pull them up.`;
-      } else if (criteria.city) {
-        /* THE HONEST ZERO-STATE, FROM THE DATABASE (Eden, 2026-10-03). It used
-           to say "nothing fits" and show nothing, even with a plot sitting in
-           the city. Now: if the place has anything live, say plainly what it
-           has and SHOW it; if it has nothing, say so and name where there is
-           something. No homes from another city. */
-        const place = parsePlace(criteria.city)?.name ?? criteria.city;
-        const here = inv ? rowsIn(inv, place) : [];
-        if (inv && here.length) {
-          let shown: Match[] = [];
-          try { shown = await fetchMatches({ city: criteria.city, browse: true }); } catch (_e) { shown = []; }
-          if (shown.length) {
-            matches = shown;
-            reply = criteria.browse
-              ? `Here is everything live in ${place}: ${describeRows(here)}.`
-              : `Nothing matching that in ${place} right now. What we do have there: ${describeRows(here)}.`;
-          } else {
-            reply = `I couldn't load the listings in ${place} just now. Try me again in a moment.`;
-          }
-        } else if (inv) {
-          reply = `We have nothing in ${place} yet.${liveCities && liveCities.length ? ' Right now we have listings in ' + liveCities.join(', ') + '.' : ''} Want me to alert you when something lands?`;
-        } else {
-          reply = `I couldn't check our listings just now, so I won't guess. Try me again in a moment.`;
-        }
-      } else {
-        // Guardrail: the model set showMatches without a city and the query
-        // returned nothing. Pass-1's prose at this point may read like a
-        // presentation of homes we never fetched — never let it stand. Replace
-        // it with an honest zero-state that asks for the one missing fact.
-        // (Contract note: city should always be set before showMatches; this is
-        // the safety net for when the model breaks that contract.)
-        // [Wording proposed by backend — pending toju-ai sign-off; DOCTRINE untouched.]
-        reply = `Before I show you homes, help me get one thing right — which city or area are we searching in? I only describe homes I've actually pulled from our listings, so I won't guess at properties until I know where we're looking.`;
-      }
-    }
-
-    if (showMatches && inv) {
-      const placeName = criteria.city ? (parsePlace(criteria.city)?.name ?? criteria.city) : null;
-      const here = rowsIn(inv, placeName);
-      searched = { where: placeName, live: here.length, found: matches.length, kinds: describeRows(here) };
-    }
-
-    /* PAST PRICES, NEVER A FORECAST (Eden, 2026-10-02). Asked whether prices
-       will rise, Tayo shows how they HAVE moved, from a web search, as a
-       small table -- Synapse is not licensed to forecast. */
+    /* Past prices, never a forecast (Eden, 2026-10-02): a table from a web search. */
     let priceHistory: PriceHistory | null = null;
-    const ph = parsed.priceHistory;
-    if (ph && typeof ph.area === 'string' && ph.area.trim()) {
-      priceHistory = await lookupPriceHistory(key, ph.area.trim().slice(0, 80),
-        typeof ph.city === 'string' ? ph.city.trim().slice(0, 60) : null,
-        ph.kind === 'rent' ? 'rent' : ph.kind === 'land' ? 'land' : 'sale');
-      if (!priceHistory) reply = `${reply}\n\nI couldn't pull reliable past prices for ${ph.area.trim()} just now. Ask me again in a bit.`;
+    const ph = u.priceHistory;
+    if (ph && ph.area) {
+      priceHistory = await lookupPriceHistory(key, ph.area, ph.city ?? null, ph.kind === 'rent' ? 'rent' : ph.kind === 'land' ? 'land' : 'sale');
     }
 
-    // Persist memory (fire-and-forget correctness is fine for the demo).
-    if (visitorId) {
-      const full = [...messages, { role: 'assistant' as const, content: reply }];
-      await saveSession(visitorId, full, showMatches ? criteria : undefined, showMatches ? matches : undefined);
-    }
-
-    /* SHORT, WITHOUT LOSING ANYTHING: when the model wrote a second paragraph
-       and put nothing in 'more', that paragraph is folded behind "More" -- unless
-       it is a question, which must stay where the buyer can see it. */
-    if (!more) {
-      const parts = reply.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
-      if (parts.length > 1 && !/\?\s*$/.test(parts[parts.length - 1])) {
-        reply = parts[0];
-        more = parts.slice(1).join('\n\n').slice(0, 600);
+    /* 4. SAY, and 5. CHECK. The reply is written from the evidence and read back against it. A reply that states
+       something the database did not say is sent back once with exactly what was wrong; if it fails again the
+       reply is built from the evidence alone, so it cannot be wrong. */
+    const respondInput = JSON.stringify({
+      brief, profile: { ...profile, asked: undefined, phone: profile.phone ? 'given' : null, email: profile.email ? 'given' : null },
+      evidence: evidenceForModel(ev, found), ask,
+      conversation_tail: messages.slice(-6), dream_board: dreamNote, listing_context: listingNote,
+      history: priceHistory ? 'A table of how prices there have moved is attached under your reply. Say once that you cannot forecast; do not quote its numbers.'
+        : (ph && ph.area ? 'You could not pull reliable past prices just now; say so.' : null),
+    });
+    let reply = '';
+    let more: string | null = null;
+    let whys: Record<string, string> = {};
+    let closed: string[] = ask.closed;
+    let accepted = false;
+    let problems: string[] = [];
+    let candidate = '';
+    for (let attempt = 0; attempt < 2 && !accepted; attempt++) {
+      const turn: Msg[] = attempt === 0
+        ? [{ role: 'user', content: respondInput }]
+        : [{ role: 'user', content: respondInput }, { role: 'assistant', content: JSON.stringify({ reply: candidate }) },
+          { role: 'user', content: 'That reply failed these checks: ' + problems.join(' | ') + ' Write it again so it passes every one, in the same JSON format.' }];
+      const out = await claude(key, RESPOND_PROMPT, turn, 1100);
+      if ('error' in out) { problems = [out.error]; break; }
+      const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
+      candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
+      problems = checkReply(candidate, ev, userText, brief);
+      if (ask.slot && !/\?/.test(candidate)) problems.push(`The reply must end with the one question to ask next: ${ask.hint}`);
+      if (!problems.length) {
+        accepted = true; reply = candidate;
+        more = typeof p.more === 'string' && p.more.trim() ? p.more.trim().slice(0, 400) : null;
+        whys = p.why ?? salvageWhys(out.text) ?? {};
       }
     }
-    suggestions = stageSuggestions({
-      criteria, showMatches, found: matches.length, hasHistory: !!priceHistory,
-      cities: liveCities ?? [], here: criteria.city && inv ? rowsIn(inv, parsePlace(criteria.city)?.name ?? criteria.city) : [],
-      modelSuggestions: suggestions,
-      lastUser: messages[messages.length - 1]?.content ?? '',
-    });
-    return json({ reply, more, showMatches, matches, suggestions, priceHistory, searched });
+    if (!accepted) {
+      console.error('reply refused by the evidence check: ' + problems.join(' | ').slice(0, 400));
+      reply = plainReply(ev, brief, ask); more = null; whys = {};
+    }
+    if (ask.slot) profile.asked[ask.slot] = (profile.asked[ask.slot] ?? 0) + 1;
+
+    const matches = showCards ? found.map((m) => ({ ...m, why: whys[m.id] ?? null })) : [];
+    let searched: { where: string | null; live: number; found: number; kinds: string } | null = null;
+    if (canSearch && inv) {
+      searched = { where: ev.place, live: ev.liveInPlace, found: found.length, kinds: describeRows(rowsIn(inv, ev.place)) };
+    }
+
+    // Persist memory every turn: what they want and who they are survive, whether or not cards were shown.
+    if (visitorId) {
+      await saveSession(visitorId, [...all, { role: 'assistant' as const, content: reply }], savedCriteria(brief, profile), showCards ? matches : undefined);
+    }
+
+    /* A closed question gets its answers as buttons; an open one gets none (Eden, 2026-10-05). */
+    return json({ reply, more, showMatches: showCards, matches, suggestions: closed, priceHistory, searched });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
 });
 
 // ── Claude helper ──
-async function claude(key: string, system: string, messages: Msg[], maxTokens: number):
+async function claude(key: string, system: string, messages: Msg[], maxTokens: number, model: string = MODEL):
   Promise<{ text: string } | { error: string }> {
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
     headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
   });
   if (!res.ok) return { error: `Anthropic ${res.status}: ${await res.text()}` };
   const data = (await res.json()) as { content?: { type: string; text?: string }[] };
@@ -1044,6 +688,7 @@ interface InvRow {
   city: string | null; state: string | null; area_name: string | null;
   property_type: string | null; listing_type: string | null;
   deal_structure: string | null; build_stage: string | null; min_investment: number | null;
+  price: number | null;
 }
 let INV_CACHE: { at: number; rows: InvRow[] } | null = null;
 async function liveInventory(): Promise<InvRow[] | null> {
@@ -1051,7 +696,7 @@ async function liveInventory(): Promise<InvRow[] | null> {
   const s = sb();
   if (!s) return null;
   const res = await fetch(
-    `${s.url}/rest/v1/properties?select=city,state,area_name,property_type,listing_type,deal_structure,build_stage,min_investment&${freshLiveConds().join('&')}&limit=1000`,
+    `${s.url}/rest/v1/properties?select=city,state,area_name,property_type,listing_type,deal_structure,build_stage,min_investment,price&${freshLiveConds().join('&')}&limit=1000`,
     { headers: s.headers },
   ).catch(() => null);
   if (!res || !res.ok) return null;
@@ -1112,43 +757,6 @@ ${lines.length ? lines.join('\n') : '- (nothing live)'}
 Nothing live anywhere for: ${none.join(', ') || '(every kind has something)'}.
 Investment products live now: ${inv.join(', ') || 'none'}.
 Never say a kind of listing exists, or does not exist, unless this says so. Never give a count that is not above. A place not listed has nothing.`;
-}
-
-/* SUGGESTIONS THAT BELONG TO THE STAGE (Eden, 2026-10-03: they were not
-   relevant to the conversation or its stage). Decided here from what is known,
-   not left to the model:
-     no place yet       -> places we have homes in
-     place, no purpose  -> what is actually live there
-     homes on screen    -> next steps about THOSE homes
-     nothing found      -> what to do about it
-   While Tayo is still asking an open question, its own answer-starters are
-   kept, minus any that ask about something already known. */
-function stageSuggestions(a: {
-  criteria: Criteria; showMatches: boolean; found: number; hasHistory: boolean;
-  cities: string[]; here: InvRow[]; modelSuggestions: string[]; lastUser: string;
-}): string[] {
-  const c = a.criteria;
-  const clip = (xs: string[]) => [...new Set(xs.map((x) => x.trim()).filter(Boolean))].map((x) => x.slice(0, 42)).slice(0, 4);
-  if (a.showMatches && a.found > 0) {
-    const land = c.propertyKind === 'land' || a.here.some((r) => r.property_type === 'land');
-    const out = ['Open the first one'];
-    if (a.found > 1) out.push('Which is the best value?');
-    out.push(land || c.intent === 'invest' ? 'How have prices moved here?' : 'What should I check first?');
-    out.push(a.found > 1 ? 'Show me cheaper options' : 'Is the price negotiable?');
-    return clip(out);
-  }
-  if (a.showMatches) return clip(['Alert me when one lands', a.here.length ? 'Show me what you do have' : 'Try another area', 'Widen my budget']);
-  const known = (t: string) =>
-    (c.dealType && /\b(rent|renting|buy|buying|purchase|shared)\b/i.test(t))
-    || (c.city && /\b(which|what) (area|city)\b|\bwhere\b/i.test(t));
-  const mine = a.modelSuggestions.filter((t) => !known(t) && t.trim().toLowerCase() !== a.lastUser.trim().toLowerCase());
-  if (mine.length >= 2) return clip(mine);
-  if (!c.city) return clip([...a.cities.slice(0, 3), 'Somewhere else']);
-  if (!c.dealType && !c.propertyKind) {
-    const kinds = [...new Set(a.here.map(invKind))].map((k) => k === 'land plot' ? 'Land to invest in' : k === 'home for sale' ? 'A home to buy' : k === 'home for rent' ? 'A place to rent' : k === 'shared room' ? 'A shared room' : 'A short-let');
-    return clip([...kinds, 'Something else']);
-  }
-  return clip(['Show me what you have', 'Tell me more about the area', 'Not sure yet']);
 }
 
 function sb() {
@@ -1237,6 +845,7 @@ interface Criteria {
   anchor?: string | null;
   dealType?: string | null;   // rent | buy | shared
   maxPrice?: number | null;   // annual rent when renting, total price when buying
+  minPrice?: number | null;   // a floor, when they gave a range
   minBedrooms?: number | null;
   intent?: string | null;
   propertyKind?: string | null;   // land | home | commercial
@@ -1299,65 +908,154 @@ interface Match {
   } | null;
 }
 
-/**
- * Progressive relaxation — Tayo must always have SOMETHING honest to show:
- *  1. exact brief → 2. relax size → 3. relax budget (same city)
- *  3b. "Agbowo, <somewhere no listing names>" — drop the part we cannot check
- *  4. the named place may be an AREA, not a city (e.g. "Lekki", "Wuse") —
- *     resolve it against neighbourhoods and retry with the real city
- * The DEAL TYPE never relaxes, and neither does the CITY.
- */
-async function fetchMatchesRelaxed(c: Criteria): Promise<{ matches: Match[]; note: string | null }> {
-  const r = await relaxWithinCity(c);
-  if (r.matches.length > 0) return r;
+/* ───────────────────────── LOOK: what the database says ─────────────────────────
+   Every time the person is talking about homes, the database is read: not when the
+   model feels like it. The result is the EVIDENCE the reply is written from and
+   checked against (facts.ts). Nothing here relaxes the person's budget behind their
+   back: a home outside it is shown only as what it is, labelled, when nothing sits
+   inside. The DEAL TYPE never relaxes, and neither does the place. */
 
-  const place = parsePlace(c.city);
-  if (place) {
-    /* A containing place that no live listing names at all ("Agbowo,
-       University of Ibadan", "Bodija, Ibadan North") cannot tell one listing
-       from another; it can only rule every one of them out. Search without
-       it. One that DOES name listings stays binding: nothing in "GRA, Ibadan"
-       is the answer, not Ikeja GRA. A count that fails keeps it binding. */
-    const counts = await Promise.all(
-      place.within.map((w) => countBy([...freshLiveConds(), `and=(${anyOf(WITHIN_COLS, w)})`])));
-    const known = place.within.filter((_, i) => counts[i] !== 0);
-    if (known.length < place.within.length) {
-      const unknown = place.within.filter((_, i) => counts[i] === 0);
-      const r1 = await relaxWithinCity({ ...c, city: [place.name, ...known].join(', ') });
-      if (r1.matches.length > 0) {
-        return { matches: r1.matches, note: `no listing names "${unknown.join(', ')}", so this is ${place.name} without it${r1.note ? '; ' + r1.note : ''}` };
-      }
-    }
-
-    const realCity = await resolveAreaToCity(place.name);
-    if (realCity && realCity.toLowerCase() !== place.name.toLowerCase()
-        // If they named the city themselves, that is the only one it may be.
-        && (!known.length || known.some((w) => w.toLowerCase().includes(realCity.toLowerCase())))) {
-      const r2 = await relaxWithinCity({ ...c, city: realCity });
-      if (r2.matches.length > 0) {
-        return { matches: r2.matches, note: `"${place.name}" is an area in ${realCity}${r2.note ? '; ' + r2.note : ''}` };
-      }
-    }
-    // No cross-city stage. Dropping the city filter used to return homes from
-    // anywhere, so someone who asked for Lagos got Ibadan with an apology --
-    // and the honest zero-state below could never be reached. If their city
-    // has nothing, saying so is the answer.
-  }
-  return { matches: [], note: null };
+function critOf(b: Brief): Criteria {
+  /* Land is bought. A place with no kind and no deal yet is browsed: everything live there. */
+  const deal = b.dealType ?? (b.propertyKind === 'land' ? 'buy' : null);
+  return {
+    city: b.place, anchor: b.anchor, dealType: deal, minBedrooms: b.minBedrooms, intent: b.intent,
+    propertyKind: b.propertyKind, stage: b.stage, paymentPlan: b.paymentPlan,
+    browse: b.browse || (!deal && b.propertyKind !== 'land'),
+  };
 }
 
-async function relaxWithinCity(c: Criteria): Promise<{ matches: Match[]; note: string | null }> {
-  let m = await fetchMatches(c);
-  if (m.length > 0) return { matches: m, note: null };
-  if (c.minBedrooms) {
-    m = await fetchMatches({ ...c, minBedrooms: null });
-    if (m.length > 0) return { matches: m, note: 'no exact-size fit — showing the closest sizes' };
+function kindLabelOf(b: Brief): string {
+  if (b.propertyKind === 'land') return 'land plots';
+  if (b.propertyKind === 'commercial') return 'commercial properties';
+  if (b.dealType === 'shared') return 'shared rooms';
+  if (b.dealType === 'rent') return 'homes for rent';
+  if (b.dealType === 'buy') return 'homes for sale';
+  return 'listings';
+}
+
+/** Does a live row (from the inventory) belong to the kind this brief asks for? */
+function invMatchesBrief(r: InvRow, b: Brief): boolean {
+  if (b.browse || (!b.dealType && !b.propertyKind)) return true;
+  if (b.propertyKind === 'land') return r.property_type === 'land';
+  if (b.propertyKind === 'commercial') return r.property_type === 'commercial';
+  if (b.dealType === 'shared') return r.property_type === 'shared';
+  const isHome = r.property_type !== 'land' && r.property_type !== 'commercial' && r.property_type !== 'shared';
+  if (b.dealType === 'rent') return isHome && r.listing_type === 'rent';
+  if (b.dealType === 'buy') return isHome && r.listing_type === 'sale';
+  return true;
+}
+
+const matchKind = (m: Match): string => {
+  const t = String(m.deal?.propertyType ?? '');
+  return t === 'land' ? 'land' : t === 'shared' ? 'shared room' : t === 'commercial' ? 'commercial' : m.listingType === 'rent' ? 'rental' : 'home for sale';
+};
+
+async function buildEvidence(b: Brief, inv: InvRow[] | null): Promise<{ ev: Evidence; matches: Match[] }> {
+  const place = b.place ? (parsePlace(b.place)?.name ?? b.place) : null;
+  const base: Evidence = {
+    checked: false, place, kindLabel: kindLabelOf(b), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
+    budget: { min: b.minPrice, max: b.maxPrice }, exactTotal: 0, role: 'none', shown: [], otherPlaces: [], note: null,
+  };
+  if (!inv) return { ev: base, matches: [] };
+
+  const here = rowsIn(inv, place);
+  const crit = critOf(b);
+  const lo = b.minPrice, hi = b.maxPrice;
+  const hasBudget = !crit.browse && (!!lo || !!hi);
+  let matches: Match[] = [];
+  let role: Evidence['role'] = 'none';
+  let exactTotal = 0, sameKind = 0;
+  let priceRange: Evidence['priceRange'] = null;
+  let note: string | null = null;
+  try {
+    const exact = await fetchMatches(crit, { minPrice: lo, maxPrice: hi });
+    exactTotal = exact.total; matches = exact.matches;
+    if (matches.length) role = 'exact';
+
+    /* Everything of this kind in this place, whatever it costs: its real price range, and the pool the nearest
+       home is chosen from when nothing is inside the budget. */
+    const all = hasBudget ? await fetchMatches(crit, { minPrice: null, maxPrice: null, limit: 60 }) : exact;
+    sameKind = all.total;
+    const prices = all.matches.map((m) => m.price).filter((p) => p > 0);
+    if (prices.length) priceRange = { min: Math.min(...prices), max: Math.max(...prices) };
+
+    if (!matches.length && hasBudget && all.matches.length) {
+      if (hi) {
+        const s = await fetchMatches(crit, { minPrice: lo, maxPrice: Math.round(hi * 1.15) });
+        if (s.matches.length) { matches = s.matches; role = 'stretch'; note = 'slightly over the ceiling (inside the 15% worth-it stretch)'; }
+      }
+      if (!matches.length) {
+        const dist = (m: Match) => (hi && m.price > hi ? m.price - hi : lo && m.price < lo ? lo - m.price : 0);
+        matches = all.matches.slice().sort((x, y) => dist(x) - dist(y)).slice(0, 2);
+        role = 'closest'; note = 'nothing is inside the budget; these are the nearest by price';
+      }
+    }
+  } catch (e) {
+    console.error('evidence search failed: ' + (e instanceof Error ? e.message : e));
+    return { ev: base, matches: [] };
   }
-  if (c.maxPrice) {
-    m = await fetchMatches({ ...c, maxPrice: null, minBedrooms: null });
-    if (m.length > 0) return { matches: m, note: 'nothing inside budget — showing the closest available; be upfront about prices' };
+
+  const otherPlaces: Evidence['otherPlaces'] = [];
+  if (sameKind === 0) {
+    const by = new Map<string, number>();
+    for (const r of inv) if (invMatchesBrief(r, b) && r.city) by.set(r.city, (by.get(r.city) ?? 0) + 1);
+    for (const [p, n] of [...by.entries()].sort((x, y) => y[1] - x[1]).slice(0, 5)) otherPlaces.push({ place: p, count: n });
   }
-  return { matches: [], note: null };
+
+  const ev: Evidence = {
+    ...base, checked: true, liveInPlace: here.length, sameKindInPlace: sameKind, priceRange, exactTotal, role, note, otherPlaces,
+    shown: matches.map((m) => ({
+      id: m.id, title: m.title, price: m.price, period: m.pricePeriod, area: m.neighbourhood?.name ?? null, bedrooms: m.bedrooms, kind: matchKind(m),
+    })),
+  };
+  return { ev, matches };
+}
+
+/** What the reply-writing model is shown: facts, each with its price already worded. */
+function evidenceForModel(ev: Evidence, matches: Match[]) {
+  return {
+    checked: ev.checked, place: ev.place, kind: ev.kindLabel, liveInPlace: ev.liveInPlace, sameKindInPlace: ev.sameKindInPlace,
+    priceRange: ev.priceRange ? { lowest: naira(ev.priceRange.min), highest: naira(ev.priceRange.max) } : null,
+    budget: { min: ev.budget.min ? naira(ev.budget.min) : null, max: ev.budget.max ? naira(ev.budget.max) : null },
+    exactTotal: ev.exactTotal, role: ev.role, note: ev.note, otherPlaces: ev.otherPlaces,
+    shown: matches.map((m) => ({
+      id: m.id, title: m.title, priceText: naira(m.price) + (m.listingType === 'rent' ? ' per year' : ''), price: m.price,
+      area: m.neighbourhood?.name ?? null, city: m.city, bedrooms: m.bedrooms, kind: matchKind(m), verified: m.verified,
+      terms: m.deal ?? null, kmFromAnchor: m.kmFromAnchor ?? null, room: m.room ?? null, whatToWatch: m.whatToWatch,
+      yieldPct: m.yieldPct,
+      versusBudget: ev.budget.max && m.price > ev.budget.max ? `${naira(m.price - ev.budget.max)} over the ceiling`
+        : ev.budget.min && m.price < ev.budget.min ? `${naira(ev.budget.min - m.price)} under the floor` : 'inside the budget',
+    })),
+  };
+}
+
+function briefSentence(b: Brief): string {
+  const kind = b.propertyKind === 'land' ? (b.intent === 'invest' ? 'Investing in land' : 'Buying land')
+    : b.dealType === 'rent' ? 'Renting' : b.dealType === 'shared' ? 'A shared room' : b.dealType === 'buy' ? 'Buying a home' : 'Looking';
+  const bud = b.minPrice && b.maxPrice ? ` between ${naira(b.minPrice)} and ${naira(b.maxPrice)}` : b.maxPrice ? ` up to ${naira(b.maxPrice)}` : b.minPrice ? ` from ${naira(b.minPrice)}` : '';
+  return `${kind}${b.place ? ' in ' + b.place : ''}${bud}.`;
+}
+
+/** What is kept for the visitor. The old keys stay so "Your matches" and older pages read it unchanged. */
+function savedCriteria(b: Brief, p: Profile): Record<string, unknown> {
+  return {
+    city: b.place, anchor: b.anchor, dealType: b.dealType, maxPrice: b.maxPrice, minPrice: b.minPrice, minBedrooms: b.minBedrooms,
+    intent: b.intent, propertyKind: b.propertyKind, browse: b.browse, stage: b.stage, paymentPlan: b.paymentPlan,
+    brief: b.place || b.dealType || b.propertyKind ? briefSentence(b) : null,
+    profile: { household: p.household, work: p.work, transport: p.transport, lifestyle: p.lifestyle, name: p.name, timeline: p.timeline, purpose: p.purpose },
+    _v2: { brief: b, profile: p },
+  };
+}
+
+/** UNDERSTAND: the model reads the message and returns data. If it fails, the message is treated as chat and
+ *  nothing about the person changes: never a guess. */
+async function understand(key: string, tail: Msg[], brief: Brief, profile: Profile, cities: string[] | null): Promise<Understood> {
+  const known = { brief, profile: { ...profile, asked: undefined } };
+  const input = JSON.stringify({ conversation: tail.slice(-8), known, listings_in: cities ?? [] });
+  const out = await claude(key, UNDERSTAND_PROMPT, [{ role: 'user', content: input }], 700, UNDERSTAND_MODEL);
+  if ('error' in out) return readUnderstood({});
+  return readUnderstood(parseLoose(out.text));
 }
 
 /** "Lekki" / "Wuse" / "Ugbowo" → the city whose neighbourhood matches. */
@@ -1579,9 +1277,15 @@ function placeCond(p: Place): string {
 }
 
 /** Live listings + enrichment + the neighbourhood NAME. */
-async function fetchMatches(c: Criteria): Promise<Match[]> {
+interface SearchOpts {
+  /** Overrides the brief's floor/ceiling for this one query (null = none). */
+  minPrice?: number | null; maxPrice?: number | null;
+  /** How many rows to return; the default is the number of cards. */
+  limit?: number;
+}
+async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches: Match[]; total: number }> {
   const s = sb();
-  if (!s) return [];
+  if (!s) return { matches: [], total: 0 };
 
   const intent = (c.intent ?? 'live') as string;
   const shared = c.dealType === 'shared';
@@ -1625,7 +1329,13 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      the Area field the agent fills in, stored since 20260927160000. */
   const place = parsePlace(c.city);
   if (place) conds.push(placeCond(place));
-  if (!c.browse && typeof c.maxPrice === 'number' && c.maxPrice > 0) conds.push(`price=lte.${Math.round(c.maxPrice * 1.15)}`); // allow the worth-it stretch
+  /* THE BUDGET IS EXACT HERE. It used to quietly allow 15% over the ceiling and had no floor, so "between 3 and 5
+     million" returned a 1.5m plot and the reply then said it was out of range. A stretch above the ceiling is now its
+     own, labelled query (buildEvidence), never mixed into what fits. */
+  const hi = o.maxPrice !== undefined ? o.maxPrice : c.maxPrice;
+  const lo = o.minPrice !== undefined ? o.minPrice : c.minPrice;
+  if (!c.browse && typeof hi === 'number' && hi > 0) conds.push(`price=lte.${Math.round(hi)}`);
+  if (!c.browse && typeof lo === 'number' && lo > 0) conds.push(`price=gte.${Math.round(lo)}`);
   if (!c.browse && typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
@@ -1676,19 +1386,22 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      signal here that is both present and asked for. */
   // The city filter there means the city: the most general part of the place.
   const anchor = await resolveAnchor(c.anchor, place ? (place.within[place.within.length - 1] ?? place.name) : null);
-  const wanted = anchor ? 60 : MAX_MATCHES;
+  const cards = o.limit ?? MAX_MATCHES;
+  const wanted = anchor ? Math.max(60, cards) : cards;
   const q =
     `${s.url}/rest/v1/properties?select=${select}&${conds.join('&')}` +
     `&order=property_enrichment(${fitCol}).desc.nullslast,trust_score.desc&limit=${wanted}`;
 
-  const res = await fetch(q, { headers: s.headers });
+  const res = await fetch(q, { headers: { ...s.headers, Prefer: 'count=exact' } });
   /* A SEARCH THAT FAILED HAS NOT LOOKED. This returned [] on any error, so a
      400 went on through every relaxation stage and came out as "nothing fits
      that brief yet": a claim about the inventory, made without reading it.
      Throw instead, and let the handler say what actually happened. */
   if (!res.ok) throw new Error(`properties search ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`);
   const rows = (await res.json()) as Array<Record<string, unknown>>;
-  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(rows)) return { matches: [], total: 0 };
+  const totalRaw = Number(res.headers.get('content-range')?.split('/')[1]);
+  const total = Number.isFinite(totalRaw) ? totalRaw : rows.length;
 
   /* Annotated, not inferred. The literal below does not set kmFromAnchor,
      so an inferred type would not have the property and assigning it a few
@@ -1764,7 +1477,7 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
      With one: measure every candidate, drop the ones we cannot measure (a
      home with no coordinates cannot be ranked on distance and must not be
      silently treated as far away), nearest first, then trim. */
-  if (!anchor) return built.slice(0, MAX_MATCHES);
+  if (!anchor) return { matches: built.slice(0, cards), total };
 
   const placed = built.filter((m) => m.latitude != null && m.longitude != null);
   const unplaced = built.filter((m) => m.latitude == null || m.longitude == null);
@@ -1775,7 +1488,7 @@ async function fetchMatches(c: Criteria): Promise<Match[]> {
   /* Unplaced homes go last rather than away: they still match the brief, and
      dropping a listing because an agency skipped a map pin would hide it for
      a reason the buyer never asked about. */
-  return placed.concat(unplaced).slice(0, MAX_MATCHES);
+  return { matches: placed.concat(unplaced).slice(0, cards), total };
 }
 
 /** Pull a named string field out of truncated/broken JSON. */
@@ -1807,13 +1520,6 @@ function salvageWhys(raw: string): Record<string, string> | null {
     out[m[1]] = m[2].replace(/\\"/g, '"').trim();
   }
   return Object.keys(out).length ? out : null;
-}
-
-/** Neutral, always-safe chips for when the model omits its own — these read
- * fine after ANY question, so they never contradict what was just asked. */
-function fallbackSuggestions(showMatches: boolean, _c: Criteria): string[] {
-  if (showMatches) return ['Show cheaper options', 'Tell me about the first', 'Why these areas?'];
-  return ['Not sure — you advise', 'Skip ahead to homes', 'Tell me more first'];
 }
 
 function parseLoose(raw: string): Record<string, unknown> {
