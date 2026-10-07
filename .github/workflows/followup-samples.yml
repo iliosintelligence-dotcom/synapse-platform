@@ -1,0 +1,21 @@
+# Sends every follow-up email once, to the account owner only, from the real sender.
+name: Send sample follow-up emails
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          REF=bhrhejpekmhbhwryjhgk
+          KEY=$(curl -sS "https://api.supabase.com/v1/projects/$REF/api-keys?reveal=true" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | jq -r '.[] | select(.name=="service_role") | .api_key' | head -1)
+          [ -n "$KEY" ] && [ "$KEY" != null ] || { echo "::error::could not read the service key"; exit 1; }
+          echo "::add-mask::$KEY"
+          curl -sS -X POST "https://$REF.supabase.co/functions/v1/lifecycle-followup" \
+            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"action":"samples"}' | tee /tmp/out
+          echo
+          jq -e '.sent > 0' /tmp/out >/dev/null

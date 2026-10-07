@@ -117,6 +117,22 @@ Deno.serve(async (req: Request) => {
       body: JSON.stringify({ from: 'onboarding@resend.dev', to: [REPLY_TO], subject: 'Synapse follow-up emails: test', html: '<p>The email key works. Follow-ups start once the sending domain is verified.</p>' }) });
     return json({ ok: r.ok, status: r.status, body: (await r.text().catch(() => '')).slice(0, 300) });
   }
+  /* Every email, once, to the account owner only, from the real sender: proof that the key, the domain and each template work. */
+  if (body.action === 'samples') {
+    const k = Deno.env.get('RESEND_API_KEY'), f = Deno.env.get('FOLLOWUP_FROM');
+    if (!k || !f) return json({ error: 'RESEND_API_KEY and FOLLOWUP_FROM must both be set' }, 400);
+    const kinds = ['a_welcome', 'a_listing', 'a_team', 'a_verify', 'a_social', 'a_proximity', 'a_checkin', 'b_welcome', 'b_tayo', 'b_alerts'];
+    const out: Array<{ kind: string; ok: boolean; detail: string }> = [];
+    for (const kind of kinds) {
+      const m = mail(kind, 'Eden'); if (!m) continue;
+      const { html, text } = render({ ...m, subject: m.subject }, SITE + '/privacy');
+      const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${k}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: f, to: [REPLY_TO], reply_to: REPLY_TO, subject: '[Sample] ' + m.subject, html, text }) });
+      out.push({ kind, ok: r.ok, detail: r.ok ? '' : `HTTP ${r.status} ${(await r.text().catch(() => '')).slice(0, 200)}` });
+      await new Promise((res) => setTimeout(res, 600));
+    }
+    return json({ sent: out.filter((x) => x.ok).length, results: out });
+  }
   if (body.action !== 'send_due') return json({ error: 'Unknown action' }, 400);
 
   const { data: due, error } = await admin.rpc('lifecycle_due', { p_limit: 40 });
