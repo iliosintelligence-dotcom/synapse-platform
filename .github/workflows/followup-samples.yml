@@ -12,7 +12,10 @@ jobs:
         run: |
           set -euo pipefail
           REF=bhrhejpekmhbhwryjhgk
-          KEY=$(curl -sS "https://api.supabase.com/v1/projects/$REF/api-keys?reveal=true" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | jq -r '.[] | select(.name=="service_role") | .api_key' | head -1)
+          curl -sS "https://api.supabase.com/v1/projects/$REF/api-keys?reveal=true" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" > /tmp/keys
+          echo "key entries (names and types only):"; jq -r '.[] | "\(.name) \(.type // "-") \((.api_key|length))"' /tmp/keys
+          # The function compares against its SUPABASE_SERVICE_ROLE_KEY, the legacy JWT: pick that one.
+          KEY=$(jq -r '[.[] | select(.name=="service_role" and ((.api_key|startswith("eyJ"))))][0].api_key // empty' /tmp/keys)
           [ -n "$KEY" ] && [ "$KEY" != null ] || { echo "::error::could not read the service key"; exit 1; }
           echo "::add-mask::$KEY"
           curl -sS -X POST "https://$REF.supabase.co/functions/v1/lifecycle-followup" \
