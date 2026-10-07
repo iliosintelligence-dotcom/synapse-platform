@@ -53,6 +53,12 @@ function mail(kind: string, name: string): Mail | null {
     case 'a_social': return { subject: 'Let your listings post themselves', lead: hi, cta: 'Connect my accounts', href: `${SITE}/app/agency.html#social`, body: [
       'Connect Instagram, Facebook or another account once, and your listings can go out to your followers with a link that credits the post when a buyer enquires.',
       'Then you can see which post actually produced which deal, and spend on what sells.'] };
+    case 'a_team': return { subject: 'Add your agents to Synapse', lead: hi, cta: 'Add my team', href: `${SITE}/app/agency.html#agents`, body: [
+      'You are the only person on your agency here. Agencies get more from Synapse when the agents who handle the enquiries are on it too.',
+      'Add each agent from the Agents page: they can post listings and social posts for the agency, and each lead is traced to the agent who handles it, so you can see who is closing and who needs help.'] };
+    case 'a_proximity': return { subject: 'Reach buyers who are standing near your listing', lead: hi, cta: 'See proximity marketing', href: `${SITE}/app/agency.html#marketing`, body: [
+      'Proximity marketing tells buyers about a home when they are physically near it. It only reaches people who have turned on alerts and whose brief matches your listing, and each person is told about a given home once, with daily limits, so it never becomes noise.',
+      'Verified listings are offered first, so getting your Verified badge puts you at the front. Open Marketing in your portal to switch it on for a listing.'] };
     case 'a_checkin': return { subject: 'How is Synapse working for you?', lead: hi, cta: 'Open your portal', href: `${SITE}/app/agency.html`, body: [
       'You have been on Synapse for two weeks. What is working, and what is getting in your way?',
       'Just reply to this email. Every reply is read, and the things agencies tell us are what we build next.'] };
