@@ -136,3 +136,9 @@ verify_jwt = true
 
 [functions.synapse-studio]
 verify_jwt = true
+
+# The follow-up emails after registering. Open because the unsubscribe link in
+# every email is a plain GET with no sign-in; the sending action refuses anything
+# that is not the service role.
+[functions.lifecycle-followup]
+verify_jwt = false
