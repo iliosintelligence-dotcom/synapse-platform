@@ -104,6 +104,13 @@ Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
   if (!isServiceCall(req, serviceKey)) return json({ error: 'Not allowed' }, 403);
   const body = await req.json().catch(() => ({})) as { action?: string };
+  /* One test email to the account owner, from the provider's own test sender, which works before any domain is verified. */
+  if (body.action === 'test') {
+    const k = Deno.env.get('RESEND_API_KEY'); if (!k) return json({ error: 'RESEND_API_KEY is not set' }, 400);
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${k}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'onboarding@resend.dev', to: [REPLY_TO], subject: 'Synapse follow-up emails: test', html: '<p>The email key works. Follow-ups start once the sending domain is verified.</p>' }) });
+    return json({ ok: r.ok, status: r.status, body: (await r.text().catch(() => '')).slice(0, 300) });
+  }
   if (body.action !== 'send_due') return json({ error: 'Unknown action' }, 400);
 
   const { data: due, error } = await admin.rpc('lifecycle_due', { p_limit: 40 });
@@ -112,7 +119,10 @@ Deno.serve(async (req: Request) => {
 
   const key = Deno.env.get('RESEND_API_KEY');
   if (!key) return json({ configured: false, due: rows.length, note: 'No email provider key is set (RESEND_API_KEY), so nothing was sent.' });
-  const from = Deno.env.get('FOLLOWUP_FROM') || 'Synapse <hello@synapsecore.dev>';
+  /* No default sender: until the domain is verified with the provider, mail to anyone but the account owner is refused,
+     and every refusal would use up one of a person's three tries. Sending starts when FOLLOWUP_FROM is set. */
+  const from = Deno.env.get('FOLLOWUP_FROM');
+  if (!from) return json({ configured: false, due: rows.length, note: 'The email key is set but FOLLOWUP_FROM is not, so nothing was sent. Verify the sending domain, then set FOLLOWUP_FROM.' });
 
   let sent = 0, failed = 0;
   for (const r of rows) {
