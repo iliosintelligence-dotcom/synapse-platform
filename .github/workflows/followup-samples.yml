@@ -15,10 +15,11 @@ jobs:
           curl -sS "https://api.supabase.com/v1/projects/$REF/api-keys?reveal=true" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" > /tmp/keys
           echo "key entries (names and types only):"; jq -r '.[] | "\(.name) \(.type // "-") \((.api_key|length))"' /tmp/keys
           # The function compares against its SUPABASE_SERVICE_ROLE_KEY, the legacy JWT: pick that one.
-          KEY=$(jq -r '[.[] | select(.name=="service_role" and ((.api_key|startswith("eyJ"))))][0].api_key // empty' /tmp/keys)
-          [ -n "$KEY" ] && [ "$KEY" != null ] || { echo "::error::could not read the service key"; exit 1; }
-          echo "::add-mask::$KEY"
-          curl -sS -X POST "https://$REF.supabase.co/functions/v1/lifecycle-followup" \
-            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"action":"samples"}' | tee /tmp/out
-          echo
+          # Try each key the project has; the function accepts the one it was started with.
+          for K in $(jq -r '.[] | select(.name=="service_role" or .type=="secret") | .api_key' /tmp/keys); do
+            echo "::add-mask::$K"
+            code=$(curl -sS -o /tmp/out -w '%{http_code}' -X POST "https://$REF.supabase.co/functions/v1/lifecycle-followup"               -H "Authorization: Bearer $K" -H "apikey: $K" -H "Content-Type: application/json" -d '{"action":"samples"}')
+            echo "HTTP $code (key of length ${#K})"; cat /tmp/out; echo
+            [ "$code" = 200 ] && break
+          done
           jq -e '.sent > 0' /tmp/out >/dev/null
