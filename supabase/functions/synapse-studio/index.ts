@@ -297,13 +297,23 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
   const ids = (Array.isArray(b.channel_ids) ? b.channel_ids : []).map(String);
   if (!ids.length) return json({ error: 'Choose at least one channel.' }, 400);
 
-  let at = new Date();
-  if (b.scheduled_at) {
-    const d = new Date(String(b.scheduled_at));
-    if (Number.isNaN(d.getTime())) return json({ error: 'That date is not valid.' }, 400);
+  /* One time, or several: the same post goes out at each of them, on every channel chosen. */
+  const stamps: unknown[] = Array.isArray(b.scheduled_times) && b.scheduled_times.length ? b.scheduled_times : (b.scheduled_at ? [b.scheduled_at] : [null]);
+  if (stamps.length > 30) return json({ error: 'Thirty times at most in one go.' }, 400);
+  const times: Date[] = [];
+  for (const raw of stamps) {
+    if (raw === null) { times.push(new Date()); continue; }
+    const d = new Date(String(raw));
+    if (Number.isNaN(d.getTime())) return json({ error: 'One of the dates is not valid.' }, 400);
     if (d.getTime() > Date.now() + 90 * 86400e3) return json({ error: 'Schedule within the next 90 days.' }, 400);
-    at = d.getTime() < Date.now() ? new Date() : d;
+    times.push(d.getTime() < Date.now() ? new Date() : d);
   }
+  /* The same minute twice would send the same post twice, to the same account. */
+  const seen = new Set<number>();
+  const uniq = times.filter((d) => { const k = Math.floor(d.getTime() / 60000); if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((x, y) => x.getTime() - y.getTime());
+  if (uniq.length * ids.length > 200) return json({ error: 'That is more than 200 posts at once. Use fewer times or fewer accounts.' }, 400);
+  const at = uniq[0];
 
   const { data: chans } = await admin.from('city_channels')
     .select('id, platform, label, handle, trypost_account_id, is_active').in('id', ids);
@@ -323,14 +333,16 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
       return json({ error: `${name} cannot take a video from here yet. Only YouTube does. Remove the video, or untick ${name}.` }, 400);
     }
     if (NEEDS_MEDIA.has(p) && !media.length) return json({ error: `${LABEL[p] ?? p} needs a picture. Add one, or untick ${name}.` }, 400);
-    rows.push({
-      group_id: group, channel_id: id, platform: p, caption, media_urls: media,
-      status: 'scheduled', scheduled_at: at.toISOString(), created_by: uid,
-    });
+    for (const when of uniq) {
+      rows.push({
+        group_id: group, channel_id: id, platform: p, caption, media_urls: media,
+        status: 'scheduled', scheduled_at: when.toISOString(), created_by: uid,
+      });
+    }
   }
   const { error } = await admin.from('synapse_posts').insert(rows);
   if (error) return json({ error: error.message }, 400);
-  return json({ ok: true, count: rows.length, group_id: group, at: at.toISOString() });
+  return json({ ok: true, count: rows.length, times: uniq.length, group_id: group, at: at.toISOString() });
 }
 
 async function posts(admin: Admin): Promise<Response> {
@@ -342,6 +354,15 @@ async function posts(admin: Admin): Promise<Response> {
 }
 
 async function postCancel(admin: Admin, b: Row): Promise<Response> {
+  /* A whole batch (everything one Create made, at every time and on every account) can be stopped at once. */
+  const group = String(b.group_id ?? '');
+  if (group) {
+    const { data, error } = await admin.from('synapse_posts').update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('group_id', group).eq('status', 'scheduled').select('id');
+    if (error) return json({ error: error.message }, 400);
+    if (!(data ?? []).length) return json({ error: 'Nothing in that batch is still waiting to go out.' }, 409);
+    return json({ ok: true, stopped: (data ?? []).length });
+  }
   const id = String(b.id ?? '');
   const { data, error } = await admin.from('synapse_posts').update({ status: 'cancelled', updated_at: new Date().toISOString() })
     .eq('id', id).eq('status', 'scheduled').select('id');
