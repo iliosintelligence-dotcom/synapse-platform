@@ -20,7 +20,7 @@
  * can add it as a channel.
  *
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
- * TRYPOST_URL, TRYPOST_API_KEY, ANTHROPIC_API_KEY (captions only).
+ * TRYPOST_URL, TRYPOST_API_KEY, GEMINI_API_KEY (captions only).
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
@@ -30,6 +30,8 @@ type Row = Record<string, unknown>;
 
 const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
 const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_MODEL = Deno.env.get('STUDIO_GEMINI_MODEL') ?? 'gemini-2.5-flash';
 const trypostOn = () => Boolean(TRYPOST_URL && TRYPOST_KEY);
 const tpHeaders = () => ({
   Authorization: 'Bearer ' + TRYPOST_KEY, 'Content-Type': 'application/json', Accept: 'application/json',
@@ -374,7 +376,7 @@ async function postCancel(admin: Admin, b: Row): Promise<Response> {
 /* ── captions ──────────────────────────────────────────────────────────── */
 
 async function suggestCaption(b: Row): Promise<Response> {
-  const key = Deno.env.get('ANTHROPIC_API_KEY');
+  const key = Deno.env.get('GEMINI_API_KEY');
   if (!key) return json({ error: 'Caption help is not switched on.' }, 503);
   const brief = String(b.brief ?? '').trim().slice(0, 800);
   if (!brief) return json({ error: 'Say what the post is about.' }, 400);
@@ -386,17 +388,24 @@ async function suggestCaption(b: Row): Promise<Response> {
     + 'Write for ' + platform + '. Return ONLY a JSON array of exactly three different caption strings.';
   let res: Response;
   try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
+    res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
       method: 'POST',
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-sonnet-5-5', max_tokens: 900, system,
-        messages: [{ role: 'user', content: 'The post is about: ' + brief }],
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: 'The post is about: ' + brief }] }],
+        generationConfig: {
+          maxOutputTokens: 900,
+          temperature: 0.55,
+          responseMimeType: 'application/json',
+          responseSchema: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3 },
+        },
       }),
     });
   } catch { return json({ error: 'Could not reach the caption writer. Try again.' }, 502); }
   const data = await res.json().catch(() => ({})) as Row;
-  const text = ((data.content as Row[] | undefined)?.[0]?.text as string | undefined) ?? '';
+  const text = (((data.candidates as Row[] | undefined)?.[0]?.content as Row | undefined)?.parts as Row[] | undefined)
+    ?.map((p) => String(p.text ?? '')).join('') ?? '';
   const m = text.match(/\[[\s\S]*\]/);
   let options: string[] = [];
   try { options = (JSON.parse(m ? m[0] : '[]') as unknown[]).map(String).filter(Boolean).slice(0, 3); } catch { /* fall through */ }

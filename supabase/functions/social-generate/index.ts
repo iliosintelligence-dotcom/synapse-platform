@@ -1,7 +1,7 @@
 /**
  * social-generate — AI caption generation for Synapse social syndication.
  *
- * Given a verified listing + the channels an agency wants to post to, Claude
+ * Given a verified listing + the channels an agency wants to post to, Gemini
  * writes a caption for each (Instagram, TikTok, YouTube, Facebook, WhatsApp
  * Status), plus hashtags and a recommended lead channel.
  *
@@ -37,11 +37,10 @@
  *        recommendedChannel: string, note: string, anglesUsed: string[] }
  *
  * Deployed with verify_jwt = false so the static prototype can call it.
- * Env: ANTHROPIC_API_KEY.
+ * Env: GEMINI_API_KEY.
  */
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
-const MODEL = 'claude-opus-5';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-2.5-flash';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -466,27 +465,33 @@ function buildSchema(channels: string[]) {
   };
 }
 
-async function claude(key: string, system: string, user: string, maxTokens: number, schema: unknown) {
-  const res = await fetch(ANTHROPIC_URL, {
+async function gemini(key: string, system: string, user: string, maxTokens: number, schema: unknown) {
+  const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(MODEL)}:generateContent`, {
     method: 'POST',
-    headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
+    headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL, max_tokens: maxTokens, system,
-      messages: [{ role: 'user', content: user }],
-      output_config: { format: { type: 'json_schema', schema } },
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      generationConfig: {
+        maxOutputTokens: maxTokens,
+        temperature: 0.55,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
     }),
   });
-  if (!res.ok) return { error: `Anthropic ${res.status}: ${await res.text()}` } as const;
+  if (!res.ok) return { error: `Gemini ${res.status}: ${await res.text()}` } as const;
   const data = (await res.json()) as {
-    content?: { type: string; text?: string }[]; stop_reason?: string;
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
   };
+  const candidate = data.candidates?.[0];
   return {
-    text: (data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join(''),
+    text: (candidate?.content?.parts ?? []).map((b) => b.text ?? '').join(''),
     /* Surfaced because running out of tokens mid-JSON is the one failure that
        does not look like one: the reply is a 200 carrying half an object,
        parseLoose returns {}, and the portal shows a generic "try again" for
        something retrying will not fix. */
-    truncated: data.stop_reason === 'max_tokens',
+    truncated: candidate?.finishReason === 'MAX_TOKENS',
   } as const;
 }
 
@@ -629,8 +634,8 @@ Deno.serve(async (req: Request) => {
       .filter((c): c is Channel => (CHANNELS as readonly string[]).includes(c));
     const want: Channel[] = requested.length ? requested : ['instagram', 'tiktok', 'facebook'];
 
-    const key = Deno.env.get('ANTHROPIC_API_KEY');
-    if (!key) return json({ error: 'Server misconfigured: no Anthropic key' }, 500);
+    const key = Deno.env.get('GEMINI_API_KEY');
+    if (!key) return json({ error: 'Server misconfigured: no Gemini key' }, 500);
 
     const used = Array.isArray(body.usedAngles)
       ? body.usedAngles.filter((a): a is string => typeof a === 'string')
@@ -762,7 +767,7 @@ Deno.serve(async (req: Request) => {
       const revUser = `Property: ${JSON.stringify(listing)}\n\n`
         + `The ${ch} caption as it stands:\n"""\n${current}\n"""\n\n`
         + `What the agency wants changed: ${ask}\n\nRewrite the caption now.`;
-      const rout = await claude(key, buildReviseSystem(ch, brandLine), revUser, 4000, REVISE_SCHEMA);
+      const rout = await gemini(key, buildReviseSystem(ch, brandLine), revUser, 4000, REVISE_SCHEMA);
       if ('error' in rout) return json({ error: rout.error }, 502);
       const rp = parseLoose(rout.text) as { caption?: unknown };
       const caption = typeof rp.caption === 'string' ? rp.caption.trim() : '';
@@ -794,7 +799,7 @@ Deno.serve(async (req: Request) => {
        Facebook form alone carries a headline, a hook, a location, a spec list,
        a price, an itemised charges block, a closing line and a CTA -- two to
        three times the prose it replaced, across six channels. */
-    const out = await claude(key, buildSystem(assigned, brandLine), user, 12000, buildSchema(want));
+    const out = await gemini(key, buildSystem(assigned, brandLine), user, 12000, buildSchema(want));
     if ('error' in out) return json({ error: out.error }, 502);
 
     const parsed = parseLoose(out.text) as {

@@ -19,18 +19,19 @@
  *   { action: 'matches', visitorId }         → { criteria, matches }
  *
  * Deployed with verify_jwt = false so the static prototype can call it.
- * Env: ANTHROPIC_API_KEY + SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
+ * Env: GEMINI_API_KEY + SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
  */
 import {
   briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
 } from './facts.ts';
 
-const ANTHROPIC_URL = Deno.env.get('ANTHROPIC_URL_OVERRIDE') ?? 'https://api.anthropic.com/v1/messages'; // the override exists for local tests only
-const ANTHROPIC_VERSION = '2023-06-01';
-const MODEL = 'claude-opus-4-8';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+/* Stable Flash keeps Tayo quick and inexpensive. The model can be overridden
+   for a controlled evaluation without changing the function code. */
+const MODEL = Deno.env.get('TOJU_GEMINI_MODEL') ?? 'gemini-2.5-flash';
 /* Reading a message is data work, not writing: a faster model does it. */
-const UNDERSTAND_MODEL = 'claude-sonnet-5-5';
+const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-2.5-flash-lite';
 /* The reply envelope carries criteria + profile alongside the prose, and at
    700 it was running out mid-JSON — the parse then failed and the raw
    envelope was handed to the client, which rendered {"reply": …} straight
@@ -438,8 +439,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── chat / negotiate / compare need the model ──
-    const key = Deno.env.get('ANTHROPIC_API_KEY');
-    if (!key) return json({ error: 'Server misconfigured: no Anthropic key' }, 500);
+    const key = Deno.env.get('GEMINI_API_KEY');
+    if (!key) return json({ error: 'Server misconfigured: no Gemini key' }, 500);
 
     // ── negotiation assistant ──
     if (body.action === 'negotiate') {
@@ -447,7 +448,7 @@ Deno.serve(async (req: Request) => {
       if (!prop || typeof prop !== 'object') return json({ error: 'property required' }, 400);
       const session = visitorId ? await loadSession(visitorId) : null;
       const input = JSON.stringify({ property: prop, buyer_profile: (session?.criteria as Criteria | null)?.profile ?? null, brief: (session?.criteria as Criteria | null)?.brief ?? null });
-      const out = await claude(key, NEGOTIATE_PROMPT, [{ role: 'user', content: input.slice(0, 6000) }], 600);
+      const out = await gemini(key, NEGOTIATE_PROMPT, [{ role: 'user', content: input.slice(0, 6000) }], 600);
       if ('error' in out) return json({ error: out.error }, 502);
       const p = parseLoose(out.text) as { advice?: string; openingOffer?: number; draft?: string };
       /* THE MODEL DOES NOT SET THE NUMBER ALONE. It once opened a 26M house
@@ -475,7 +476,7 @@ Deno.serve(async (req: Request) => {
         buyer_profile: (session?.criteria as Criteria | null)?.profile ?? null,
         brief: (session?.criteria as Criteria | null)?.brief ?? null,
       });
-      const out = await claude(key, COMPARE_PROMPT, [{ role: 'user', content: input.slice(0, 8000) }], 600);
+      const out = await gemini(key, COMPARE_PROMPT, [{ role: 'user', content: input.slice(0, 8000) }], 600);
       if ('error' in out) return json({ error: out.error }, 502);
       const p = parseLoose(out.text) as { verdict?: string; winnerId?: string };
       return json({ verdict: p.verdict ?? salvageField(out.text, 'verdict') ?? '', winnerId: p.winnerId ?? null });
@@ -551,7 +552,7 @@ Deno.serve(async (req: Request) => {
         ? [{ role: 'user', content: respondInput }]
         : [{ role: 'user', content: respondInput }, { role: 'assistant', content: JSON.stringify({ reply: candidate }) },
           { role: 'user', content: 'That reply failed these checks: ' + problems.join(' | ') + ' Write it again so it passes every one, in the same JSON format.' }];
-      const out = await claude(key, RESPOND_PROMPT, turn, 1100);
+      const out = await gemini(key, RESPOND_PROMPT, turn, 1100);
       if ('error' in out) { problems = [out.error]; break; }
       const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
       candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
@@ -587,17 +588,31 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-// ── Claude helper ──
-async function claude(key: string, system: string, messages: Msg[], maxTokens: number, model: string = MODEL):
+// ── Gemini helper ──
+async function gemini(key: string, system: string, messages: Msg[], maxTokens: number, model: string = MODEL,
+  tools?: unknown[]):
   Promise<{ text: string } | { error: string }> {
-  const res = await fetch(ANTHROPIC_URL, {
+  const body: Record<string, unknown> = {
+    systemInstruction: { parts: [{ text: system }] },
+    contents: messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    })),
+    generationConfig: {
+      maxOutputTokens: maxTokens,
+      temperature: 0.25,
+      responseMimeType: 'application/json',
+    },
+  };
+  if (tools?.length) body.tools = tools;
+  const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
-    headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
+    headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
-  if (!res.ok) return { error: `Anthropic ${res.status}: ${await res.text()}` };
-  const data = (await res.json()) as { content?: { type: string; text?: string }[] };
-  return { text: (data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('') };
+  if (!res.ok) return { error: `Gemini ${res.status}: ${await res.text()}` };
+  const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+  return { text: (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('') };
 }
 
 // ── session persistence (demo_chat_sessions, service role) ──
@@ -622,7 +637,7 @@ async function guardOpeningOffer(propertyId: string, suggested: number | null): 
 }
 
 /* ── PAST PRICES FOR AN AREA ─────────────────────────────────────────────
-   One model call with Anthropic's web search tool. It must answer from what
+   One model call with Gemini's Google Search grounding. It must answer from what
    it finds -- dated reports, listings indices, news -- and cite them; rows
    it cannot source are left out, and if nothing can be sourced it returns
    no rows and Tayo says so. Never a projection. */
@@ -645,19 +660,10 @@ Return STRICT JSON as your final text, nothing after it:
  "sources": [{"title": "<publisher or page>", "url": "<url>"}]}`;
 async function lookupPriceHistory(key: string, area: string, city: string | null, kind: string): Promise<PriceHistory | null> {
   try {
-    const res = await fetch(ANTHROPIC_URL, {
-      method: 'POST',
-      headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL, max_tokens: 1500, system: HISTORY_PROMPT,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
-        messages: [{ role: 'user', content: JSON.stringify({ area, city, country: 'Nigeria', kind }) }],
-      }),
-    });
-    if (!res.ok) { console.error('price history', res.status, (await res.text()).slice(0, 300)); return null; }
-    const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-    const texts = (data.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '');
-    const last = texts.join('');
+    const out = await gemini(key, HISTORY_PROMPT, [{ role: 'user', content: JSON.stringify({ area, city, country: 'Nigeria', kind }) }], 1500,
+      MODEL, [{ google_search: {} }]);
+    if ('error' in out) { console.error('price history', out.error.slice(0, 300)); return null; }
+    const last = out.text;
     const m = last.match(/\{[\s\S]*\}\s*$/) ?? last.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const j = JSON.parse(m[0]) as Partial<PriceHistory>;
@@ -1053,7 +1059,7 @@ function savedCriteria(b: Brief, p: Profile): Record<string, unknown> {
 async function understand(key: string, tail: Msg[], brief: Brief, profile: Profile, cities: string[] | null): Promise<Understood> {
   const known = { brief, profile: { ...profile, asked: undefined } };
   const input = JSON.stringify({ conversation: tail.slice(-8), known, listings_in: cities ?? [] });
-  const out = await claude(key, UNDERSTAND_PROMPT, [{ role: 'user', content: input }], 700, UNDERSTAND_MODEL);
+  const out = await gemini(key, UNDERSTAND_PROMPT, [{ role: 'user', content: input }], 700, UNDERSTAND_MODEL);
   if ('error' in out) return readUnderstood({});
   return readUnderstood(parseLoose(out.text));
 }
