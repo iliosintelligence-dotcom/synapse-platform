@@ -10,9 +10,9 @@
 -- 2. Every agency has a referral code. An agency that signs up through someone's link
 --    claims that code once (referral_claim). A claim COUNTS when the referred agency
 --    has really started using Synapse: it has uploaded `listings_required` listings
---    (3 by default; platform_settings 'referrals'). That is the guard against a
+--    (3 by default; platform_settings 'agency_referrals'). That is the guard against a
 --    referrer making five empty accounts for themselves. Every 5th counted referral
---    gives the referrer one month free (referral_rewards), applied like a payment
+--    gives the referrer one month free (agency_referral_rewards), applied like a payment
 --    applies a plan: the paid-through date moves out a month, and an agency on the
 --    Free plan gets Accelerate for that month.
 --
@@ -97,7 +97,7 @@ end;
 $$;
 
 -- ── tables: server-side only (RLS on, no policies) ────────────────────────────
-create table if not exists public.referrals (
+create table if not exists public.agency_referrals (
   id                  uuid primary key default gen_random_uuid(),
   referrer_agency_id  uuid not null references public.agencies(id) on delete cascade,
   referred_agency_id  uuid not null unique references public.agencies(id) on delete cascade,
@@ -106,10 +106,10 @@ create table if not exists public.referrals (
   revoked_at          timestamptz,
   check (referrer_agency_id <> referred_agency_id)
 );
-create index if not exists referrals_referrer_idx on public.referrals (referrer_agency_id);
-alter table public.referrals enable row level security;
+create index if not exists referrals_referrer_idx on public.agency_referrals (referrer_agency_id);
+alter table public.agency_referrals enable row level security;
 
-create table if not exists public.referral_rewards (
+create table if not exists public.agency_referral_rewards (
   id           uuid primary key default gen_random_uuid(),
   agency_id    uuid not null references public.agencies(id) on delete cascade,
   earned_at    timestamptz not null default now(),
@@ -117,10 +117,10 @@ create table if not exists public.referral_rewards (
   after_count  integer not null,
   unique (agency_id, after_count)
 );
-alter table public.referral_rewards enable row level security;
+alter table public.agency_referral_rewards enable row level security;
 
 insert into public.platform_settings (key, value)
-values ('referrals', jsonb_build_object(
+values ('agency_referrals', jsonb_build_object(
   'enabled', true, 'per_reward', 5, 'months_per_reward', 1,
   'listings_required', 3, 'max_rewards', 12, 'claim_window_days', 14))
 on conflict (key) do nothing;
@@ -143,7 +143,7 @@ $$;
 revoke all on function public.referral_apply_month(uuid, integer) from public, anon, authenticated;
 grant execute on function public.referral_apply_month(uuid, integer) to service_role;
 
--- ── rewards: one month for every `per_reward` counted referrals ───────────────
+-- ── rewards: one month for every `per_reward` counted agency_referrals ───────────────
 create or replace function public.referral_reward(p_referrer uuid)
 returns integer
 language plpgsql
@@ -153,17 +153,17 @@ as $$
 declare
   s jsonb; per integer; months integer; cap integer; counted integer; given integer; granted integer := 0;
 begin
-  select value into s from platform_settings where key = 'referrals';
+  select value into s from platform_settings where key = 'agency_referrals';
   if s is null or coalesce((s->>'enabled')::boolean, false) is not true then return 0; end if;
   per := greatest(coalesce((s->>'per_reward')::integer, 5), 1);
   months := greatest(coalesce((s->>'months_per_reward')::integer, 1), 1);
   cap := coalesce((s->>'max_rewards')::integer, 12);
-  select count(*) into counted from referrals
+  select count(*) into counted from agency_referrals
    where referrer_agency_id = p_referrer and qualified_at is not null and revoked_at is null;
-  select count(*) into given from referral_rewards where agency_id = p_referrer;
+  select count(*) into given from agency_referral_rewards where agency_id = p_referrer;
   while given < counted / per and given < cap loop
     given := given + 1;
-    insert into referral_rewards (agency_id, months, after_count) values (p_referrer, months, given * per)
+    insert into agency_referral_rewards (agency_id, months, after_count) values (p_referrer, months, given * per)
       on conflict do nothing;
     perform referral_apply_month(p_referrer, months);
     granted := granted + 1;
@@ -183,15 +183,15 @@ set search_path to 'public', 'pg_temp'
 as $$
 declare s jsonb; r record; need integer; have integer;
 begin
-  select value into s from platform_settings where key = 'referrals';
+  select value into s from platform_settings where key = 'agency_referrals';
   if s is null or coalesce((s->>'enabled')::boolean, false) is not true then return false; end if;
-  select * into r from referrals
+  select * into r from agency_referrals
    where referred_agency_id = p_referred and qualified_at is null and revoked_at is null;
   if not found then return false; end if;
   need := greatest(coalesce((s->>'listings_required')::integer, 3), 1);
   select count(*) into have from properties where agency_id = p_referred and deleted_at is null;
   if have < need then return false; end if;
-  update referrals set qualified_at = now() where id = r.id and qualified_at is null;
+  update agency_referrals set qualified_at = now() where id = r.id and qualified_at is null;
   perform referral_reward(r.referrer_agency_id);
   return true;
 end;
@@ -226,7 +226,7 @@ declare
   s jsonb; mine record; theirs uuid; win integer; code text := upper(btrim(coalesce(p_code, '')));
 begin
   if uid is null then raise exception 'Not signed in' using errcode = '42501'; end if;
-  select value into s from platform_settings where key = 'referrals';
+  select value into s from platform_settings where key = 'agency_referrals';
   if s is null or coalesce((s->>'enabled')::boolean, false) is not true then
     return jsonb_build_object('ok', false, 'reason', 'off');
   end if;
@@ -244,7 +244,7 @@ begin
   if exists (select 1 from agencies where id = theirs and owner_id = uid) then
     return jsonb_build_object('ok', false, 'reason', 'own');
   end if;
-  insert into referrals (referrer_agency_id, referred_agency_id) values (theirs, mine.id)
+  insert into agency_referrals (referrer_agency_id, referred_agency_id) values (theirs, mine.id)
     on conflict (referred_agency_id) do nothing;
   perform referral_check(mine.id);
   return jsonb_build_object('ok', true);
@@ -266,17 +266,17 @@ begin
   if coalesce(auth.role(), '') <> 'service_role' and not is_agency_member(p_agency) then
     raise exception 'Not a member of this agency' using errcode = '42501';
   end if;
-  select value into s from platform_settings where key = 'referrals';
+  select value into s from platform_settings where key = 'agency_referrals';
   if s is null or coalesce((s->>'enabled')::boolean, false) is not true then return jsonb_build_object('on', false); end if;
   per := greatest(coalesce((s->>'per_reward')::integer, 5), 1);
   select referral_code into code from agencies where id = p_agency;
   select count(*) filter (where qualified_at is not null and revoked_at is null),
          count(*) filter (where qualified_at is null and revoked_at is null)
-    into counted, pending from referrals where referrer_agency_id = p_agency;
-  select coalesce(sum(months), 0) into earned from referral_rewards where agency_id = p_agency;
+    into counted, pending from agency_referrals where referrer_agency_id = p_agency;
+  select coalesce(sum(months), 0) into earned from agency_referral_rewards where agency_id = p_agency;
   select coalesce(jsonb_agg(x order by x->>'at' desc), '[]'::jsonb) into rec from (
     select jsonb_build_object('name', a.name, 'counted', r.qualified_at is not null, 'at', r.claimed_at) as x
-      from referrals r join agencies a on a.id = r.referred_agency_id
+      from agency_referrals r join agencies a on a.id = r.referred_agency_id
      where r.referrer_agency_id = p_agency and r.revoked_at is null
      order by r.claimed_at desc limit 8) t;
   return jsonb_build_object(
@@ -298,7 +298,7 @@ security definer
 set search_path to 'public', 'pg_temp'
 as $$
 begin
-  update referrals set revoked_at = now() where referred_agency_id = p_referred and revoked_at is null;
+  update agency_referrals set revoked_at = now() where referred_agency_id = p_referred and revoked_at is null;
 end;
 $$;
 revoke all on function public.referral_revoke(uuid) from public, anon, authenticated;
