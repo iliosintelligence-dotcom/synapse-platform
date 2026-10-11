@@ -273,7 +273,7 @@ export function mergeProfile(prev: Profile, u: Understood, userText: string): Pr
 
 /* ───────────────────────── what to ask next ───────────────────────── */
 
-export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | null;
+export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | 'commute' | 'priorities' | null;
 
 export interface Ask { slot: Slot; hint: string; closed: string[] }
 
@@ -299,6 +299,13 @@ export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
   if (!land && !profile.household && brief.dealType !== 'shared' && !tried('household')) return { slot: 'household', hint: 'Ask who is moving with them. Open question; never ask how many bedrooms.', closed: [] };
   if (brief.dealType === 'buy' && !land && !brief.stage && shown > 0 && !tried('stage')) {
     return { slot: 'stage', hint: 'Ask whether it must be a finished home or whether off-plan (built later, paid in instalments) is fine.', closed: ['Finished only', 'Off-plan is fine'] };
+  }
+  /* Once homes are on screen, the questions that change which one is right for THEIR life, not just their budget. */
+  if (shown > 0 && !land && !profile.work && !profile.transport && !tried('commute')) {
+    return { slot: 'commute', hint: 'Ask where they work or study and how they get around, so you can weigh the commute and tell them honestly which homes cost them hours. Open question.', closed: [] };
+  }
+  if (shown > 0 && profile.lifestyle.length === 0 && !tried('priorities')) {
+    return { slot: 'priorities', hint: 'Ask what would improve their daily life most at home: steady power, quiet, security, space for the family, or being near schools or work. Open question; do not list options as buttons.', closed: [] };
   }
   if (shown > 0 && !profile.name && !tried('name')) return { slot: 'name', hint: 'Ask what you should call them.', closed: [] };
   return { slot: null, hint: 'Nothing more is needed. Offer one concrete next step about the homes on screen: open one, compare two, or book a viewing.', closed: [] };
@@ -427,6 +434,8 @@ function plainQuestion(a: Ask): string {
     case 'landUse': return 'What is the land for?';
     case 'stage': return 'Does it have to be finished, or is off-plan fine?';
     case 'name': return 'What should I call you?';
+    case 'commute': return 'Where do you work or study, and how do you get there?';
+    case 'priorities': return 'What would make the biggest difference to your daily life at home?';
     default: return '';
   }
 }

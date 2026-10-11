@@ -45,6 +45,8 @@ interface LeadNegotiation {
   offer: number | null;
   advice: string;
   draft: string;
+  /** Tayo's structured handover summary (who, what they want, budget, timeline, where the talk stands, questions). */
+  summary?: Record<string, unknown> | null;
 }
 
 /* Client-supplied, so it is clamped rather than trusted: a number that is
@@ -56,8 +58,10 @@ function cleanNegotiation(raw: unknown): LeadNegotiation | null {
   const offer = typeof n.offer === 'number' && isFinite(n.offer) && n.offer > 0 ? n.offer : null;
   const advice = typeof n.advice === 'string' ? n.advice.slice(0, 1200) : '';
   const draft = typeof n.draft === 'string' ? n.draft.slice(0, 1200) : '';
-  if (offer == null && !advice && !draft) return null;
-  return { offer, advice, draft };
+  const summary = n.summary && typeof n.summary === 'object' && !Array.isArray(n.summary) && JSON.stringify(n.summary).length < 4000
+    ? n.summary as Record<string, unknown> : null;
+  if (offer == null && !advice && !draft && !summary) return null;
+  return { offer, advice, draft, summary };
 }
 
 Deno.serve(async (req: Request) => {
@@ -90,6 +94,8 @@ Deno.serve(async (req: Request) => {
          reconstruct which channel actually brought this person in. Optional:
          a lead with no session is still attributed, just as 'direct'. */
       session_id?: string;
+      /** A viewing time the buyer picked from the agent's open slots (ISO). Booked once the lead exists. */
+      slot?: string;
     };
     if (!body.property_id) return json({ error: 'property_id is required' }, 400);
     // `source` is a Postgres enum; anything unrecognised would fail the insert,
@@ -207,6 +213,17 @@ Deno.serve(async (req: Request) => {
       if (attErr) console.error('attribute_lead failed for', leadId, attErr.message);
     }
 
+    /* ── 1c. the viewing the buyer picked, from the times the agent has open ──
+       book_inspection re-derives the offered list itself and needs the lead above, so it cannot be spoofed; it runs
+       as the BUYER (their JWT), not as the service role. A failure is reported, never fatal: the lead is saved. */
+    let viewing: { startsAt: string; ok: boolean; reason: string } | null = null;
+    if (typeof body.slot === 'string' && !isNaN(Date.parse(body.slot))) {
+      const startsAt = new Date(body.slot).toISOString();
+      const { data: bk, error: bkErr } = await userClient.rpc('book_inspection', { p_property_id: prop.id, p_starts_at: startsAt });
+      const row = Array.isArray(bk) ? bk[0] : bk;
+      viewing = { startsAt, ok: !bkErr && !!row?.ok, reason: bkErr ? bkErr.message : String(row?.reason ?? '') };
+    }
+
     // ── 2. deliver via WhatsApp, retry once ──
     const message = formatWhatsApp({
       consumerName,
@@ -217,6 +234,7 @@ Deno.serve(async (req: Request) => {
       preferences,
       source,
       leadId,
+      viewing,
     });
 
     const toNumber = agency?.whatsapp_number as string | undefined;
@@ -239,6 +257,30 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    /* ── 2b. the same handover by email ──────────────────────────────────────────
+       To the agency's owner and admins. Sent as well as WhatsApp, not instead of it: an agent who is off WhatsApp still
+       gets it, and the email is the record. It needs RESEND_API_KEY and FOLLOWUP_FROM (a verified sending domain);
+       without them it says so and nothing is lost, because the lead is already saved. */
+    let email: 'sent' | 'skipped' | 'failed' = 'skipped';
+    try {
+      const rk = Deno.env.get('RESEND_API_KEY'), from = Deno.env.get('FOLLOWUP_FROM');
+      if (rk && from) {
+        const { data: mem } = await admin.from('agency_members').select('profile_id, role').eq('agency_id', prop.agency_id)
+          .in('role', ['agency_owner', 'agency_admin']).is('deleted_at', null);
+        const to: string[] = [];
+        for (const m of mem ?? []) {
+          const { data: u } = await admin.auth.admin.getUserById(m.profile_id as string);
+          if (u?.user?.email) to.push(u.user.email);
+        }
+        if (to.length) {
+          const html = '<pre style="font:14px/1.5 system-ui,sans-serif;white-space:pre-wrap">' + message.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c]!).replace(/\*([^*]+)\*/g, '<b>$1</b>') + '</pre>';
+          const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${rk}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from, to, subject: `New lead for ${prop.title as string}`, html, text: message.replace(/\*/g, '') }) });
+          email = r.ok ? 'sent' : 'failed';
+        }
+      }
+    } catch (e) { email = 'failed'; console.error('lead email failed: ' + e); }
+
     // ── 3. record delivery outcome — flagged, never silent ──
     if (delivered) {
       await admin
@@ -249,7 +291,7 @@ Deno.serve(async (req: Request) => {
           delivered_at: new Date().toISOString(),
         })
         .eq('id', leadId);
-      return json({ lead_id: leadId, delivery_status: 'delivered' });
+      return json({ lead_id: leadId, delivery_status: 'delivered', email, viewing });
     }
 
     await admin
@@ -260,7 +302,7 @@ Deno.serve(async (req: Request) => {
     // caller should tell the buyer it was received, because it was.
     console.error(`Lead ${leadId} delivery failed: ${lastError}`);
     return json(
-      { lead_id: leadId, delivery_status: 'delivery_failed', error: lastError },
+      { lead_id: leadId, delivery_status: 'delivery_failed', error: lastError, email, viewing },
       207, // Multi-Status: lead created, delivery did not succeed
     );
   } catch (err) {
@@ -285,6 +327,7 @@ function formatWhatsApp(p: {
   preferences: LeadPreferences | null;
   source: string;
   leadId: string;
+  viewing?: { startsAt: string; ok: boolean; reason: string } | null;
 }): string {
   const lines = [
     '🟢 *New qualified lead — Synapse*',
@@ -314,6 +357,18 @@ function formatWhatsApp(p: {
     if (n.advice) lines.push(`_${n.advice}_`);
   }
 
+  const sm = p.preferences?.negotiation?.summary as Record<string, unknown> | null | undefined;
+  if (sm) {
+    const L = (k: string, label: string) => (typeof sm[k] === 'string' && sm[k] ? `*${label}:* ${sm[k]}` : null);
+    lines.push('', '*Summary from Tayo*',
+      ...[L('wants', 'Wants'), L('budget', 'Budget'), L('financing', 'Paying'), L('timeline', 'Timeline'), L('household', 'Household'),
+        L('position', 'Where it stands'), L('nextStep', 'Next step')].filter((x): x is string => !!x));
+    const qs = Array.isArray(sm.questions) ? (sm.questions as unknown[]).filter((x) => typeof x === 'string' && x).slice(0, 4) : [];
+    if (qs.length) lines.push('*Questions:* ' + qs.join(' · '));
+  }
+  if (p.viewing?.ok) {
+    lines.push('', `*Viewing:* ${new Date(p.viewing.startsAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} (requested; confirm in the portal)`);
+  }
   const sourceLabel =
     p.source === 'toju_chat' ? 'Tayo recommendation' : p.source === 'browse' ? 'Browse' : 'Contact button';
   lines.push('', `*Source:* ${sourceLabel}`, `*Lead ID:* ${p.leadId}`);

@@ -32,7 +32,7 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 const MODEL = Deno.env.get('TOJU_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 const FALLBACK_MODEL = Deno.env.get('TOJU_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
 /* Reading a message is data work, not writing: a faster model does it. */
-const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-3.8-flash';
+const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-3.5-flash-lite';
 /* The reply envelope carries criteria + profile alongside the prose, and at
    700 it was running out mid-JSON — the parse then failed and the raw
    envelope was handed to the client, which rendered {"reply": …} straight
@@ -383,7 +383,8 @@ async function loadPinned(id: string): Promise<PinnedHome | null> {
   return { match, facts, feeText };
 }
 
-function pinnedAsk(h: PinnedHome, brief: Brief, profile: Profile): Ask {
+function pinnedAsk(h: PinnedHome, brief: Brief, profile: Profile, info = false): Ask {
+  if (info) return { slot: null, closed: [], hint: 'Invite their questions about the home; do not ask them anything.' };
   const tried = (k: string) => (profile.asked[k] ?? 0) >= 2;
   const sale = !h.match.listingType || h.match.listingType !== 'rent';
   if (!brief.maxPrice && !profile.financing && !tried('budget')) {
@@ -419,6 +420,69 @@ function pinnedPlain(h: PinnedHome, ask: Ask): string {
     : ask.slot === 'name' ? ' What should I call you?' : ' Shall I put your questions to the agency?';
   return `${m.title}${where ? ' in ' + where : ''} is ${naira(m.price)}${rent ? ' a year' : ''}.${q}`;
 }
+
+/* THE HANDOVER (interaction 5). After the buyer has been through the card and talked it over, Tayo carries out a
+   summary the agent can act on, and a ready message from Tayo to the agent. Only what was actually said. */
+const HANDOVER_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse, handing a buyer over to the listing agent after a
+conversation about ONE home. You write for the AGENT, who must be able to act on this in thirty seconds, and you act for
+the buyer: honest, warm, never pushy. You get JSON: "listing" (what the agency published), "buyer_profile", "brief" and
+"conversation".
+
+Use ONLY what the buyer said in the conversation and what is in the listing. Never invent a budget, a deadline, a
+household, a financing route or an objection that was not said. When something was not discussed, say null. Never
+include a figure the buyer did not say and the listing does not hold. You never know, guess or hint at the lowest price
+the agency would accept.
+
+Return STRICT JSON ONLY:
+{"summary": {"buyer": "<name or 'the buyer'>", "wants": "<one line: what they are after and why this home>",
+   "budget": "<what they said, in their words, or null>", "financing": "<outright / mortgage / instalments, or null>",
+   "timeline": "<when they need to move or complete, or null>", "household": "<who would live there, or null>",
+   "position": "<one or two lines: where the negotiation stands: their offer or ask, what they accepted, what they pushed on>",
+   "questions": ["<questions they asked that the agency should answer>"], "concerns": ["<worries they raised>"],
+   "nextStep": "<one line: the sensible next step for the agent>"},
+ "openingOffer": <whole naira the buyer proposed or agreed to open at, or null; for a rental always null>,
+ "message": "<a ready-to-send message from Tayo to the agent, at most 110 words, Nigerian business tone, ending open: who the
+   buyer is, what they want, what they asked, and the proposed viewing if there is one>"}`;
+
+/* ───────────── THE FIVE INTERACTIONS (Eden, 2026-10-12) ─────────────
+   1 intro        first time this person speaks to Tayo
+   2 continue     they have spoken before and Tayo remembers some of what they want
+   3 recommend    Tayo calls properties from what it knows and asks what improves their quality of life
+   4 info         they came back from a social post or campaign: the property card, and answers about it
+   5 discuss      they have been through the card and want to talk to an agent: Tayo negotiates, summarises,
+                  schedules a viewing in the agent's free time and hands over (PINNED_PROMPT, below) */
+const MODE_RULES = `
+
+THE KIND OF CONVERSATION THIS IS: "interaction" in the JSON says which.
+- "intro": this person has never spoken to you. In one short line say who you are and what you do for them (find homes
+  that fit how they live, and tell them honestly why). Then ask the one question in "ask". No list of features.
+- "continue": this person has spoken to you before and you remember them: "remembered" is what you know (name, what they
+  were looking for, budget, household). Greet them by name if you have it, say in a clause or two what you remember
+  ("last time it was a 3-bed in Ibadan around ₦4m"), and ask what has changed or the one question in "ask". Take in
+  anything new they tell you. Be brief: they have been here before and want to get on.
+- "recommend": you are working from what you know about them. Lead with your pick and the one reason it fits THEIR
+  life, then the one question in "ask". When the question is about commute, power, security, schools or what matters
+  most day to day, ask it plainly and warmly: it is how you improve the choice, not paperwork.`;
+
+const PINNED_INFO_PROMPT = `${DOCTRINE}
+
+THE BUYER CAME BACK FROM A SOCIAL POST OR A CAMPAIGN ABOUT ONE HOME, AND ITS CARD IS ON THEIR SCREEN.
+Your job here is to answer their questions about THIS home, from the listing only. You are given JSON: "listing",
+"profile", "brief", "turn", "conversation_tail".
+
+Never say there is nothing live and never ask where they want to live: they came for this home. Do not interrogate them
+and do not push them to negotiate. TURN 1: one warm sentence pointing at what the card shows (the home, the price exactly
+as "priceText", the place) and the one or two facts a Nigerian buyer checks first that are in the data (electricity
+band in hours, the title document, security or water when listed), then invite their questions in a few words. LATER
+TURNS: answer exactly what they asked, straight. If the listing does not say, tell them the agency will have to confirm and
+offer to put it to them; never guess. When they sound serious (price, viewing, how to pay, "is it still available"),
+offer once to take it further with the agent: you can discuss it for them, agree a viewing time and hand over.
+A sale's asking price is where it starts and a rental's rent is set by the agency. Never mention a floor or any number not
+in the JSON. Never claim it is verified unless "listing.verified" is true.
+
+Length: about 60 words, at most two short paragraphs.
+Output STRICT JSON ONLY: {"reply": "<message>", "more": null, "why": {}, "suggestions": []}`;
+
 
 const NEGOTIATE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. No guarantees; if something is
@@ -493,6 +557,8 @@ Deno.serve(async (req: Request) => {
   try {
     const body = (await req.json().catch(() => ({}))) as {
       action?: string; visitorId?: string; messages?: Msg[]; source?: string; listingId?: string;
+      /** 'discuss' (negotiate for the agent) or 'info' (answer questions about a home they met on social). */
+      mode?: string;
     };
     const visitorId = typeof body.visitorId === 'string' && UUID_RE.test(body.visitorId) ? body.visitorId : null;
 
@@ -557,6 +623,31 @@ Deno.serve(async (req: Request) => {
     // ── chat / negotiate / compare need the model ──
     const key = Deno.env.get('GEMINI_API_KEY');
     if (!key) return json({ error: 'Server misconfigured: no Gemini key' }, 500);
+
+    // ── the handover: summary + message for the agent ──
+    if (body.action === 'handover') {
+      const lid = typeof body.listingId === 'string' && UUID_RE.test(body.listingId) ? body.listingId : null;
+      if (!lid) return json({ error: 'listingId required' }, 400);
+      const home = await loadPinned(lid).catch(() => null);
+      if (!home) return json({ error: 'That home is no longer live.' }, 404);
+      const session = visitorId ? await loadSession(visitorId) : null;
+      const said = (Array.isArray(body.messages) ? body.messages : [])
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && !m.content.startsWith('['))
+        .slice(-16).map((m) => ({ role: m.role, content: m.content.slice(0, 600) }));
+      const crit = (session?.criteria as Criteria | null) ?? null;
+      const input = JSON.stringify({ listing: home.facts, buyer_profile: crit?.profile ?? null, brief: crit?.brief ?? null, conversation: said });
+      const out = await gemini(key, HANDOVER_PROMPT, [{ role: 'user', content: input.slice(0, 9000) }], 900);
+      if ('error' in out) return json({ error: out.error }, 502);
+      const p = parseLoose(out.text) as { summary?: Record<string, unknown>; openingOffer?: number | null; message?: string };
+      const sale = home.match.listingType !== 'rent';
+      const offer = sale ? await guardOpeningOffer(lid, typeof p.openingOffer === 'number' ? p.openingOffer : null) : null;
+      return json({
+        summary: p.summary ?? null,
+        openingOffer: offer,
+        message: typeof p.message === 'string' ? p.message.slice(0, 900) : (salvageField(out.text, 'message') ?? ''),
+        home: { id: lid, title: home.match.title, priceText: home.facts.priceText },
+      });
+    }
 
     // ── negotiation assistant ──
     if (body.action === 'negotiate') {
@@ -636,6 +727,7 @@ Deno.serve(async (req: Request) => {
     /* The home they pressed "Discuss with an agent" on stays the subject until they clearly ask about somewhere else. */
     const pinnedId = typeof body.listingId === 'string' && UUID_RE.test(body.listingId) ? body.listingId : null;
     const movedOn = (u.intent === 'search' || u.intent === 'refine') && !!brief.place && brief.place !== prevBrief.place;
+    const pinnedInfo = body.mode === 'info';
     const pinned = pinnedId && !movedOn ? await loadPinned(pinnedId).catch((e) => { console.error('pinned listing failed: ' + e); return null; }) : null;
 
     /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
@@ -646,7 +738,11 @@ Deno.serve(async (req: Request) => {
           budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 0, role: 'none' as const, shown: [], otherPlaces: [], note: null } as Evidence,
         matches: [] as Match[] };
     const showCards = !pinned && found.length > 0 && u.intent !== 'chat';
-    const ask = pinned ? pinnedAsk(pinned, brief, profile) : nextAsk(brief, profile, found.length);
+    const ask = pinned ? pinnedAsk(pinned, brief, profile, pinnedInfo) : nextAsk(brief, profile, found.length);
+    /* Which of the five conversations this is, for the model and for the page. */
+    const hadMemory = !!(prevProfile.name || prevBrief.place || prevBrief.maxPrice || prevProfile.timeline || prevProfile.household);
+    const firstTurn = messages.filter((m) => m.role === 'user').length <= 1;
+    const interaction = pinned ? (pinnedInfo ? 'info' : 'discuss') : (!hadMemory && firstTurn ? 'intro' : hadMemory && firstTurn ? 'continue' : 'recommend');
 
     /* Past prices, never a forecast (Eden, 2026-10-02): a table from a web search. */
     let priceHistory: PriceHistory | null = null;
@@ -661,6 +757,8 @@ Deno.serve(async (req: Request) => {
     const respondInput = JSON.stringify({
       brief, profile: { ...profile, asked: undefined, phone: profile.phone ? 'given' : null, email: profile.email ? 'given' : null },
       evidence: pinned ? undefined : evidenceForModel(ev, found), ask,
+      interaction, remembered: hadMemory ? { name: prevProfile.name, place: prevBrief.place, dealType: prevBrief.dealType, kind: prevBrief.propertyKind,
+        budgetMax: prevBrief.maxPrice ? naira(prevBrief.maxPrice) : null, bedrooms: prevBrief.minBedrooms, household: prevProfile.household, timeline: prevProfile.timeline } : null,
       listing: pinned ? pinned.facts : undefined, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,
       conversation_tail: messages.slice(-6), dream_board: dreamNote, listing_context: pinned ? undefined : listingNote,
       history: priceHistory ? 'A table of how prices there have moved is attached under your reply. Say once that you cannot forecast; do not quote its numbers.'
@@ -678,7 +776,7 @@ Deno.serve(async (req: Request) => {
         ? [{ role: 'user', content: respondInput }]
         : [{ role: 'user', content: respondInput }, { role: 'assistant', content: JSON.stringify({ reply: candidate }) },
           { role: 'user', content: 'That reply failed these checks: ' + problems.join(' | ') + ' Write it again so it passes every one, in the same JSON format.' }];
-      const out = await gemini(key, pinned ? PINNED_PROMPT : RESPOND_PROMPT, turn, 1100);
+      const out = await gemini(key, pinned ? (pinnedInfo ? PINNED_INFO_PROMPT : PINNED_PROMPT) : RESPOND_PROMPT + MODE_RULES, turn, 1100);
       if ('error' in out) { problems = [out.error]; break; }
       const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
       candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
@@ -708,7 +806,7 @@ Deno.serve(async (req: Request) => {
     }
 
     /* A closed question gets its answers as buttons; an open one gets none (Eden, 2026-10-05). */
-    return json({ reply, more, showMatches: showCards, matches, suggestions: closed, priceHistory, searched });
+    return json({ reply, more, showMatches: showCards, matches, suggestions: closed, priceHistory, searched, interaction });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }

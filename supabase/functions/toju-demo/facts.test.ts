@@ -59,8 +59,13 @@ Deno.test('what to ask next: where, what, money, timing, household, then their n
   assertEquals(nextAsk(b, { ...p, timeline: 'next month' }, 0).slot, 'household');
   const known = { ...p, timeline: 'next month', household: 'couple' };
   assertEquals(nextAsk(b, known, 0).slot, null);       // nothing on screen yet: no name or contact asked
-  assertEquals(nextAsk(b, known, 3).slot, 'name');
-  assertEquals(nextAsk(b, { ...known, name: 'Joshua' }, 3).slot, null);   // no phone or email is asked for: that comes with the account
+  // With homes on screen the questions turn to their daily life, then their name.
+  assertEquals(nextAsk(b, known, 3).slot, 'commute');
+  const commuter = { ...known, work: 'Ring Road', transport: 'bus' };
+  assertEquals(nextAsk(b, commuter, 3).slot, 'priorities');
+  const lived = { ...commuter, lifestyle: ['steady power'] };
+  assertEquals(nextAsk(b, lived, 3).slot, 'name');
+  assertEquals(nextAsk(b, { ...lived, name: 'Joshua' }, 3).slot, null);   // no phone or email is asked for: that comes with the account
   const land = { ...EMPTY_BRIEF, place: 'Ibadan', propertyKind: 'land' as const, dealType: 'buy' as const, maxPrice: 4_000_000 };
   assertEquals(nextAsk(land, { ...p, timeline: 'soon' }, 0).slot, 'landUse');
 });
