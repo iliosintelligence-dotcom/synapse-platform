@@ -160,17 +160,3 @@ alter table public.properties enable trigger properties_queue_enrichment;
 alter table public.properties enable trigger properties_require_location;
 set local synapse.skip_split = 'off';
 
--- DRYRUN-BEGIN: report, then roll everything back. Remove this block to apply for real.
-do $$
-declare n1 bigint; n2 bigint; n3 bigint; n4 bigint; samp text; ctrl bigint;
-begin
-  select count(*) into n1 from properties;
-  select count(*) into n2 from property_private;
-  select count(*) into n3 from properties p join property_private pp on pp.property_id = p.id where p.address is distinct from pp.address;
-  select count(*) into n4 from properties p join property_private pp on pp.property_id = p.id where p.latitude is distinct from pp.latitude;
-  select string_agg(coalesce(p.address, 'NULL'), ' | ') into samp from (select address from properties where address is not null limit 6) p;
-  select count(*) into ctrl from property_places;
-  raise exception 'DRYRUN properties=% private=% address_generalised=% pin_rounded=% property_places_kept=% sample public addresses: %',
-    n1, n2, n3, n4, ctrl, samp;
-end $$;
--- DRYRUN-END
