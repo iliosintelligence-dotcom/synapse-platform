@@ -454,14 +454,12 @@ function buildSchema(channels: string[]) {
         type: 'object',
         properties: captionProps,
         required: channels,
-        additionalProperties: false,
       },
       hashtags: { type: 'array', items: { type: 'string' } },
       recommendedChannel: { type: 'string', enum: channels },
       note: { type: 'string' },
     },
     required: ['captions', 'hashtags', 'recommendedChannel', 'note'],
-    additionalProperties: false,
   };
 }
 
@@ -535,7 +533,6 @@ const REVISE_SCHEMA = {
   type: 'object',
   properties: { caption: { type: 'string' } },
   required: ['caption'],
-  additionalProperties: false,
 };
 
 function parseLoose(raw: string): Record<string, unknown> {

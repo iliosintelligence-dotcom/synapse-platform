@@ -398,7 +398,7 @@ async function suggestCaption(b: Row): Promise<Response> {
           maxOutputTokens: 900,
           temperature: 0.55,
           responseMimeType: 'application/json',
-          responseSchema: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3 },
+          responseSchema: { type: 'array', items: { type: 'string' } },
         },
       }),
     });
