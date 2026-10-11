@@ -625,7 +625,11 @@ Deno.serve(async (req: Request) => {
        million") changes one thing and keeps the rest, instead of the model having to re-derive it all. */
     const prevBrief = briefFromSaved(session?.criteria ?? null);
     const prevProfile = profileFromSaved(session?.criteria ?? null);
-    const u = await understand(key, messages, prevBrief, prevProfile, liveCities);
+    /* The page's own opener ("Tell me about this home.") says nothing about the buyer, so it is not worth a model call to
+       read it: skipping it takes a full round trip off the first reply. */
+    const isOpener = typeof body.listingId === 'string' && messages.filter((m) => m.role === 'user').length === 1
+      && /^tell me about this home\.?$/i.test(userText.trim());
+    const u = isOpener ? readUnderstood({ intent: 'question' }) : await understand(key, messages, prevBrief, prevProfile, liveCities);
     const brief = mergeBrief(prevBrief, u, userText);
     const profile = mergeProfile(prevProfile, u, userText);
 
