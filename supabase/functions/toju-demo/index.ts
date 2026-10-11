@@ -22,7 +22,7 @@
  * Env: GEMINI_API_KEY + SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
  */
 import {
-  briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
+  type Ask, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
 } from './facts.ts';
 
@@ -305,6 +305,121 @@ budget, its why line says so first ("₦1.5m is below your ₦3m floor").
 
 Output STRICT JSON ONLY: {"reply": "<message>", "more": <null|"<one short extra point, 40 words max>">, "why": {"<id>": "<line>"}, "suggestions": [<string>]}`;
 
+/* ───────────── ONE HOME: "Discuss with an agent" (Eden, 2026-10-12) ─────────────
+   The buyer pressed the button on a listing, so the home is the subject of the whole conversation. This used to
+   reach the normal search flow with the home attached as a loose note, found nothing to search for and answered
+   "we have nothing live in there yet" about a home on the buyer's own screen. Now the listing id travels with the
+   chat, the row is read here (live listings only, and never the agency's private numbers), and Tayo opens by
+   talking about THIS home and asking what an agent would ask. */
+const PINNED_PROMPT = `${DOCTRINE}
+
+THIS CONVERSATION IS ABOUT ONE HOME, AND IT IS ON THE BUYER'S SCREEN.
+They pressed "Discuss with an agent" on a listing. You are the advisor sitting beside them while they decide, and the
+agency will act on what you learn. You are given JSON: "listing" (everything the agency published about this home),
+"profile" and "brief" (what you know about the buyer), "ask" (the one thing to find out next), "turn" (1 on the first
+reply), "conversation_tail".
+
+NEVER say there is nothing live, nothing available, or that you have no homes. The home is right there. Never ask where
+they want to live or what kind of home they want: they have shown you the home. Never ask a question whose answer is
+in the listing.
+
+TURN 1: open with the home in one or two sentences, from the listing only: what it is, where, and the price exactly as
+"priceText". Then the two or three facts that matter most to someone buying in Nigeria and are actually in the data:
+the electricity band in hours, the title document, security, water, backup power, condition or age, the service charge
+and fees when stated. Choose what stands out; do not recite a spec sheet. Then ONE question, from "ask".
+LATER TURNS: answer what they asked straight from the listing. If the listing does not say, tell them the agency will
+have to confirm it and offer to put the question to them; never guess. Then ONE question that moves toward a decision.
+
+HOW A SALE GOES. The asking price is where it starts. You never suggest going below it and never guess what the
+agency would accept. When "listing.negotiable" is true you may say agencies often have some room, without a number.
+Say plainly that you can carry their offer to the agency and that only the agency can accept one. When they are
+serious, say you will introduce them to the agent with everything they have told you.
+HOW A RENTAL GOES. The rent is set by the agency and is not negotiable: do not invite an offer or suggest a lower
+figure. Help with what to check, what is paid upfront, and the payment terms; when they are serious, say you will
+introduce them to the agent.
+
+NUMBERS: every amount you write must be in "listing" or have been said by the buyer, or be a plain sum or difference of
+those. No market comparisons, no "typical price", no forecasts. Never claim the home is verified unless
+"listing.verified" is true. Never mention the agency's floor, reserve or any number not in the JSON.
+
+Length: about 70 words, at most two short paragraphs. The question counts.
+Output STRICT JSON ONLY: {"reply": "<message>", "more": null, "why": {}, "suggestions": []}`;
+
+interface PinnedHome { match: Match; facts: Record<string, unknown>; feeText: string }
+async function loadPinned(id: string): Promise<PinnedHome | null> {
+  const s = sb();
+  if (!s) return null;
+  const { matches } = await fetchMatches({}, { id, limit: 1 });
+  const match = matches[0];
+  if (!match) return null;
+  const sel = 'description,amenities,electricity_band,furnished,property_condition,year_built,title_type,service_charge,agency_fee,legal_fee,is_negotiable,toilets,parking_spaces,area_sqm,floor_level,total_floors,state,build_stage,build_progress_pct';
+  const [d, fl] = await Promise.all([
+    fetch(`${s.url}/rest/v1/properties?id=eq.${id}&select=${sel}`, { headers: s.headers }).then((r) => r.ok ? r.json() : []).catch(() => []),
+    fetch(`${s.url}/rest/v1/property_flood?property_id=eq.${id}&select=in_zone_100,in_zone_10,depth_100_m,nearest_flood_m,covered,measured`, { headers: s.headers }).then((r) => r.ok ? r.json() : []).catch(() => []),
+  ]);
+  const p = (Array.isArray(d) ? d[0] : null) ?? {} as Record<string, unknown>;
+  const f = (Array.isArray(fl) ? fl[0] : null) as Record<string, unknown> | null;
+  const BAND_HOURS: Record<string, string> = { A: '20+', B: '16+', C: '12+', D: '8+', E: '4+' };
+  const money = (n: unknown) => (n == null || Number(n) <= 0 ? null : naira(Number(n)));
+  const facts: Record<string, unknown> = {
+    title: match.title, kind: match.deal?.propertyType ?? null, forRent: match.listingType === 'rent',
+    priceText: naira(match.price) + (match.listingType === 'rent' ? ' per year' : ''), price: match.price,
+    area: match.neighbourhood?.name ?? null, city: match.city, state: p.state ?? null,
+    bedrooms: match.bedrooms || null, bathrooms: match.bathrooms || null, toilets: p.toilets ?? null, areaSqm: p.area_sqm ?? null,
+    parkingSpaces: p.parking_spaces ?? null, floor: p.floor_level ?? null,
+    electricityBand: p.electricity_band ? `Band ${p.electricity_band}, about ${BAND_HOURS[String(p.electricity_band)] ?? '?'} hours of supply a day` : null,
+    titleDocument: p.title_type ?? null, furnished: p.furnished ?? null, condition: p.property_condition ?? null, yearBuilt: p.year_built ?? null,
+    amenities: Array.isArray(p.amenities) ? p.amenities : [],
+    serviceCharge: money(p.service_charge), agencyFee: money(p.agency_fee), legalFee: money(p.legal_fee),
+    negotiable: p.is_negotiable ?? null, verified: match.verified,
+    buildStage: p.build_stage ?? null, buildProgressPct: p.build_progress_pct ?? null, deal: match.deal ?? null,
+    description: typeof p.description === 'string' ? p.description.slice(0, 900) : null,
+    floodRisk: f && f.measured && f.covered !== false
+      ? (f.in_zone_100 ? 'inside the modelled 100-year river flood zone' : f.nearest_flood_m != null ? `modelled river flood water about ${f.nearest_flood_m} m away` : 'no modelled river flooding nearby') + ' (river model only)'
+      : null,
+    listedBy: match.agency,
+  };
+  const feeText = [p.service_charge, p.agency_fee, p.legal_fee].map((n) => (n == null ? '' : naira(Number(n)))).join(' ');
+  return { match, facts, feeText };
+}
+
+function pinnedAsk(h: PinnedHome, brief: Brief, profile: Profile): Ask {
+  const tried = (k: string) => (profile.asked[k] ?? 0) >= 2;
+  const sale = !h.match.listingType || h.match.listingType !== 'rent';
+  if (!brief.maxPrice && !profile.financing && !tried('budget')) {
+    return { slot: 'budget', closed: [], hint: sale
+      ? 'Ask what budget they are working to for this home and how they would pay: outright, a mortgage, or instalments. One open question, on their side.'
+      : 'Ask what they can comfortably pay for the year and whether they can pay the full year upfront. One open question, on their side.' };
+  }
+  if (!profile.timeline && !tried('timeline')) return { slot: 'timeline', closed: [], hint: 'Ask when they need to move in or complete by.' };
+  if (!profile.household && h.match.deal?.propertyType !== 'land' && !tried('household')) {
+    return { slot: 'household', closed: [], hint: 'Ask who would be living there, so you can judge whether it fits them. Open question.' };
+  }
+  if (!profile.name && !tried('name')) return { slot: 'name', closed: [], hint: 'Ask what you should call them.' };
+  return { slot: null, closed: [], hint: sale
+    ? 'Nothing more is needed. Offer one concrete next step: put their offer or questions to the agency, or arrange a viewing.'
+    : 'Nothing more is needed. Offer one concrete next step: introduce them to the agent or arrange a viewing.' };
+}
+
+function pinnedEvidence(h: PinnedHome, brief: Brief): Evidence {
+  const m = h.match;
+  return { checked: true, place: m.neighbourhood?.name ?? m.city, kindLabel: 'this home', liveInPlace: 1, sameKindInPlace: 1,
+    priceRange: { min: m.price, max: m.price }, budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 1,
+    role: 'exact', otherPlaces: [], note: null,
+    shown: [{ id: m.id, title: m.title, price: m.price, period: m.pricePeriod, area: m.neighbourhood?.name ?? null, bedrooms: m.bedrooms, kind: matchKind(m) }] } as Evidence;
+}
+
+/** If the model cannot be trusted this turn, say something true about THIS home and ask the next question. */
+function pinnedPlain(h: PinnedHome, ask: Ask): string {
+  const m = h.match, where = [m.neighbourhood?.name, m.city].filter(Boolean).join(', ');
+  const rent = m.listingType === 'rent';
+  const q = ask.slot === 'budget' ? (rent ? ' What can you comfortably pay for the year?' : ' What budget are you working to, and how would you pay?')
+    : ask.slot === 'timeline' ? ' When do you need to move in or complete by?'
+    : ask.slot === 'household' ? ' Who would be living there?'
+    : ask.slot === 'name' ? ' What should I call you?' : ' Shall I put your questions to the agency?';
+  return `${m.title}${where ? ' in ' + where : ''} is ${naira(m.price)}${rent ? ' a year' : ''}.${q}`;
+}
+
 const NEGOTIATE_PROMPT = `You are Tayo, Nigeria's AI Property Advisor built by Synapse — calm, warm,
 honest; an advisor, never a salesperson. No guarantees; if something is
 uncertain or unverified, say so. Here you help the buyer open a negotiation
@@ -377,7 +492,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
     const body = (await req.json().catch(() => ({}))) as {
-      action?: string; visitorId?: string; messages?: Msg[]; source?: string;
+      action?: string; visitorId?: string; messages?: Msg[]; source?: string; listingId?: string;
     };
     const visitorId = typeof body.visitorId === 'string' && UUID_RE.test(body.visitorId) ? body.visitorId : null;
 
@@ -514,15 +629,20 @@ Deno.serve(async (req: Request) => {
     const brief = mergeBrief(prevBrief, u, userText);
     const profile = mergeProfile(prevProfile, u, userText);
 
+    /* The home they pressed "Discuss with an agent" on stays the subject until they clearly ask about somewhere else. */
+    const pinnedId = typeof body.listingId === 'string' && UUID_RE.test(body.listingId) ? body.listingId : null;
+    const movedOn = (u.intent === 'search' || u.intent === 'refine') && !!brief.place && brief.place !== prevBrief.place;
+    const pinned = pinnedId && !movedOn ? await loadPinned(pinnedId).catch((e) => { console.error('pinned listing failed: ' + e); return null; }) : null;
+
     /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
-    const canSearch = !!brief.place;
-    const { ev, matches: found } = canSearch
+    const canSearch = !!brief.place && !pinned;
+    const { ev, matches: found } = pinned ? { ev: pinnedEvidence(pinned, brief), matches: [] as Match[] } : canSearch
       ? await buildEvidence(brief, inv)
       : { ev: { checked: !!inv, place: null, kindLabel: kindLabelOf(brief), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
           budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 0, role: 'none' as const, shown: [], otherPlaces: [], note: null } as Evidence,
         matches: [] as Match[] };
-    const showCards = found.length > 0 && u.intent !== 'chat';
-    const ask = nextAsk(brief, profile, found.length);
+    const showCards = !pinned && found.length > 0 && u.intent !== 'chat';
+    const ask = pinned ? pinnedAsk(pinned, brief, profile) : nextAsk(brief, profile, found.length);
 
     /* Past prices, never a forecast (Eden, 2026-10-02): a table from a web search. */
     let priceHistory: PriceHistory | null = null;
@@ -536,8 +656,9 @@ Deno.serve(async (req: Request) => {
        reply is built from the evidence alone, so it cannot be wrong. */
     const respondInput = JSON.stringify({
       brief, profile: { ...profile, asked: undefined, phone: profile.phone ? 'given' : null, email: profile.email ? 'given' : null },
-      evidence: evidenceForModel(ev, found), ask,
-      conversation_tail: messages.slice(-6), dream_board: dreamNote, listing_context: listingNote,
+      evidence: pinned ? undefined : evidenceForModel(ev, found), ask,
+      listing: pinned ? pinned.facts : undefined, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,
+      conversation_tail: messages.slice(-6), dream_board: dreamNote, listing_context: pinned ? undefined : listingNote,
       history: priceHistory ? 'A table of how prices there have moved is attached under your reply. Say once that you cannot forecast; do not quote its numbers.'
         : (ph && ph.area ? 'You could not pull reliable past prices just now; say so.' : null),
     });
@@ -553,11 +674,11 @@ Deno.serve(async (req: Request) => {
         ? [{ role: 'user', content: respondInput }]
         : [{ role: 'user', content: respondInput }, { role: 'assistant', content: JSON.stringify({ reply: candidate }) },
           { role: 'user', content: 'That reply failed these checks: ' + problems.join(' | ') + ' Write it again so it passes every one, in the same JSON format.' }];
-      const out = await gemini(key, RESPOND_PROMPT, turn, 1100);
+      const out = await gemini(key, pinned ? PINNED_PROMPT : RESPOND_PROMPT, turn, 1100);
       if ('error' in out) { problems = [out.error]; break; }
       const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
       candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
-      problems = checkReply(candidate, ev, userText, brief);
+      problems = checkReply(candidate, ev, pinned ? userText + ' ' + pinned.feeText : userText, brief);
       if (ask.slot && !/\?/.test(candidate)) problems.push(`The reply must end with the one question to ask next: ${ask.hint}`);
       if (!problems.length) {
         accepted = true; reply = candidate;
@@ -567,7 +688,7 @@ Deno.serve(async (req: Request) => {
     }
     if (!accepted) {
       console.error('reply refused by the evidence check: ' + problems.join(' | ').slice(0, 400));
-      reply = plainReply(ev, brief, ask); more = null; whys = {};
+      reply = pinned ? pinnedPlain(pinned, ask) : plainReply(ev, brief, ask); more = null; whys = {};
     }
     if (ask.slot) profile.asked[ask.slot] = (profile.asked[ask.slot] ?? 0) + 1;
 
@@ -1300,10 +1421,14 @@ interface SearchOpts {
   minPrice?: number | null; maxPrice?: number | null;
   /** How many rows to return; the default is the number of cards. */
   limit?: number;
+  /** One live listing by id, ignoring place, budget and kind (the home the buyer pressed Discuss on). */
+  id?: string;
 }
 async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches: Match[]; total: number }> {
   const s = sb();
   if (!s) return { matches: [], total: 0 };
+  const byId = typeof o.id === 'string' && UUID_RE.test(o.id);
+  if (byId) c = { browse: true } as Criteria;
 
   const intent = (c.intent ?? 'live') as string;
   const shared = c.dealType === 'shared';
@@ -1320,6 +1445,7 @@ async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches:
     `property_type=${shared ? 'eq' : 'neq'}.shared`];
   /* Land is never a house, and a finished home is never off-plan
      (20261003090000_what_kind_of_deal). Browsing applies none of this. */
+  if (byId) conds.push('id=eq.' + o.id);
   if (!c.browse) {
     if (c.propertyKind === 'land') conds.push('property_type=eq.land');
     else if (c.propertyKind === 'home' && !shared) conds.push('property_type=not.in.(land,commercial)');

@@ -395,7 +395,9 @@ export function checkReply(reply: string, ev: Evidence, userText: string, brief:
  */
 export function plainReply(ev: Evidence, brief: Brief, ask: Ask): string {
   if (!ev.checked) return `I couldn't read our listings just now, so I won't guess. Try me again in a moment.`;
-  const where = ev.place ?? 'there';
+  /* No place yet means nothing was searched, so nothing can be said about what is or is not live. */
+  if (!ev.place) return ask.slot ? plainQuestion(ask) : 'Tell me what you are looking for and I will look.';
+  const where = ev.place;
   const budget = brief.minPrice && brief.maxPrice ? `between ${naira(brief.minPrice)} and ${naira(brief.maxPrice)}` : brief.maxPrice ? `under ${naira(brief.maxPrice)}` : brief.minPrice ? `above ${naira(brief.minPrice)}` : null;
   const q = ask.slot ? ' ' + plainQuestion(ask) : '';
   if (ev.role === 'exact') {
