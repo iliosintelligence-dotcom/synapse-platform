@@ -30,6 +30,7 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 /* Stable Flash keeps Tayo quick and inexpensive. The model can be overridden
    for a controlled evaluation without changing the function code. */
 const MODEL = Deno.env.get('TOJU_GEMINI_MODEL') ?? 'gemini-3.8-flash';
+const FALLBACK_MODEL = Deno.env.get('TOJU_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
 /* Reading a message is data work, not writing: a faster model does it. */
 const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-3.8-flash';
 /* The reply envelope carries criteria + profile alongside the prose, and at
@@ -605,14 +606,25 @@ async function gemini(key: string, system: string, messages: Msg[], maxTokens: n
     },
   };
   if (tools?.length) body.tools = tools;
-  const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) return { error: `Gemini ${res.status}: ${await res.text()}` };
-  const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-  return { text: (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('') };
+  const models = [...new Set([model, FALLBACK_MODEL])];
+  let lastError = 'Gemini unavailable';
+  for (const candidateModel of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 180 * attempt));
+      const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(candidateModel)}:generateContent`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+        return { text: (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('') };
+      }
+      lastError = `Gemini ${res.status}: ${(await res.text()).slice(0, 900)}`;
+      if (![429, 500, 502, 503, 504].includes(res.status)) return { error: lastError };
+    }
+  }
+  return { error: lastError };
 }
 
 // ── session persistence (demo_chat_sessions, service role) ──

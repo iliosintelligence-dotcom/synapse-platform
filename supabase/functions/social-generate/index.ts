@@ -41,6 +41,7 @@
  */
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-3.8-flash';
+const FALLBACK_MODEL = Deno.env.get('SOCIAL_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -464,10 +465,7 @@ function buildSchema(channels: string[]) {
 }
 
 async function gemini(key: string, system: string, user: string, maxTokens: number, schema: unknown) {
-  const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(MODEL)}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const body = {
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: user }] }],
       generationConfig: {
@@ -476,21 +474,31 @@ async function gemini(key: string, system: string, user: string, maxTokens: numb
         responseMimeType: 'application/json',
         responseSchema: schema,
       },
-    }),
-  });
-  if (!res.ok) return { error: `Gemini ${res.status}: ${await res.text()}` } as const;
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
   };
-  const candidate = data.candidates?.[0];
-  return {
-    text: (candidate?.content?.parts ?? []).map((b) => b.text ?? '').join(''),
-    /* Surfaced because running out of tokens mid-JSON is the one failure that
-       does not look like one: the reply is a 200 carrying half an object,
-       parseLoose returns {}, and the portal shows a generic "try again" for
-       something retrying will not fix. */
-    truncated: candidate?.finishReason === 'MAX_TOKENS',
-  } as const;
+  let lastError = 'Gemini unavailable';
+  for (const candidateModel of [...new Set([MODEL, FALLBACK_MODEL])]) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 180 * attempt));
+      const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(candidateModel)}:generateContent`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+        };
+        const candidate = data.candidates?.[0];
+        return {
+          text: (candidate?.content?.parts ?? []).map((b) => b.text ?? '').join(''),
+          truncated: candidate?.finishReason === 'MAX_TOKENS',
+        } as const;
+      }
+      lastError = `Gemini ${res.status}: ${(await res.text()).slice(0, 900)}`;
+      if (![429, 500, 502, 503, 504].includes(res.status)) return { error: lastError } as const;
+    }
+  }
+  return { error: lastError } as const;
 }
 
 /* ── one caption, changed on request ──────────────────────────────────────

@@ -32,6 +32,7 @@ const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
 const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_MODEL = Deno.env.get('STUDIO_GEMINI_MODEL') ?? 'gemini-3.8-flash';
+const GEMINI_FALLBACK_MODEL = Deno.env.get('STUDIO_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
 const trypostOn = () => Boolean(TRYPOST_URL && TRYPOST_KEY);
 const tpHeaders = () => ({
   Authorization: 'Bearer ' + TRYPOST_KEY, 'Content-Type': 'application/json', Accept: 'application/json',
@@ -386,12 +387,16 @@ async function suggestCaption(b: Row): Promise<Response> {
     + 'Voice: calm, specific, warm, plain English. No hype, no pressure, no invented facts, figures or promises. '
     + 'At most two emoji, no hashtag walls (up to three relevant hashtags at the end is fine). '
     + 'Write for ' + platform + '. Return ONLY a JSON array of exactly three different caption strings.';
-  let res: Response;
-  try {
-    res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
-      method: 'POST',
-      headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+  let res: Response | null = null;
+  let data: Row = {};
+  for (const model of [...new Set([GEMINI_MODEL, GEMINI_FALLBACK_MODEL])]) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 180 * attempt));
+      try {
+        res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(model)}:generateContent`, {
+          method: 'POST',
+          headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: 'The post is about: ' + brief }] }],
         generationConfig: {
@@ -399,11 +404,15 @@ async function suggestCaption(b: Row): Promise<Response> {
           temperature: 0.55,
           responseMimeType: 'application/json',
           responseSchema: { type: 'array', items: { type: 'string' } },
-        },
-      }),
-    });
-  } catch { return json({ error: 'Could not reach the caption writer. Try again.' }, 502); }
-  const data = await res.json().catch(() => ({})) as Row;
+          }),
+        });
+      } catch { res = null; }
+      if (res?.ok) { data = await res.json().catch(() => ({})) as Row; break; }
+      if (res && ![429, 500, 502, 503, 504].includes(res.status)) break;
+    }
+    if (res?.ok || (res && ![429, 500, 502, 503, 504].includes(res.status))) break;
+  }
+  if (!res) return json({ error: 'Could not reach the caption writer. Try again.' }, 502);
   const text = (((data.candidates as Row[] | undefined)?.[0]?.content as Row | undefined)?.parts as Row[] | undefined)
     ?.map((p) => String(p.text ?? '')).join('') ?? '';
   const m = text.match(/\[[\s\S]*\]/);
