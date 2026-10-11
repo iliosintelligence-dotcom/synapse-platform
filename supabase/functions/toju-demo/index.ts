@@ -29,9 +29,9 @@ import {
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 /* Stable Flash keeps Tayo quick and inexpensive. The model can be overridden
    for a controlled evaluation without changing the function code. */
-const MODEL = Deno.env.get('TOJU_GEMINI_MODEL') ?? 'gemini-2.5-flash';
+const MODEL = Deno.env.get('TOJU_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 /* Reading a message is data work, not writing: a faster model does it. */
-const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-2.5-flash-lite';
+const UNDERSTAND_MODEL = Deno.env.get('TOJU_GEMINI_UNDERSTAND_MODEL') ?? 'gemini-3.8-flash';
 /* The reply envelope carries criteria + profile alongside the prose, and at
    700 it was running out mid-JSON — the parse then failed and the raw
    envelope was handed to the client, which rendered {"reply": …} straight

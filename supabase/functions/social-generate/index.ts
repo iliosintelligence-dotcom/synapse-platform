@@ -40,7 +40,7 @@
  * Env: GEMINI_API_KEY.
  */
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-2.5-flash';
+const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',

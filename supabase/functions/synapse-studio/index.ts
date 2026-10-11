@@ -31,7 +31,7 @@ type Row = Record<string, unknown>;
 const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
 const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const GEMINI_MODEL = Deno.env.get('STUDIO_GEMINI_MODEL') ?? 'gemini-2.5-flash';
+const GEMINI_MODEL = Deno.env.get('STUDIO_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 const trypostOn = () => Boolean(TRYPOST_URL && TRYPOST_KEY);
 const tpHeaders = () => ({
   Authorization: 'Bearer ' + TRYPOST_KEY, 'Content-Type': 'application/json', Accept: 'application/json',
