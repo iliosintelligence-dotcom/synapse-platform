@@ -397,13 +397,14 @@ async function suggestCaption(b: Row): Promise<Response> {
           method: 'POST',
           headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts: [{ text: 'The post is about: ' + brief }] }],
-        generationConfig: {
-          maxOutputTokens: 900,
-          temperature: 0.55,
-          responseMimeType: 'application/json',
-          responseSchema: { type: 'array', items: { type: 'string' } },
+            systemInstruction: { parts: [{ text: system }] },
+            contents: [{ role: 'user', parts: [{ text: 'The post is about: ' + brief }] }],
+            generationConfig: {
+              maxOutputTokens: 900,
+              temperature: 0.55,
+              responseMimeType: 'application/json',
+              responseSchema: { type: 'array', items: { type: 'string' } },
+            },
           }),
         });
       } catch { res = null; }
