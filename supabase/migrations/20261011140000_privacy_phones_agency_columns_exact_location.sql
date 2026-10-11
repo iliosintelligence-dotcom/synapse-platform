@@ -147,6 +147,7 @@ grant execute on function public.agency_property_exact(uuid) to authenticated, s
 -- every one for paid enrichment again).
 set local synapse.skip_split = 'on';
 alter table public.properties disable trigger properties_queue_enrichment;
+alter table public.properties disable trigger properties_require_location;
 insert into public.property_private (property_id, address, latitude, longitude)
   select id, address, latitude, longitude from public.properties
   on conflict (property_id) do nothing;
@@ -156,6 +157,7 @@ update public.properties
        longitude = round(longitude::numeric, 3)
  where address is not null or latitude is not null;
 alter table public.properties enable trigger properties_queue_enrichment;
+alter table public.properties enable trigger properties_require_location;
 set local synapse.skip_split = 'off';
 
 -- DRYRUN-BEGIN: report, then roll everything back. Remove this block to apply for real.
