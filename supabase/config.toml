@@ -75,6 +75,9 @@ verify_jwt = true
 [functions.social-publish]
 verify_jwt = true
 
+[functions.property-flood]
+verify_jwt = false
+
 [functions.property-intelligence]
 verify_jwt = true
 
