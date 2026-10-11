@@ -75,7 +75,7 @@ Deno.serve(async (req: Request) => {
     if (text.trim().length < 20) return json({ error: 'Write a little more in the description first' }, 400);
 
     /* Same call shape as social-generate: JSON out, the fallback model if the first is busy. */
-    const body = {
+    const gbody = {
       systemInstruction: { parts: [{ text: PROMPT }] },
       contents: [{ role: 'user', parts: [{ text }] }],
       generationConfig: { maxOutputTokens: 1200, temperature: 0.1, responseMimeType: 'application/json' },
@@ -85,7 +85,7 @@ Deno.serve(async (req: Request) => {
       for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 200));
         const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(model)}:generateContent`, {
-          method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(gbody),
         });
         lastStatus = res.status;
         if (res.ok) {
