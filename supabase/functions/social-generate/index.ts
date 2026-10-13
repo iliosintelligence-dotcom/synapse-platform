@@ -39,6 +39,7 @@
  * Deployed with verify_jwt = false so the static prototype can call it.
  * Env: GEMINI_API_KEY.
  */
+import { fastLlm } from '../_shared/llm.ts';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 const FALLBACK_MODEL = Deno.env.get('SOCIAL_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
@@ -465,6 +466,10 @@ function buildSchema(channels: string[]) {
 }
 
 async function gemini(key: string, system: string, user: string, maxTokens: number, schema: unknown) {
+  /* Fast path first (see _shared/llm.ts): captions in a second or two instead of five to ten. Falls back to Gemini on any error. */
+  const fast = await fastLlm({ system, messages: [{ role: 'user', content: user }], maxTokens, temperature: 0.55, schema, timeoutMs: 15000 });
+  if (fast && 'text' in fast) return { text: fast.text, truncated: !!fast.truncated } as const;
+  if (fast && 'error' in fast) console.error('fast llm failed, using Gemini: ' + fast.error.slice(0, 200));
   const body = {
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: user }] }],

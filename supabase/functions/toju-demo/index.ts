@@ -21,6 +21,7 @@
  * Deployed with verify_jwt = false so the static prototype can call it.
  * Env: GEMINI_API_KEY + SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
  */
+import { fastLlm } from '../_shared/llm.ts';
 import {
   type Ask, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
@@ -817,6 +818,14 @@ Deno.serve(async (req: Request) => {
 async function gemini(key: string, system: string, messages: Msg[], maxTokens: number, model: string = MODEL,
   tools?: unknown[]):
   Promise<{ text: string } | { error: string }> {
+  /* THE FAST PATH (Eden, 2026-10-13: replies must come back in two or three seconds). Llama on a purpose-built
+     inference host answers in a fraction of a second; it is tried first for every call that needs no web search,
+     and any failure falls straight through to Gemini below, so a slow answer is the worst case, never none. */
+  if (!tools?.length) {
+    const fast = await fastLlm({ system, messages: messages as Array<{ role: 'user' | 'assistant'; content: string }>, maxTokens, small: model === UNDERSTAND_MODEL });
+    if (fast && 'text' in fast) return { text: fast.text };
+    if (fast && 'error' in fast) console.error('fast llm failed, using Gemini: ' + fast.error.slice(0, 200));
+  }
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: system }] },
     contents: messages.map((m) => ({
