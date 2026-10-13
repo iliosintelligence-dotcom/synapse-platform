@@ -27,7 +27,7 @@ const PROVIDERS = {
   },
   cerebras: {
     url: 'https://api.cerebras.ai/v1/chat/completions',
-    key: 'CEREBRAS_API_KEY', model: 'llama-3.3-70b', fast: 'llama3.1-8b',
+    key: 'CEREBRAS_API_KEY', model: 'gpt-oss-120b', fast: 'gpt-oss-120b',
   },
 } as const;
 
@@ -50,14 +50,14 @@ export const fastLlmConfigured = (): boolean => pick() !== null;
  * defensively as it always did.
  */
 export async function fastLlm(o: {
-  system: string; messages: FastMsg[]; maxTokens: number; temperature?: number; small?: boolean; schema?: unknown; timeoutMs?: number;
+  system: string; messages: FastMsg[]; maxTokens: number; temperature?: number; small?: boolean; schema?: unknown; timeoutMs?: number; model?: string;
 }): Promise<FastResult> {
   const p = pick();
   if (!p) return null;
   const cfg = PROVIDERS[p.name];
-  const model = o.small
+  const model = o.model ?? (o.small
     ? (Deno.env.get('LLM_FAST_MODEL') ?? cfg.fast)
-    : (Deno.env.get('LLM_MODEL') ?? cfg.model);
+    : (Deno.env.get('LLM_MODEL') ?? cfg.model));
   /* JSON mode needs the word JSON in the prompt; a schema, when there is one, is spelled out. */
   const system = o.system + '\n\nReturn ONLY one valid JSON object, no prose around it.'
     + (o.schema ? ' It must match this JSON schema: ' + JSON.stringify(o.schema) : '');
@@ -70,6 +70,7 @@ export async function fastLlm(o: {
       body: JSON.stringify({
         model, temperature: o.temperature ?? 0.25, max_tokens: o.maxTokens,
         response_format: { type: 'json_object' },
+        ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : {}),
         messages: [{ role: 'system', content: system }, ...o.messages.map((m) => ({ role: m.role, content: m.content }))],
       }),
       signal: ctl.signal,
