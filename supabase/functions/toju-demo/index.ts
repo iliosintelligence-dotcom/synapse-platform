@@ -560,7 +560,7 @@ Deno.serve(async (req: Request) => {
     const body = (await req.json().catch(() => ({}))) as {
       action?: string; visitorId?: string; messages?: Msg[]; source?: string; listingId?: string;
       /** 'discuss' (negotiate for the agent) or 'info' (answer questions about a home they met on social). */
-      mode?: string; list?: boolean; model?: string;
+      mode?: string; list?: boolean; model?: string; provider?: string;
     };
     const visitorId = typeof body.visitorId === 'string' && UUID_RE.test(body.visitorId) ? body.visitorId : null;
 
@@ -637,7 +637,7 @@ Deno.serve(async (req: Request) => {
       }
       if (body.list) return json({ models });
       const t0 = Date.now();
-      const r = await fastLlm({ system: 'Reply with JSON {"ok": true}.', messages: [{ role: 'user', content: 'ping' }], maxTokens: 60, timeoutMs: 20000, model: typeof body.model === 'string' ? body.model : undefined });
+      const r = await fastLlm({ system: 'Reply with JSON {"ok": true}.', messages: [{ role: 'user', content: 'ping' }], maxTokens: 60, timeoutMs: 20000, model: typeof body.model === 'string' ? body.model : undefined, provider: typeof body.provider === 'string' ? body.provider : undefined });
       return json({ configured: r !== null, ms: Date.now() - t0, ok: !!(r && 'text' in r), error: r && 'error' in r ? r.error.slice(0, 300) : null, sample: r && 'text' in r ? r.text.slice(0, 80) : null });
     }
 

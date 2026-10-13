@@ -2,62 +2,51 @@
  * llm.ts — the fast path for every short AI job (Tayo's replies, captions, rewrites).
  *
  * WHY (Eden, 2026-10-13): replies and captions took five to ten seconds. A person talking to Tayo expects a
- * human pace: two to three seconds. The slowness is the model host, not the prompts: a general "flash" model
- * answers in several seconds, while Llama served on a purpose-built inference chip answers in a fraction of one.
- * Groq and Cerebras both speak the OpenAI chat-completions format, so this is one small client for either.
+ * human pace: two to three seconds. The slowness was the model host: a general "flash" model answers in several
+ * seconds, while an open model served on a purpose-built inference chip answers in a fraction of one.
  *
- * Which one runs is decided by environment, nothing is hard-wired:
- *   LLM_PROVIDER   'groq' | 'cerebras'   (default: whichever of GROQ_API_KEY / CEREBRAS_API_KEY is set)
- *   GROQ_API_KEY / CEREBRAS_API_KEY
- *   LLM_MODEL        the writing model          (default llama-3.3-70b-versatile on Groq, llama-3.3-70b on Cerebras)
- *   LLM_FAST_MODEL   the small reading model    (default llama-3.1-8b-instant on Groq, llama3.1-8b on Cerebras)
+ * Two hosts, both OpenAI-chat-compatible, tried in order, then the caller's own Gemini as the last resort:
+ *   1. the first choice (LLM_PROVIDER, default cerebras: measured at about 2 s end to end for a Tayo turn)
+ *   2. the other one, if it has a key (a stall or an outage on one host costs a retry, not a slow answer)
+ *   3. null/error back to the caller, which carries on with Gemini exactly as before
  *
- * With no key set, fastLlm() returns null and the caller carries on with Gemini exactly as before. Any error
- * from the fast host also comes back as { error } so the caller can fall back to Gemini for that one call:
- * a slow answer is better than none.
+ * Models are what each account actually lists (checked with the llm_ping action, 2026-10-13): neither account
+ * offers Llama chat models today. Both offer OpenAI's open-source gpt-oss (120b, and 20b on Groq), which is what
+ * runs here. It reasons before it answers, so it runs at LOW effort.
+ *   CEREBRAS_API_KEY / GROQ_API_KEY       the keys (a host with no key is skipped)
+ *   LLM_PROVIDER                          'cerebras' | 'groq'  (which first)
+ *   CEREBRAS_MODEL, CEREBRAS_FAST_MODEL, GROQ_MODEL, GROQ_FAST_MODEL    override a model name
  */
 
 export interface FastMsg { role: 'user' | 'assistant'; content: string }
 export type FastResult = { text: string; truncated?: boolean } | { error: string } | null;
 
-const PROVIDERS = {
-  groq: {
-    url: 'https://api.groq.com/openai/v1/chat/completions',
-    key: 'GROQ_API_KEY', model: 'llama-3.3-70b-versatile', fast: 'llama-3.1-8b-instant',
-  },
-  cerebras: {
-    url: 'https://api.cerebras.ai/v1/chat/completions',
-    key: 'CEREBRAS_API_KEY', model: 'gpt-oss-120b', fast: 'gpt-oss-120b',
-  },
-} as const;
+type Name = 'cerebras' | 'groq';
+const PROVIDERS: Record<Name, { url: string; key: string; model: string; fast: string }> = {
+  cerebras: { url: 'https://api.cerebras.ai/v1/chat/completions', key: 'CEREBRAS_API_KEY', model: 'gpt-oss-120b', fast: 'gpt-oss-120b' },
+  groq: { url: 'https://api.groq.com/openai/v1/chat/completions', key: 'GROQ_API_KEY', model: 'openai/gpt-oss-120b', fast: 'openai/gpt-oss-20b' },
+};
 
-function pick(): { name: 'groq' | 'cerebras'; key: string } | null {
-  const want = (Deno.env.get('LLM_PROVIDER') ?? '').toLowerCase();
-  const order: Array<'groq' | 'cerebras'> = want === 'cerebras' ? ['cerebras', 'groq'] : ['groq', 'cerebras'];
-  for (const name of order) {
+function chain(): Array<{ name: Name; key: string }> {
+  const first = (Deno.env.get('LLM_PROVIDER') ?? 'cerebras').toLowerCase() === 'groq' ? 'groq' : 'cerebras';
+  const order: Name[] = first === 'groq' ? ['groq', 'cerebras'] : ['cerebras', 'groq'];
+  return order.flatMap((name) => {
     const key = Deno.env.get(PROVIDERS[name].key);
-    if (key) return { name, key };
-  }
-  return null;
+    return key ? [{ name, key }] : [];
+  });
 }
 
 /** true when a fast provider is configured (so callers can skip Gemini-only work such as web-search tools). */
-export const fastLlmConfigured = (): boolean => pick() !== null;
+export const fastLlmConfigured = (): boolean => chain().length > 0;
 
-/**
- * One JSON answer. `small` picks the small reading model (extraction, classification) over the writing model.
- * `schema` is told to the model in words (the OpenAI JSON mode has no schema), and the caller still parses
- * defensively as it always did.
- */
-export async function fastLlm(o: {
+async function one(p: { name: Name; key: string }, o: {
   system: string; messages: FastMsg[]; maxTokens: number; temperature?: number; small?: boolean; schema?: unknown; timeoutMs?: number; model?: string;
-}): Promise<FastResult> {
-  const p = pick();
-  if (!p) return null;
+}): Promise<{ text: string; truncated?: boolean } | { error: string }> {
   const cfg = PROVIDERS[p.name];
+  const up = p.name.toUpperCase();
   const model = o.model ?? (o.small
-    ? (Deno.env.get('LLM_FAST_MODEL') ?? cfg.fast)
-    : (Deno.env.get('LLM_MODEL') ?? cfg.model));
+    ? (Deno.env.get(`${up}_FAST_MODEL`) ?? cfg.fast)
+    : (Deno.env.get(`${up}_MODEL`) ?? cfg.model));
   /* JSON mode needs the word JSON in the prompt; a schema, when there is one, is spelled out. */
   const system = o.system + '\n\nReturn ONLY one valid JSON object, no prose around it.'
     + (o.schema ? ' It must match this JSON schema: ' + JSON.stringify(o.schema) : '');
@@ -75,7 +64,7 @@ export async function fastLlm(o: {
       }),
       signal: ctl.signal,
     });
-    if (!res.ok) return { error: `${p.name} ${res.status}: ${(await res.text().catch(() => '')).slice(0, 400)}` };
+    if (!res.ok) return { error: `${p.name} ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}` };
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }> };
     const c = data.choices?.[0];
     const text = c?.message?.content ?? '';
@@ -86,4 +75,26 @@ export async function fastLlm(o: {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * One JSON answer. `small` picks the small reading model (extraction, classification) over the writing model.
+ * `schema` is told to the model in words (the OpenAI JSON mode has no schema), and the caller still parses
+ * defensively as it always did. `provider` pins one host (used by the llm_ping diagnostic).
+ */
+export async function fastLlm(o: {
+  system: string; messages: FastMsg[]; maxTokens: number; temperature?: number; small?: boolean; schema?: unknown;
+  timeoutMs?: number; model?: string; provider?: string;
+}): Promise<FastResult> {
+  let hosts = chain();
+  if (o.provider) hosts = hosts.filter((h) => h.name === o.provider);
+  if (!hosts.length) return null;
+  let last = '';
+  for (const h of hosts) {
+    const r = await one(h, o);
+    if ('text' in r) return r;
+    last = r.error;
+    console.error('fast llm host failed: ' + last.slice(0, 200));
+  }
+  return { error: last };
 }
