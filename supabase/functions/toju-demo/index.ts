@@ -622,6 +622,13 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // ── is the fast model answering, and how fast? (no secrets in the answer) ──
+    if (body.action === 'llm_ping') {
+      const t0 = Date.now();
+      const r = await fastLlm({ system: 'Reply with JSON {"ok": true}.', messages: [{ role: 'user', content: 'ping' }], maxTokens: 30, timeoutMs: 20000 });
+      return json({ configured: r !== null, ms: Date.now() - t0, ok: !!(r && 'text' in r), error: r && 'error' in r ? r.error.slice(0, 300) : null, sample: r && 'text' in r ? r.text.slice(0, 80) : null });
+    }
+
     // ── chat / negotiate / compare need the model ──
     const key = Deno.env.get('GEMINI_API_KEY');
     if (!key) return json({ error: 'Server misconfigured: no Gemini key' }, 500);
