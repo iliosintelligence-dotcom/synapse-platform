@@ -792,7 +792,10 @@ Deno.serve(async (req: Request) => {
     let accepted = false;
     let problems: string[] = [];
     let candidate = '';
+    const sayStart = Date.now();
     for (let attempt = 0; attempt < 2 && !accepted; attempt++) {
+      /* A second try is only worth it while the conversation still feels quick. */
+      if (attempt > 0 && Date.now() - sayStart > 6000) break;
       const turn: Msg[] = attempt === 0
         ? [{ role: 'user', content: respondInput }]
         : [{ role: 'user', content: respondInput }, { role: 'assistant', content: JSON.stringify({ reply: candidate }) },

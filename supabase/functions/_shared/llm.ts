@@ -62,7 +62,7 @@ export async function fastLlm(o: {
   const system = o.system + '\n\nReturn ONLY one valid JSON object, no prose around it.'
     + (o.schema ? ' It must match this JSON schema: ' + JSON.stringify(o.schema) : '');
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort('timeout'), o.timeoutMs ?? 12000);
+  const timer = setTimeout(() => ctl.abort('timeout'), o.timeoutMs ?? 5000);
   try {
     const res = await fetch(cfg.url, {
       method: 'POST',
