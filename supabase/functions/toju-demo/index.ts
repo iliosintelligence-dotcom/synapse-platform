@@ -624,6 +624,18 @@ Deno.serve(async (req: Request) => {
 
     // ── is the fast model answering, and how fast? (no secrets in the answer) ──
     if (body.action === 'llm_ping') {
+      /* which models this account may use (ids only, never the key) */
+      const ck = Deno.env.get('CEREBRAS_API_KEY'), gk = Deno.env.get('GROQ_API_KEY');
+      const models: Record<string, string[]> = {};
+      for (const [name, url, k] of [['cerebras', 'https://api.cerebras.ai/v1/models', ck], ['groq', 'https://api.groq.com/openai/v1/models', gk]] as const) {
+        if (!k) continue;
+        try {
+          const r0 = await fetch(url, { headers: { Authorization: `Bearer ${k}` } });
+          const j = await r0.json().catch(() => ({})) as { data?: Array<{ id: string }> };
+          models[name] = (j.data ?? []).map((m) => m.id);
+        } catch { models[name] = ['(could not list)']; }
+      }
+      if (body.list) return json({ models });
       const t0 = Date.now();
       const r = await fastLlm({ system: 'Reply with JSON {"ok": true}.', messages: [{ role: 'user', content: 'ping' }], maxTokens: 30, timeoutMs: 20000 });
       return json({ configured: r !== null, ms: Date.now() - t0, ok: !!(r && 'text' in r), error: r && 'error' in r ? r.error.slice(0, 300) : null, sample: r && 'text' in r ? r.text.slice(0, 80) : null });
