@@ -866,11 +866,13 @@ async function gemini(key: string, system: string, messages: Msg[], maxTokens: n
   for (const candidateModel of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt) await new Promise((resolve) => setTimeout(resolve, 180 * attempt));
+      /* Never wait on Gemini for more than 20 s: the chat page gives up at 50 s and a hung request is worse than an error. */
       const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(candidateModel)}:generateContent`, {
         method: 'POST',
         headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      });
+        signal: AbortSignal.timeout(20000),
+      }).catch((e) => new Response(String(e), { status: 504 }));
       if (res.ok) {
         const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
         return { text: (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('') };

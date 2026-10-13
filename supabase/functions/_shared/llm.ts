@@ -6,7 +6,7 @@
  * seconds, while an open model served on a purpose-built inference chip answers in a fraction of one.
  *
  * Two hosts, both OpenAI-chat-compatible, tried in order, then the caller's own Gemini as the last resort:
- *   1. the first choice (LLM_PROVIDER, default cerebras: measured at about 2 s end to end for a Tayo turn)
+ *   1. the first choice (LLM_PROVIDER, default groq: 0.1 to 0.4 s a call; Cerebras' free tier hit its per-minute request limit)
  *   2. the other one, if it has a key (a stall or an outage on one host costs a retry, not a slow answer)
  *   3. null/error back to the caller, which carries on with Gemini exactly as before
  *
@@ -14,7 +14,7 @@
  * offers Llama chat models today. Both offer OpenAI's open-source gpt-oss (120b, and 20b on Groq), which is what
  * runs here. It reasons before it answers, so it runs at LOW effort.
  *   CEREBRAS_API_KEY / GROQ_API_KEY       the keys (a host with no key is skipped)
- *   LLM_PROVIDER                          'cerebras' | 'groq'  (which first)
+ *   LLM_PROVIDER                          'groq' | 'cerebras'  (which first, default groq)
  *   CEREBRAS_MODEL, CEREBRAS_FAST_MODEL, GROQ_MODEL, GROQ_FAST_MODEL    override a model name
  */
 
@@ -28,8 +28,8 @@ const PROVIDERS: Record<Name, { url: string; key: string; model: string; fast: s
 };
 
 function chain(): Array<{ name: Name; key: string }> {
-  const first = (Deno.env.get('LLM_PROVIDER') ?? 'cerebras').toLowerCase() === 'groq' ? 'groq' : 'cerebras';
-  const order: Name[] = first === 'groq' ? ['groq', 'cerebras'] : ['cerebras', 'groq'];
+  const first = (Deno.env.get('LLM_PROVIDER') ?? 'groq').toLowerCase() === 'cerebras' ? 'cerebras' : 'groq';
+  const order: Name[] = first === 'cerebras' ? ['cerebras', 'groq'] : ['groq', 'cerebras'];
   return order.flatMap((name) => {
     const key = Deno.env.get(PROVIDERS[name].key);
     return key ? [{ name, key }] : [];
