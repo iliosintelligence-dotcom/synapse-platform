@@ -843,10 +843,11 @@ async function gemini(key: string, system: string, messages: Msg[], maxTokens: n
   /* THE FAST PATH (Eden, 2026-10-13: replies must come back in two or three seconds). Llama on a purpose-built
      inference host answers in a fraction of a second; it is tried first for every call that needs no web search,
      and any failure falls straight through to Gemini below, so a slow answer is the worst case, never none. */
+  let fellBack = false;
   if (!tools?.length) {
     const fast = await fastLlm({ system, messages: messages as Array<{ role: 'user' | 'assistant'; content: string }>, maxTokens, small: model === UNDERSTAND_MODEL });
     if (fast && 'text' in fast) return { text: fast.text };
-    if (fast && 'error' in fast) console.error('fast llm failed, using Gemini: ' + fast.error.slice(0, 200));
+    if (fast && 'error' in fast) { fellBack = true; console.error('fast llm failed, using Gemini: ' + fast.error.slice(0, 200)); }
   }
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: system }] },
@@ -861,17 +862,18 @@ async function gemini(key: string, system: string, messages: Msg[], maxTokens: n
     },
   };
   if (tools?.length) body.tools = tools;
-  const models = [...new Set([model, FALLBACK_MODEL])];
+  /* After the fast hosts failed the person has already waited: one quick try on the light model, not four slow ones. */
+  const models = fellBack ? [FALLBACK_MODEL] : [...new Set([model, FALLBACK_MODEL])];
   let lastError = 'Gemini unavailable';
   for (const candidateModel of models) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < (fellBack ? 1 : 2); attempt++) {
       if (attempt) await new Promise((resolve) => setTimeout(resolve, 180 * attempt));
       /* Never wait on Gemini for more than 20 s: the chat page gives up at 50 s and a hung request is worse than an error. */
       const res = await fetch(`${GEMINI_API_URL}/${encodeURIComponent(candidateModel)}:generateContent`, {
         method: 'POST',
         headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(fellBack ? 9000 : 20000),
       }).catch((e) => new Response(String(e), { status: 504 }));
       if (res.ok) {
         const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
