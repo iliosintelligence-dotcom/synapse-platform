@@ -77,7 +77,7 @@ async function gatherFacts(admin: any, agencyId: string): Promise<Facts> {
     .from('agencies').select('name, city, logo_url, brand_color, brand_font')
     .eq('id', agencyId).maybeSingle();
 
-  const fourteenDaysAgo = new Date(Date.now() - 14 * 864e5).toISOString();
+  const fourteenDaysAgo = new Date(Date.now() - 21 * 864e5).toISOString();
 
   const listingsTotal    = await count('properties', (q: any) => q.is('deleted_at', null));
   const listingsLive     = await count('properties', (q: any) => q.is('deleted_at', null).eq('status', 'live'));
@@ -145,7 +145,7 @@ SYNAPSE, AS BUILT TODAY (agency portal, left-hand tabs):
 - Overview: every listing with its verification checks and a map.
 - Listings: add or edit a listing. A listing needs photos, price, city and
   address. Verification is decided by the platform, not by the agency, and a
-  listing stays live for 14 days from when it was last confirmed; after that it
+  listing stays live for 21 days from when it was last confirmed; after that it
   needs re-listing.
 - Marketing: pick a listing, press Generate, and the AI writes a caption per
   platform and checks each against that platform's real limits. "Rehearse" runs
@@ -170,7 +170,7 @@ function systemPrompt(f: Facts): string {
 WHERE THIS AGENCY ACTUALLY IS: ${f.stage}
 
 THEIR REAL NUMBERS, counted from their own records just now:
-- Listings: ${f.listingsTotal} total, ${f.listingsLive} live, ${f.listingsVerified} verified, ${f.listingsStale} past the 14-day freshness window
+- Listings: ${f.listingsTotal} total, ${f.listingsLive} live, ${f.listingsVerified} verified, ${f.listingsStale} past the 21-day freshness window
 - Team: ${f.teamSize} member(s)
 - Leads: ${f.leadsTotal} total${Object.keys(f.leadsByStage).length ? ' (' + Object.entries(f.leadsByStage).map(([k, v]) => k + ': ' + v).join(', ') + ')' : ''}
 - Viewings booked: ${f.viewings}
