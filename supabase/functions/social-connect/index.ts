@@ -1757,6 +1757,23 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    /* ── THE META DEVELOPER APP IS SWITCHED OFF FOR THE STUDIO (Eden, 2026-10-18) ──────────────────────────────
+       A new connector replaces connecting through our own Meta app. TikTok started above and Telegram above that are not
+       affected. This only stops a Facebook/Instagram connection STARTING through this app; the app, its keys and everything
+       on Meta's side are untouched. platform_settings.meta_direct_connect = {enabled:true} turns it back on, no deploy.
+       A missing setting means "on", so this can only ever be switched off deliberately. */
+    if (url.searchParams.get('action') === 'start') {
+      let direct = true;
+      try {
+        const sb0 = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+        const { data: st } = await sb0.from('platform_settings').select('value').eq('key', 'meta_direct_connect').maybeSingle();
+        if (st && st.value && (st.value as { enabled?: boolean }).enabled === false) direct = false;
+      } catch (_e) { /* unreadable means unchanged behaviour */ }
+      if (!direct) {
+        return json({ error: 'Facebook and Instagram are moving to a new connector, so connecting through the old Meta app is switched off for now. It will be back soon.', moved: true }, 503);
+      }
+    }
+
     /* ── step 1: hand back an authorization URL ───────────────────────────── */
     if (url.searchParams.get('action') === 'start') {
       /* Which product. Both live on one Meta app and one redirect URI, so the
