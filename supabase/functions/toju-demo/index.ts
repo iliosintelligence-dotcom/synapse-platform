@@ -896,6 +896,15 @@ Deno.serve(async (req: Request) => {
       const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
       candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
       problems = checkReply(candidate, ev, pinned ? userText + ' ' + pinned.feeText + (neg && neg.price ? ' ' + naira(neg.price) : '') : userText, brief);
+      /* voice rules, enforced: one question, short, no name-ask beside a price, and "final" only when it is final */
+      if (pinned) {
+        if ((candidate.match(/\?/g) ?? []).length > 1) problems.push('Ask only ONE question.');
+        if (candidate.trim().split(/\s+/).length > 50) problems.push('Too long: 15 to 35 words, never more than 45.');
+        if (neg && neg.price && /(what (should|can) i call you|your name|call you)/i.test(candidate)) problems.push('Do not ask their name in a message that states a price.');
+        if (neg && neg.action === 'final' && !/(best|final|lowest|bottom|as low)/i.test(candidate)) problems.push('Say plainly that this is your best and final price.');
+        if (neg && (neg.action === 'counter' || neg.action === 'hold') && /(best (and final )?(price|i can)|final price|as low as it goes|lowest)/i.test(candidate)) problems.push('This is not the final price; do not call it the best or final.');
+        if (neg && neg.action === 'accept' && /(locked in|done deal)/i.test(candidate)) problems.push('Say it is agreed subject to the agency confirming, not locked in.');
+      }
       /* the price Tayo states must be the one the code decided, and nothing lower */
       if (pinned && neg && ['counter', 'final', 'accept', 'escalate'].includes(neg.action) && neg.price) {
         const said = amountsIn(candidate);
