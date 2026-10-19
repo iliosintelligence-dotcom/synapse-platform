@@ -929,6 +929,19 @@ Deno.serve(async (req: Request) => {
       console.error('reply refused by the evidence check: ' + problems.join(' | ').slice(0, 400));
       reply = pinned ? pinnedPlain(pinned, ask, neg) : plainReply(ev, brief, ask); more = null; whys = {};
     }
+    /* Deterministic finishing for a negotiation reply (code, not model): a "final" always says so, and about one reply in
+       four gets a short playful or Pidgin line from a vetted list, never on a worried or serious message. */
+    if (pinned && !pinnedInfo && neg && neg.action !== 'none') {
+      if (neg.action === 'final' && !/(best|final|lowest|bottom|as low)/i.test(reply)) reply = reply.replace(/\s*$/, '') + ' That is my best and final.';
+      const turnNo = all.filter((m) => m.role === 'user').length;
+      const serious = /(worr|afford|can'?t afford|struggl|stress|loan|debt|sad|sorry|passed away|flood|fraud|scam|title|c of o|legal|court|dispute|safe|unsafe|angry|annoy)/i.test(userText);
+      const lines: Record<string, string[]> = {
+        hold: ['Oya, let us see.', 'Ha, you no dey shy!'], counter: ['Abeg, I am meeting you halfway.', 'No wahala, we go reach somewhere.'],
+        standing: ['No wahala.', 'Na so.'], accept: ['E go be!', 'Ehen, now we are talking.'], final: ['Oya, no long story.'], escalate: ['Abeg, hold on small.'],
+      };
+      const pool = lines[neg.action] ?? [];
+      if (pool.length && turnNo % 4 === 2 && !serious && reply.trim().split(/\s+/).length <= 40) reply = pool[turnNo % pool.length] + ' ' + reply;
+    }
     if (ask.slot) profile.asked[ask.slot] = (profile.asked[ask.slot] ?? 0) + 1;
 
     const matches = showCards ? found.map((m) => ({ ...m, why: whys[m.id] ?? null })) : [];
