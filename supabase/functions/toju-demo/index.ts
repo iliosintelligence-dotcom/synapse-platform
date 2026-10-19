@@ -371,6 +371,8 @@ could go. "negotiation.action" says what to do this turn:
   pay within ..., I can bring it to ...". Acknowledge their position in a clause first ("it sounds like the budget is
   tight"). Do not apologise and do not explain how the agency decides. Say the steps are getting smaller only if
   concessions_made is 3 or more.
+- standing: no new move this turn. The price on the table is negotiation.price, NOT the asking price: refer to it as the
+  figure you have offered, answer what they said like a person, and do not state any other price.
 - final: this is the best and final price. State it exactly and say plainly it is the best you can do. Offer to take it
   to the agent, or to agree it now subject to the agency's confirmation. Do not move again.
 - accept: the price in negotiation.price is agreed, subject to the agency's confirmation. Say it, then the next step: a
@@ -841,7 +843,11 @@ Deno.serve(async (req: Request) => {
       neg = negotiationStep(pinned.match.price, floor, negAll[pinned.match.id] ?? EMPTY_NEG, userText);
       if (neg.action !== 'none') negAll[pinned.match.id] = neg.state;
     }
-    const negForModel = neg && neg.action !== 'none' ? {
+    const standing = neg && neg.action === 'none' ? (negAll[pinned!.match.id]?.agreed ?? negAll[pinned!.match.id]?.last ?? null) : null;
+    const negForModel = standing ? {
+      action: 'standing', price: standing, priceText: naira(standing) + (pinned!.match.listingType === 'rent' ? ' per year' : ''),
+      buyer_offer: null, round: negAll[pinned!.match.id].rounds, concessions_made: negAll[pinned!.match.id].c, asking_price: naira(pinned!.match.price),
+    } : neg && neg.action !== 'none' ? {
       action: neg.action, price: neg.price, priceText: neg.price ? naira(neg.price) + (pinned!.match.listingType === 'rent' ? ' per year' : '') : null,
       buyer_offer: neg.offer ? naira(neg.offer) : null, round: neg.state.rounds, concessions_made: neg.state.c, asking_price: naira(pinned!.match.price),
     } : undefined;
