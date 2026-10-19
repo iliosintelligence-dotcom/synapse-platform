@@ -24,7 +24,7 @@ export type FastResult = { text: string; truncated?: boolean } | { error: string
 type Name = 'cerebras' | 'groq';
 const PROVIDERS: Record<Name, { url: string; key: string; model: string; fast: string }> = {
   cerebras: { url: 'https://api.cerebras.ai/v1/chat/completions', key: 'CEREBRAS_API_KEY', model: 'gpt-oss-120b', fast: 'gpt-oss-120b' },
-  groq: { url: 'https://api.groq.com/openai/v1/chat/completions', key: 'GROQ_API_KEY', model: 'openai/gpt-oss-120b', fast: 'openai/gpt-oss-20b' },
+  groq: { url: 'https://api.groq.com/openai/v1/chat/completions', key: 'GROQ_API_KEY', model: 'qwen/qwen3.8-27b', fast: 'openai/gpt-oss-20b' },
 };
 
 function chain(): Array<{ name: Name; key: string }> {
