@@ -944,6 +944,26 @@ Deno.serve(async (req: Request) => {
         ];
         reply = accepts[turnNo % accepts.length]; more = null; whys = {};
       }
+      if ((neg.action === 'counter' || neg.action === 'final' || neg.action === 'escalate') && neg.price) {
+        /* The money messages are worded in code too: warm, short, one question, and "best and final" only when it is. */
+        const amt = naira(neg.price) + (pinned.match.listingType === 'rent' ? ' per year' : '');
+        const off = neg.offer ? naira(neg.offer) : null;
+        const pick = (xs: string[]) => xs[turnNo % xs.length];
+        reply = neg.action === 'counter' ? pick([
+            `${off ? `I hear you on ${off}. ` : ''}Let me meet you partway: ${amt}. Does that work for you?`,
+            `Okay, I can move a little. ${amt}. Where does that leave you?`,
+            `${off ? `${off} is a stretch, but ` : ''}I'd like to make this work, so ${amt}. How does that sit with you?`,
+          ])
+          : neg.action === 'final' ? pick([
+            `No games: ${amt} is my best and final. Shall I take it to the agent and set a viewing?`,
+            `That's as low as I can go: ${amt}, best and final. Want me to pass it to the agent?`,
+          ])
+          : pick([
+            `I can't go below ${amt} myself, and that's my best and final. I can pass your number to the agent, who can go further. Shall I?`,
+            `${off ? `${off} is under what I'm able to agree. ` : ''}${amt} is my best and final. Want me to send your offer to the agent?`,
+          ]);
+        more = null; whys = {};
+      }
       const serious = /(worr|afford|can'?t afford|struggl|stress|loan|debt|sad|sorry|passed away|flood|fraud|scam|title|c of o|legal|court|dispute|safe|unsafe|angry|annoy)/i.test(userText);
       const lines: Record<string, string[]> = {
         hold: ['Oya, let us see.', 'Ha, you no dey shy!'], counter: ['Abeg, I am meeting you halfway.', 'No wahala, we go reach somewhere.'],
