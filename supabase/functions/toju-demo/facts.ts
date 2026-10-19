@@ -439,3 +439,69 @@ function plainQuestion(a: Ask): string {
     default: return '';
   }
 }
+
+/* ───────────────────────── NEGOTIATING FOR THE AGENCY (Eden, 2026-10-19) ─────────────────────────
+   Tayo was holding the asking price in every reply, so a listing with a negotiation floor set never reached its best
+   price. The decision about the NUMBER is made here, in code, and the model only finds the words for it: a model left to
+   pick prices gives away the floor or invents a discount.
+
+   How it works (principled negotiation and the usual concession discipline):
+   - The agency's floor is the lowest Tayo may agree to. It is never shown to the buyer and never sent to the model: the
+     model is given only the NEXT price to say. The last concession lands exactly on the floor and is called best and final.
+   - Concessions are DECREASING (35%, 25%, 18%, 12%, 10% of the room between asking and floor), so each step is smaller
+     than the last and tells the buyer the end is near. Every move needs the buyer to move or to trade: a first push for a
+     discount is met by asking for THEIR number, not by dropping the price.
+   - Never counter below an offer the buyer has already made. If their offer meets or beats the price Tayo would move to
+     next, it is accepted at THEIR figure. If it meets the price already on the table, the deal is at that price.
+   - "What is your best price?" is two steps, not the floor at once.
+   - Below the floor after best and final: Tayo cannot agree and passes the offer to the agent. */
+export interface NegState { c: number; last: number | null; buyerBest: number | null; rounds: number; agreed: number | null }
+export const EMPTY_NEG: NegState = { c: 0, last: null, buyerBest: null, rounds: 0, agreed: null };
+export interface NegDecision {
+  action: 'none' | 'hold' | 'counter' | 'accept' | 'final' | 'escalate';
+  price: number | null;          // the figure Tayo must state, exactly (null for none / hold-with-no-change = asking)
+  offer: number | null;          // what the buyer put on the table this turn
+  state: NegState;
+}
+const NEG_STEPS = [0, 0.35, 0.6, 0.78, 0.9, 1];
+
+export function negotiationStep(ask: number, floor: number | null, prev: NegState | null | undefined, userText: string): NegDecision {
+  const st: NegState = { ...EMPTY_NEG, ...(prev ?? {}) };
+  if (!(ask > 0) || !floor || !(floor > 0) || floor >= ask) return { action: 'none', price: ask > 0 ? ask : null, offer: null, state: st };
+  const room = ask - floor;
+  const at = (c: number): number => {
+    if (c >= 5) return Math.round(floor);
+    const raw = ask - room * NEG_STEPS[c];
+    return Math.min(ask, Math.max(Math.round(floor), Math.ceil(raw / 1000) * 1000));
+  };
+  const text = userText.toLowerCase();
+  /* an offer: an amount in a believable range around the asking price, or "N% off" */
+  let offer: number | null = null;
+  for (const a of amountsIn(userText)) if (a >= ask * 0.3 && a <= ask * 1.02) offer = Math.max(offer ?? 0, a);
+  const pct = text.match(/(\d{1,2}(?:\.\d+)?)\s*(?:%|percent)\s*(?:off|discount|less|reduction|lower|cheaper)?/);
+  if (offer == null && pct && /(off|discount|reduc|less|lower|cheaper|knock|drop|down)/.test(text)) {
+    const p = Number(pct[1]); if (p > 0 && p < 70) offer = Math.round(ask * (1 - p / 100));
+  }
+  const wantsBest = /(best|final|last|lowest|rock.?bottom|bottom)\s+(price|offer|figure|you can do)|how low|what'?s the least/.test(text);
+  const pushed = !!offer || wantsBest || /(discount|negotiat|reduc|lower|cheaper|too (much|high|expensive)|bring (it )?down|knock|come down|haggl|can you do|any room|some room|flexib)/.test(text);
+  if (!pushed) return { action: 'none', price: st.agreed ?? st.last ?? ask, offer: null, state: st };
+  st.rounds += 1;
+  if (offer != null) st.buyerBest = Math.max(st.buyerBest ?? 0, offer);
+  const cur = st.last ?? ask;
+
+  if (st.agreed != null && (offer == null || offer >= st.agreed)) return { action: 'accept', price: st.agreed, offer, state: st };
+  if (offer != null && offer >= cur) { st.agreed = cur; return { action: 'accept', price: cur, offer, state: st }; }
+  if (st.c < 5 && offer != null && offer >= at(st.c + 1)) { st.agreed = offer; st.last = offer; return { action: 'accept', price: offer, offer, state: st }; }
+  if (st.c >= 5) {
+    // already at best and final
+    return offer != null && offer < floor
+      ? { action: 'escalate', price: Math.round(floor), offer, state: st }
+      : { action: 'final', price: Math.round(floor), offer, state: st };
+  }
+  /* nothing from them yet, and nothing conceded: ask for THEIR number first */
+  if (offer == null && !wantsBest && st.c === 0 && st.rounds <= 1) return { action: 'hold', price: ask, offer, state: st };
+  const step = wantsBest ? 2 : 1;
+  st.c = Math.min(5, st.c + step);
+  st.last = at(st.c);
+  return { action: st.c >= 5 ? 'final' : 'counter', price: st.last, offer, state: st };
+}

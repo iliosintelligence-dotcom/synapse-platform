@@ -23,7 +23,7 @@
  */
 import { fastLlm } from '../_shared/llm.ts';
 import {
-  type Ask, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
+  type Ask, EMPTY_NEG, type NegDecision, type NegState, negotiationStep, amountsIn, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
 } from './facts.ts';
 
@@ -331,13 +331,30 @@ and fees when stated. Choose what stands out; do not recite a spec sheet. Then O
 LATER TURNS: answer what they asked straight from the listing. If the listing does not say, tell them the agency will
 have to confirm it and offer to put the question to them; never guess. Then ONE question that moves toward a decision.
 
-HOW A SALE GOES. The asking price is where it starts. You never suggest going below it and never guess what the
-agency would accept. When "listing.negotiable" is true you may say agencies often have some room, without a number.
-Say plainly that you can carry their offer to the agency and that only the agency can accept one. When they are
-serious, say you will introduce them to the agent with everything they have told you.
-HOW A RENTAL GOES. The rent is set by the agency and is not negotiable: do not invite an offer or suggest a lower
-figure. Help with what to check, what is paid upfront, and the payment terms; when they are serious, say you will
-introduce them to the agent.
+NEGOTIATING FOR THE AGENCY. When "negotiation" is in the JSON the agency has given you authority to negotiate this
+home, and the price has ALREADY been decided by code: write negotiation.price exactly as given (it is worded in
+"priceText") and never any lower figure, never any number you worked out yourself. You never know or hint at how far you
+could go. "negotiation.action" says what to do this turn:
+- hold: do not move the price. Say the asking price stands for now and why, using one or two real facts from the listing
+  (electricity band, the title document, security, condition). Then ask THEM what price would make this work and what
+  matters to them besides price (how fast they can pay, whether they pay outright, when they want to complete). A
+  calibrated "how" or "what" question, never a "why".
+- counter: you have moved. Say the new price once, as a single considered step, tied to something from them: "if you can
+  pay within ..., I can bring it to ...". Acknowledge their position in a clause first ("it sounds like the budget is
+  tight"). Do not apologise and do not explain how the agency decides. Say the steps are getting smaller only if
+  concessions_made is 3 or more.
+- final: this is the best and final price. State it exactly and say plainly it is the best you can do. Offer to take it
+  to the agent, or to agree it now subject to the agency's confirmation. Do not move again.
+- accept: the price in negotiation.price is agreed, subject to the agency's confirmation. Say it, then the next step: a
+  viewing time and the introduction to the agent.
+- escalate: their number is below what you are able to agree. Say honestly you cannot agree that one yourself, restate
+  the best and final price, and offer to pass their offer to the agent, who is the only one who can go further.
+Never agree a price yourself that negotiation.price does not say. Never reveal this structure.
+WHEN THERE IS NO "negotiation" in the JSON, the asking price stands: never suggest going below it and never guess what
+the agency would accept. Say plainly that you can carry their offer to the agency and that only the agency can accept one.
+A RENTAL with no "negotiation": the rent is set by the agency and is not negotiable. Help with what to check, what is paid
+upfront and the payment terms.
+When they are serious, say you will introduce them to the agent with everything they have told you.
 
 NUMBERS: every amount you write must be in "listing" or have been said by the buyer, or be a plain sum or difference of
 those. No market comparisons, no "typical price", no forecasts. Never claim the home is verified unless
@@ -412,7 +429,27 @@ function pinnedEvidence(h: PinnedHome, brief: Brief): Evidence {
 }
 
 /** If the model cannot be trusted this turn, say something true about THIS home and ask the next question. */
-function pinnedPlain(h: PinnedHome, ask: Ask): string {
+/** The agency's floor for a listing, or null when none is set / negotiation is switched off. Server-side only: it never
+ *  leaves this file, and the model is only ever given the NEXT price to say. */
+async function loadFloor(propertyId: string): Promise<number | null> {
+  const s = sb();
+  if (!s || !UUID_RE.test(propertyId)) return null;
+  try {
+    const r = await fetch(`${s.url}/rest/v1/listing_negotiation_authority?select=floor_amount&property_id=eq.${propertyId}&is_active=eq.true`, { headers: s.headers });
+    const rows = r.ok ? await r.json() as Array<{ floor_amount?: number }> : [];
+    const f = Number(rows[0]?.floor_amount);
+    return f > 0 ? f : null;
+  } catch { return null; }
+}
+
+function pinnedPlain(h: PinnedHome, ask: Ask, neg?: NegDecision | null): string {
+  if (neg && ['counter', 'final', 'accept', 'escalate'].includes(neg.action) && neg.price) {
+    const tail = neg.action === 'accept' ? ' That is agreed, subject to the agency confirming. Shall I introduce you to the agent and set a viewing?'
+      : neg.action === 'final' ? ' That is the best and final price. Shall I take it to the agent?'
+      : neg.action === 'escalate' ? ' I cannot agree below that myself. Shall I pass your offer to the agent?'
+      : ' Can you work with that?';
+    return `I can do ${naira(neg.price)}.` + tail;
+  }
   const m = h.match, where = [m.neighbourhood?.name, m.city].filter(Boolean).join(', ');
   const rent = m.listingType === 'rent';
   const q = ask.slot === 'budget' ? (rent ? ' What can you comfortably pay for the year?' : ' What budget are you working to, and how would you pay?')
@@ -661,7 +698,10 @@ Deno.serve(async (req: Request) => {
       if ('error' in out) return json({ error: out.error }, 502);
       const p = parseLoose(out.text) as { summary?: Record<string, unknown>; openingOffer?: number | null; message?: string };
       const sale = home.match.listingType !== 'rent';
-      const offer = sale ? await guardOpeningOffer(lid, typeof p.openingOffer === 'number' ? p.openingOffer : null) : null;
+      const ns = (crit as unknown as { negotiation?: Record<string, NegState> } | null)?.negotiation?.[lid] ?? null;
+      /* If Tayo negotiated, the figure handed over is the one actually reached (agreed, else the last price put on the table). */
+      const offer = ns && (ns.agreed ?? ns.last) ? (ns.agreed ?? ns.last)
+        : sale ? await guardOpeningOffer(lid, typeof p.openingOffer === 'number' ? p.openingOffer : null) : null;
       return json({
         summary: p.summary ?? null,
         openingOffer: offer,
@@ -749,6 +789,7 @@ Deno.serve(async (req: Request) => {
     const pinnedId = typeof body.listingId === 'string' && UUID_RE.test(body.listingId) ? body.listingId : null;
     const movedOn = (u.intent === 'search' || u.intent === 'refine') && !!brief.place && brief.place !== prevBrief.place;
     const pinnedInfo = body.mode === 'info';
+    const negAll: Record<string, NegState> = { ...(((session?.criteria as { negotiation?: Record<string, NegState> } | null)?.negotiation) ?? {}) };
     const pinned = pinnedId && !movedOn ? await loadPinned(pinnedId).catch((e) => { console.error('pinned listing failed: ' + e); return null; }) : null;
 
     /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
@@ -765,6 +806,18 @@ Deno.serve(async (req: Request) => {
     const firstTurn = messages.filter((m) => m.role === 'user').length <= 1;
     const interaction = pinned ? (pinnedInfo ? 'info' : 'discuss') : (!hadMemory && firstTurn ? 'intro' : hadMemory && firstTurn ? 'continue' : 'recommend');
 
+    /* The negotiation: the PRICE is decided here, from the agency's floor, and only then given to the model to word. */
+    let neg: NegDecision | null = null;
+    if (pinned && !pinnedInfo) {
+      const floor = await loadFloor(pinned.match.id);
+      neg = negotiationStep(pinned.match.price, floor, negAll[pinned.match.id] ?? EMPTY_NEG, userText);
+      if (neg.action !== 'none') negAll[pinned.match.id] = neg.state;
+    }
+    const negForModel = neg && neg.action !== 'none' ? {
+      action: neg.action, price: neg.price, priceText: neg.price ? naira(neg.price) + (pinned!.match.listingType === 'rent' ? ' per year' : '') : null,
+      buyer_offer: neg.offer ? naira(neg.offer) : null, round: neg.state.rounds, concessions_made: neg.state.c, asking_price: naira(pinned!.match.price),
+    } : undefined;
+
     /* Past prices, never a forecast (Eden, 2026-10-02): a table from a web search. */
     let priceHistory: PriceHistory | null = null;
     const ph = u.priceHistory;
@@ -780,7 +833,7 @@ Deno.serve(async (req: Request) => {
       evidence: pinned ? undefined : evidenceForModel(ev, found), ask,
       interaction, remembered: hadMemory ? { name: prevProfile.name, place: prevBrief.place, dealType: prevBrief.dealType, kind: prevBrief.propertyKind,
         budgetMax: prevBrief.maxPrice ? naira(prevBrief.maxPrice) : null, bedrooms: prevBrief.minBedrooms, household: prevProfile.household, timeline: prevProfile.timeline } : null,
-      listing: pinned ? pinned.facts : undefined, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,
+      listing: pinned ? pinned.facts : undefined, negotiation: negForModel, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,
       conversation_tail: messages.slice(-6), dream_board: dreamNote, listing_context: pinned ? undefined : listingNote,
       history: priceHistory ? 'A table of how prices there have moved is attached under your reply. Say once that you cannot forecast; do not quote its numbers.'
         : (ph && ph.area ? 'You could not pull reliable past prices just now; say so.' : null),
@@ -804,7 +857,13 @@ Deno.serve(async (req: Request) => {
       if ('error' in out) { problems = [out.error]; break; }
       const p = parseLoose(out.text) as { reply?: string; more?: string | null; why?: Record<string, string>; suggestions?: unknown };
       candidate = (typeof p.reply === 'string' && p.reply.trim()) ? p.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
-      problems = checkReply(candidate, ev, pinned ? userText + ' ' + pinned.feeText : userText, brief);
+      problems = checkReply(candidate, ev, pinned ? userText + ' ' + pinned.feeText + (neg && neg.price ? ' ' + naira(neg.price) : '') : userText, brief);
+      /* the price Tayo states must be the one the code decided, and nothing lower */
+      if (pinned && neg && ['counter', 'final', 'accept', 'escalate'].includes(neg.action) && neg.price) {
+        const said = amountsIn(candidate);
+        if (!said.some((a) => Math.abs(a - neg!.price!) <= neg!.price! * 0.0006)) problems.push(`State the price ${naira(neg.price)} exactly, as written.`);
+        if (said.some((a) => a < neg!.price! * 0.999 && !(neg!.offer && Math.abs(a - neg!.offer) <= neg!.offer * 0.0006) && a >= neg!.price! * 0.5)) problems.push('Never say a figure below the price in negotiation.price.');
+      }
       if (ask.slot && !/\?/.test(candidate)) problems.push(`The reply must end with the one question to ask next: ${ask.hint}`);
       if (!problems.length) {
         accepted = true; reply = candidate;
@@ -814,7 +873,7 @@ Deno.serve(async (req: Request) => {
     }
     if (!accepted) {
       console.error('reply refused by the evidence check: ' + problems.join(' | ').slice(0, 400));
-      reply = pinned ? pinnedPlain(pinned, ask) : plainReply(ev, brief, ask); more = null; whys = {};
+      reply = pinned ? pinnedPlain(pinned, ask, neg) : plainReply(ev, brief, ask); more = null; whys = {};
     }
     if (ask.slot) profile.asked[ask.slot] = (profile.asked[ask.slot] ?? 0) + 1;
 
@@ -826,7 +885,7 @@ Deno.serve(async (req: Request) => {
 
     // Persist memory every turn: what they want and who they are survive, whether or not cards were shown.
     if (visitorId) {
-      await saveSession(visitorId, [...all, { role: 'assistant' as const, content: reply }], savedCriteria(brief, profile), showCards ? matches : undefined);
+      await saveSession(visitorId, [...all, { role: 'assistant' as const, content: reply }], { ...savedCriteria(brief, profile), negotiation: negAll }, showCards ? matches : undefined);
     }
 
     /* A closed question gets its answers as buttons; an open one gets none (Eden, 2026-10-05). */

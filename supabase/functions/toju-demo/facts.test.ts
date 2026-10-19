@@ -113,3 +113,30 @@ Deno.test('the last-resort reply is built from the evidence and passes its own c
   const r2 = plainReply(none, { ...b, maxPrice: 1_000_000 }, { slot: null, hint: '', closed: [] });
   assertEquals(checkReply(r2, none, 'under 1 million', { ...b, maxPrice: 1_000_000 }), []);
 });
+
+import { negotiationStep } from './facts.ts';
+Deno.test('negotiation: no floor means no authority; a first push asks for their number, then concessions shrink to the floor', () => {
+  assertEquals(negotiationStep(100_000_000, null, null, 'can you do 90m').action, 'none');
+  const ask = 100_000_000, floor = 80_000_000;
+  let d = negotiationStep(ask, floor, null, 'Is there any discount?');
+  assertEquals(d.action, 'hold'); assertEquals(d.price, ask);
+  d = negotiationStep(ask, floor, d.state, 'I can do 70m');
+  assertEquals(d.action, 'counter');
+  const p1 = d.price!; assertEquals(p1 < ask && p1 > floor, true);
+  d = negotiationStep(ask, floor, d.state, 'I can do 72m');
+  const p2 = d.price!; assertEquals(p2 < p1 && p2 >= floor, true);
+  const g1 = ask - p1, g2 = p1 - p2; assertEquals(g2 < g1, true);          // decreasing concessions
+  d = negotiationStep(ask, floor, d.state, 'still 74m');
+  d = negotiationStep(ask, floor, d.state, 'what is your best price?');
+  assertEquals(d.price, floor); assertEquals(d.action, 'final');           // best and final lands exactly on the floor
+  d = negotiationStep(ask, floor, d.state, 'ok 75m then');
+  assertEquals(d.action, 'escalate');                                       // below the floor: a human has to take it
+});
+Deno.test('negotiation: an offer at or above the next price is accepted at THEIR figure, never lower than the floor', () => {
+  const d = negotiationStep(100_000_000, 80_000_000, null, 'I will pay 95m cash');
+  assertEquals(d.action, 'accept'); assertEquals(d.price, 95_000_000);
+  const e = negotiationStep(100_000_000, 80_000_000, null, 'give me 10% off');
+  assertEquals(e.price != null && e.price >= 80_000_000, true);
+  const f = negotiationStep(100_000_000, 80_000_000, null, 'tell me about the area');
+  assertEquals(f.action, 'none');
+});
