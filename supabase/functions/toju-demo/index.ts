@@ -934,6 +934,16 @@ Deno.serve(async (req: Request) => {
     if (pinned && !pinnedInfo && neg && neg.action !== 'none') {
       if (neg.action === 'final' && !/(best|final|lowest|bottom|as low)/i.test(reply)) reply = reply.replace(/\s*$/, '') + ' That is my best and final.';
       const turnNo = all.filter((m) => m.role === 'user').length;
+      if (neg.action === 'accept' && neg.price) {
+        /* An accepted price is worded in code so it can never drift: agreed, subject to the agency, and the next step. */
+        const amt = naira(neg.price) + (pinned.match.listingType === 'rent' ? ' per year' : '');
+        const accepts = [
+          `${amt} it is. That's agreed, subject to the agency confirming. Shall I set up a viewing and introduce you to the agent?`,
+          `Deal at ${amt}, pending the agency's confirmation. Want me to book a viewing and put you in touch with the agent?`,
+          `Lovely, ${amt} works. The agency still has to confirm it. Shall I line up a viewing and introduce you to the agent?`,
+        ];
+        reply = accepts[turnNo % accepts.length]; more = null; whys = {};
+      }
       const serious = /(worr|afford|can'?t afford|struggl|stress|loan|debt|sad|sorry|passed away|flood|fraud|scam|title|c of o|legal|court|dispute|safe|unsafe|angry|annoy)/i.test(userText);
       const lines: Record<string, string[]> = {
         hold: ['Oya, let us see.', 'Ha, you no dey shy!'], counter: ['Abeg, I am meeting you halfway.', 'No wahala, we go reach somewhere.'],
