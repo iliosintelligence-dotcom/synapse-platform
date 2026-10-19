@@ -453,7 +453,7 @@ function plainQuestion(a: Ask): string {
      discount is met by asking for THEIR number, not by dropping the price.
    - Never counter below an offer the buyer has already made. If their offer meets or beats the price Tayo would move to
      next, it is accepted at THEIR figure. If it meets the price already on the table, the deal is at that price.
-   - "What is your best price?" is two steps, not the floor at once.
+   - "What is your best price?" is two steps, and best and final once they have already been moved twice.
    - Below the floor after best and final: Tayo cannot agree and passes the offer to the agent. */
 export interface NegState { c: number; last: number | null; buyerBest: number | null; rounds: number; agreed: number | null }
 export const EMPTY_NEG: NegState = { c: 0, last: null, buyerBest: null, rounds: 0, agreed: null };
@@ -500,8 +500,8 @@ export function negotiationStep(ask: number, floor: number | null, prev: NegStat
   }
   /* nothing from them yet, and nothing conceded: ask for THEIR number first */
   if (offer == null && !wantsBest && st.c === 0 && st.rounds <= 1) return { action: 'hold', price: ask, offer, state: st };
-  const step = wantsBest ? 2 : 1;
-  st.c = Math.min(5, st.c + step);
+  /* "What is your best price?": two steps, and straight to best and final once they have already been moved twice. */
+  st.c = wantsBest ? (st.c >= 2 ? 5 : Math.min(5, st.c + 2)) : Math.min(5, st.c + 1);
   st.last = at(st.c);
   return { action: st.c >= 5 ? 'final' : 'counter', price: st.last, offer, state: st };
 }
