@@ -405,6 +405,70 @@ Length: 15 to 35 words, one short paragraph, never more than 45. The question, i
 Output STRICT JSON ONLY: {"reply": "<message>", "more": null, "why": {}, "suggestions": []}`;
 
 interface PinnedHome { match: Match; facts: Record<string, unknown>; feeText: string }
+/* ───────────────────────── ASKING TAYO ABOUT AN AGENCY (Eden, 2026-10-19) ─────────────────────────
+   "People should be able to ask Tayo about individual agencies": who they are, what they have uploaded to prove it, when they
+   joined, what they list. Everything here is read from the database by this function (service role) and only the facts that
+   build trust are handed to the model: the NAME of each verification document and when it was uploaded, never the file. Uploaded
+   is not the same as checked, and the prompt says so. */
+interface AgencyFacts {
+  name: string; city: string | null; address: string | null; tagline: string | null; about: string | null; foundedYear: number | null;
+  joinedSynapse: string | null; verificationTier: string | null; cacNumber: string | null; cacCertificateOnFile: boolean;
+  documents: Array<{ what: string; uploaded: string; checkedBySynapse: boolean; checkedOn: string | null }>;
+  specialties: string[]; website: string | null; avgReplyMinutes: number | null; dealsClosedOnSynapse: number | null;
+  liveListings: number; listingMix: string; verifiedListings: number; priceRange: string | null;
+}
+const DOC_LABEL: Record<string, string> = {
+  cac_certificate: 'CAC certificate (company registration)', agency_license: 'Agency licence', directors_id: "Director's ID",
+  bank_statement: 'Bank statement', frcn_membership: 'FRCN membership (Federal Real Estate Council)',
+};
+const dayFmt = (iso: string | null | undefined): string | null => {
+  if (!iso) return null; const d = new Date(iso); if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-GB', { timeZone: 'Africa/Lagos', day: 'numeric', month: 'long', year: 'numeric' });
+};
+async function loadAgencyFacts(id: string): Promise<AgencyFacts | null> {
+  const s = sb();
+  if (!s || !UUID_RE.test(id)) return null;
+  const get = async (path: string) => { const r = await fetch(`${s.url}/rest/v1/${path}`, { headers: s.headers }); return r.ok ? await r.json() : []; };
+  const [ags, docs, props] = await Promise.all([
+    get(`agencies?id=eq.${id}&deleted_at=is.null&select=name,city,address,tagline,description,founded_year,created_at,verification_tier,cac_number,cac_certificate_on_file,specialties,social,avg_response_minutes,closed_deals`),
+    get(`documents?entity_type=eq.agency&entity_id=eq.${id}&deleted_at=is.null&is_current=eq.true&select=document_type,created_at,is_verified,verified_at`),
+    get(`properties?agency_id=eq.${id}&deleted_at=is.null&is_active=eq.true&select=listing_type,property_type,price,verification_status&limit=300`),
+  ]) as [Array<Record<string, unknown>>, Array<Record<string, unknown>>, Array<Record<string, unknown>>];
+  const a = ags[0]; if (!a) return null;
+  const kinds = new Map<string, number>();
+  for (const p of props) { const k = p.property_type === 'land' ? 'land' : String(p.listing_type ?? 'sale'); kinds.set(k, (kinds.get(k) ?? 0) + 1); }
+  const prices = props.map((p) => Number(p.price)).filter((n) => n > 0).sort((x, y) => x - y);
+  const site = ((a.social ?? {}) as Record<string, unknown>).website;
+  return {
+    name: String(a.name ?? 'This agency'), city: (a.city as string) ?? null, address: (a.address as string) ?? null, tagline: (a.tagline as string) ?? null,
+    about: (a.description as string) ?? null, foundedYear: (a.founded_year as number) ?? null, joinedSynapse: dayFmt(a.created_at as string),
+    verificationTier: (a.verification_tier as string) ?? null, cacNumber: (a.cac_number as string) ?? null, cacCertificateOnFile: !!a.cac_certificate_on_file,
+    documents: docs.filter((d) => DOC_LABEL[String(d.document_type)]).map((d) => ({
+      what: DOC_LABEL[String(d.document_type)], uploaded: dayFmt(d.created_at as string) ?? 'a recent date',
+      checkedBySynapse: !!d.is_verified, checkedOn: d.is_verified ? dayFmt(d.verified_at as string) : null,
+    })),
+    specialties: Array.isArray(a.specialties) ? (a.specialties as string[]).filter(Boolean).slice(0, 8) : [],
+    website: typeof site === 'string' && site.trim() ? site.trim() : null,
+    avgReplyMinutes: (a.avg_response_minutes as number) ?? null, dealsClosedOnSynapse: (a.closed_deals as number) ?? null,
+    liveListings: props.length, listingMix: [...kinds].map(([k, n]) => `${n} ${k}`).join(', ') || 'none right now',
+    verifiedListings: props.filter((p) => p.verification_status === 'verified').length,
+    priceRange: prices.length ? `${naira(prices[0])} to ${naira(prices[prices.length - 1])}` : null,
+  };
+}
+
+const AGENCY_PROMPT = `You are Tayo, an AI advisor on Synapse, answering questions about ONE estate agency so a buyer can decide how far to trust it.
+You are given "agency" (everything Synapse holds about it) and the conversation. Speak like a warm, straight-talking friend: short
+(2 to 4 sentences, under 60 words), plain words, no lists, no headings, one idea at a time, and at most one question.
+RULES. Use ONLY the facts in "agency"; never invent a date, number, award, address or claim. If asked something you do not have,
+say Synapse does not have it and offer to ask the agency. Be exact about the difference between UPLOADED and CHECKED: a document
+the agency uploaded is "on file"; only say Synapse checked it when documents[].checkedBySynapse is true, and then give the date.
+Never say the agency is "verified" unless verificationTier is "verified". When the buyer asks if they can trust it, give the honest
+picture: what is on file, what is checked, how long they have been on Synapse, how many homes they have live and how many of those
+Synapse checked, and what the buyer can still verify themselves (the CAC number can be searched at the CAC public registry, ask to
+see the title documents on any home, inspect in person). Never call the agency a scam or promise it is safe. Dates are in the form
+given. If the buyer has finished with the agency, offer to show their homes.
+Output STRICT JSON ONLY: {"reply": "<message>", "more": null, "why": {}, "suggestions": []}`;
+
 async function loadPinned(id: string): Promise<PinnedHome | null> {
   const s = sb();
   if (!s) return null;
@@ -636,7 +700,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
     const body = (await req.json().catch(() => ({}))) as {
-      action?: string; visitorId?: string; messages?: Msg[]; source?: string; listingId?: string;
+      action?: string; visitorId?: string; messages?: Msg[]; source?: string; listingId?: string; agencyId?: string;
       /** 'discuss' (negotiate for the agent) or 'info' (answer questions about a home they met on social). */
       mode?: string; list?: boolean; model?: string; provider?: string;
     };
@@ -807,6 +871,15 @@ Deno.serve(async (req: Request) => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     if (!lastUser) return json({ error: 'say something first' }, 400);
     const userText = lastUser.content;
+    if (typeof body.agencyId === 'string' && UUID_RE.test(body.agencyId)) {
+      const facts = await loadAgencyFacts(body.agencyId);
+      if (!facts) return json({ reply: 'I could not find that agency just now. Want me to look at homes instead?', more: null, showMatches: false, matches: [], suggestions: [] });
+      const out = await gemini(key, AGENCY_PROMPT, [{ role: 'user', content: JSON.stringify({ agency: facts, conversation: messages.slice(-8) }) }], 700);
+      if ('error' in out) return json({ error: out.error }, 502);
+      const pr = parseLoose(out.text) as { reply?: string };
+      const text = (typeof pr.reply === 'string' && pr.reply.trim()) ? pr.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
+      return json({ reply: text, more: null, showMatches: false, matches: [], suggestions: [], priceHistory: null, searched: null, interaction: 'info' });
+    }
     const dreamNote = notes.find((n) => n.startsWith('[Background from my Dream Home mood board')) ?? null;
     const listingNote = notes.find((n) => n.startsWith('[The buyer is replying about one specific listing')) ?? null;
 
