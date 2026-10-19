@@ -986,7 +986,7 @@ Deno.serve(async (req: Request) => {
     }
 
     /* A closed question gets its answers as buttons; an open one gets none (Eden, 2026-10-05). */
-    return json({ reply, more, showMatches: showCards, matches, suggestions: closed, priceHistory, searched, interaction });
+    return json({ reply, more, showMatches: showCards, matches, suggestions: closed, priceHistory, searched, interaction, offerViewing: !!(pinned && !pinnedInfo && neg && neg.action === 'accept') });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
