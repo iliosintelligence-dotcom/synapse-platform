@@ -34,6 +34,7 @@
  * matched by user_id when a bearer token is present.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { sendFcm } from '../_shared/fcm.ts';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -219,7 +220,7 @@ Deno.serve(async (req: Request) => {
 
     // Their push endpoints. Customer side only — an agency device must never
     // receive a buyer's proximity alert.
-    const psel = db.from('push_subscriptions').select('id, endpoint, p256dh, auth_key').eq('side', 'customer');
+    const psel = db.from('push_subscriptions').select('id, endpoint, p256dh, auth_key, platform').eq('side', 'customer');
     const { data: subs } = userId
       ? await psel.eq('user_id', userId)
       : await psel.eq('visitor_id', visitorId!);
@@ -255,6 +256,15 @@ Deno.serve(async (req: Request) => {
 
       let anySent = false;
       for (const s of subs ?? []) {
+        /* The Synapse app on a phone: a Firebase device token rather than a browser subscription. sendFcm does nothing until the
+           FCM_SERVICE_ACCOUNT secret exists, so a row here is simply skipped until then. */
+        if ((s.platform === 'android' || s.platform === 'ios') && String(s.endpoint).startsWith('fcm:')) {
+          const f = await sendFcm(String(s.endpoint).slice(4), {
+            title: payload.title, body: payload.body, route: payload.route, kind: payload.kind, propertyId: payload.propertyId,
+          });
+          if (f.ok) { sent++; anySent = true; } else if (f.gone) await db.from('push_subscriptions').delete().eq('id', s.id);
+          continue;
+        }
         if (!s.p256dh || !s.auth_key) continue;
         const r = await sendPush(s as never, payload);
         if (r.ok) { sent++; anySent = true; continue; }

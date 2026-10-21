@@ -76,6 +76,28 @@ Deno.serve(async (req: Request) => {
       userId ? q.eq('user_id', userId) : q.eq('visitor_id', visitorId);
 
     /* ── store a push endpoint ───────────────────────────────────────── */
+    if (action === 'subscribe' && body.native) {
+      /* THE APP. A phone running the Synapse app has no browser push; it sends the Firebase device token it was given. The token
+         is a secret only that device holds, so presenting it is also proof of the device: the row moves to whoever is signed in
+         there now (somebody signing out and somebody else signing in must not leave the first person's alerts going to this
+         phone). It is never fetched as a URL, so the https check below does not apply. */
+      const n = body.native as { token?: unknown; platform?: unknown };
+      const deviceToken = typeof n.token === 'string' ? n.token : '';
+      const platform = n.platform === 'ios' ? 'ios' : n.platform === 'android' ? 'android' : '';
+      if (!platform || !/^[A-Za-z0-9:_\-.]{20,4096}$/.test(deviceToken)) return json({ error: 'bad device token' }, 400);
+      const nativeRow = {
+        user_id: userId, visitor_id: userId ? null : visitorId,
+        endpoint: `fcm:${deviceToken}`, p256dh: null, auth_key: null,
+        platform, side: body.side === 'agency' ? 'agency' : 'customer',
+      };
+      const { data: held } = await db.from('push_subscriptions').select('id').eq('endpoint', nativeRow.endpoint).limit(1);
+      const saved = held?.[0]
+        ? await db.from('push_subscriptions').update(nativeRow).eq('id', held[0].id)
+        : await db.from('push_subscriptions').insert(nativeRow);
+      if (saved.error) return json({ error: saved.error.message }, 500);
+      return json({ ok: true });
+    }
+
     if (action === 'subscribe') {
       const sub = (body.subscription ?? {}) as Record<string, string>;
       const endpoint = String(sub.endpoint ?? '');
