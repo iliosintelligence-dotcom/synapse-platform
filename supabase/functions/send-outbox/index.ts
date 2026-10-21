@@ -1,5 +1,5 @@
 /**
- * send-outbox — drains the message outbox.
+ * send-outbox, drains the message outbox.
  *
  * The CRM queues messages to leads; this delivers them. It is deliberately a
  * separate step from queueing:
@@ -17,12 +17,12 @@
  * Failures are retried up to max_attempts with a widening backoff, then left
  * as 'failed' with the provider's own error text so the agency can see why.
  *
- * This is invoked explicitly — by the dashboard's "Send now" button, or by
+ * This is invoked explicitly, by the dashboard's "Send now" button, or by
  * whatever scheduler the operator chooses. Nothing here fires on its own:
  * outbound messages to real people should be a decision, not a side effect.
  *
  * The caller must be a member of an agency, and only that agency's queue is
- * drained — the drain itself runs as the service role, so without that check
+ * drained, the drain itself runs as the service role, so without that check
  * any signed-in account could push out every agency's messages.
  *
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY (auto-injected),

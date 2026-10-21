@@ -1,5 +1,5 @@
 /**
- * billing-renew — charges the saved card for plans that are about to end.
+ * billing-renew, charges the saved card for plans that are about to end.
  *
  * Called hourly by the renew-due-subscriptions cron job (via
  * renew_due_subscriptions()) with the service role key. Nobody else may call

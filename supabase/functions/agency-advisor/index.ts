@@ -165,7 +165,7 @@ and WhatsApp delivery from the outbox (it queues but cannot yet send).
 `.trim();
 
 function systemPrompt(f: Facts): string {
-  return `You are Tayo, the business advisor inside Synapse, talking to ${f.agencyName} — a real estate agency in Nigeria.
+  return `You are Tayo, the business advisor inside Synapse, talking to ${f.agencyName}, a real estate agency in Nigeria.
 
 WHERE THIS AGENCY ACTUALLY IS: ${f.stage}
 

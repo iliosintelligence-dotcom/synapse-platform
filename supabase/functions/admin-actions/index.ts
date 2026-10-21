@@ -1,5 +1,5 @@
 /**
- * admin-actions — platform-admin operations. Service role lives ONLY here.
+ * admin-actions, platform-admin operations. Service role lives ONLY here.
  *
  * The caller is authenticated via JWT and must have profiles.role =
  * 'platform_admin'; otherwise every action is refused. This is the single

@@ -1,5 +1,5 @@
 /**
- * proximity-report — a device says where it is; the SERVER decides everything else.
+ * proximity-report, a device says where it is; the SERVER decides everything else.
  *
  * The client (notify.js) reports a position at most once a minute while a page
  * is open. This function:
@@ -10,13 +10,13 @@
  *
  * ALL the judgement lives in proximity_candidates(): radius, brief matching,
  * the 14-day freshness rule, quiet hours, the daily cap and per-property
- * de-duplication. This function deliberately re-implements none of it — two
+ * de-duplication. This function deliberately re-implements none of it, two
  * copies of a notification policy is how people get buzzed at 3am after
  * someone edits one of them.
  *
  * THE ONE THING THIS FUNCTION OWES THE BUYER is saying whether the home has
- * been checked. Unverified listings are no longer excluded — they are
- * disclosed — so `is_verified` comes back on every candidate and the copy
+ * been checked. Unverified listings are no longer excluded, they are
+ * disclosed, so `is_verified` comes back on every candidate and the copy
  * below has to reflect it. This block used to read 'A verified home, right
  * here' unconditionally, which was survivable only while the matcher returned
  * nothing but verified homes. The moment that gate came off, the same line
@@ -186,7 +186,7 @@ Deno.serve(async (req: Request) => {
     if (!userId && !visitorId) return json({ error: 'no identity' }, 400);
 
     // Move the watch. No watch means proximity was never switched on: say so
-    // rather than quietly creating one — consent is granted in the app, not here.
+    // rather than quietly creating one, consent is granted in the app, not here.
     const sel = db.from('geofence_watches').select('id, enabled, secret_hash').limit(1);
     const { data: watches } = userId
       ? await sel.eq('user_id', userId)
@@ -218,7 +218,7 @@ Deno.serve(async (req: Request) => {
     if (cErr) return json({ error: cErr.message }, 500);
     if (!candidates?.length) return json({ ok: true, matched: 0 });
 
-    // Their push endpoints. Customer side only — an agency device must never
+    // Their push endpoints. Customer side only, an agency device must never
     // receive a buyer's proximity alert.
     const psel = db.from('push_subscriptions').select('id, endpoint, p256dh, auth_key, platform').eq('side', 'customer');
     const { data: subs } = userId
@@ -240,7 +240,7 @@ Deno.serve(async (req: Request) => {
         /* "not yet verified" rather than "unverified": the listing is not
            accused of anything, it simply has not been checked, and the agency
            may still be working through it. The buyer gets the fact and draws
-           their own conclusion — the same words property.html already uses, so
+           their own conclusion, the same words property.html already uses, so
            the notification and the page they land on agree. */
         body: `${c.title} · ${distance}m away · ${verified ? 'verified by Synapse' : 'not yet verified'}`,
         route: `/app/property.html?id=${propertyId}`,
@@ -277,7 +277,7 @@ Deno.serve(async (req: Request) => {
       if (anySent) delivered.push(nRow.id as string);
     }
 
-    // Only the rows that actually went out are marked sent — by id, so a
+    // Only the rows that actually went out are marked sent, by id, so a
     // concurrent report cannot flip somebody else's row.
     if (delivered.length) {
       await db.from('notifications')

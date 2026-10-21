@@ -1,10 +1,10 @@
 /**
- * geocode-listings — puts a map pin on every listing that has an address.
+ * geocode-listings, puts a map pin on every listing that has an address.
  *
  * WHY THIS IS SERVER-SIDE. The portal's listing form geocodes as you type, and
  * that is worth keeping: the agent sees the pin land and can correct it. But a
  * form is not a guarantee. It only runs when somebody uses that form, in a
- * browser, with the network holding — and it does nothing for a listing that
+ * browser, with the network holding, and it does nothing for a listing that
  * arrives by import, by API, or from any screen written later. Every listing a
  * real agency had uploaded before this was unplaced, and nothing anywhere said
  * so, because the 501 seeded rows had coordinates written directly and made the
@@ -12,7 +12,7 @@
  *
  * So the form is the fast path and this is the guarantee. It is idempotent and
  * safe to run as often as you like: it only ever fills coordinates that are
- * NULL, and never touches one that is already set — including one an agent
+ * NULL, and never touches one that is already set, including one an agent
  * placed by hand, which must always win over anything guessed from text.
  *
  * THE LADDER, and why it ends at the area. Measured against Nominatim:
@@ -23,7 +23,7 @@
  * Nigerian OSM holds streets but almost no house numbers, so a leading
  * "Number 4," guarantees a miss on an address that is otherwise findable. And
  * "Awolowo Road, Bodija" and "Okeola Agbowo Street" miss even with the number
- * stripped — those streets are not mapped at all — while "Bodija, Ibadan" and
+ * stripped, those streets are not mapped at all, while "Bodija, Ibadan" and
  * "Agbowo, Ibadan" both resolve. The area is the thing this map data actually
  * has, and a pin in the right neighbourhood is worth far more than no pin: it
  * puts the home in the part of town a buyer is choosing between.
@@ -39,7 +39,7 @@ const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
 /* Nominatim's usage policy asks for an identifying User-Agent and no more than
    one request a second. Both are kept below. A free service we are guests on
-   gets treated like one — the alternative is being blocked, and then no
+   gets treated like one, the alternative is being blocked, and then no
    listing anywhere gets a pin. */
 const UA = 'Synapse/1.0 (+https://www.synapsecore.dev; ilios.intelligence@gmail.com)';
 const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
@@ -80,7 +80,7 @@ export function geoLadder(addr: string, hood: string, city: string, state: strin
   const C = (city ?? '').trim();
   const S = (state ?? '').trim();
   /* The area belongs in the street rungs too, unless the address already says
-     it — several cities have a street of the same name and the area is what
+     it, several cities have a street of the same name and the area is what
      separates them. Skipped when already present so the query does not read
      "...Bodija, Bodija, Ibadan". */
   const near = H && A.toLowerCase().indexOf(H.toLowerCase()) < 0 ? [H] : [];
@@ -157,7 +157,7 @@ Deno.serve(async (req: Request) => {
 
   /* Only rows that need it: live, not deleted, carrying an address, and with
      NO coordinates. That last clause is what makes this safe to run on a
-     schedule — a listing an agent pinned by hand is never revisited. */
+     schedule, a listing an agent pinned by hand is never revisited. */
   const conds = [
     'status=eq.live',
     'is_active=is.true',
@@ -168,7 +168,7 @@ Deno.serve(async (req: Request) => {
     /* NO geo_precision FILTER HERE, and that is deliberate after measuring it.
        `geo_precision=not.eq.manual` looks like sensible belt-and-braces against
        overwriting a hand-placed pin, and it matched 0 of 503 rows: PostgREST
-       renders it as NOT (col = 'manual'), which is NULL — and therefore false —
+       renders it as NOT (col = 'manual'), which is NULL, and therefore false -
        for every row whose precision is unset, which is all of them. It would
        have disabled this function completely and silently.
 
@@ -203,14 +203,14 @@ Deno.serve(async (req: Request) => {
       results.push({ id: r.id, address: r.address, placed: true, how: got.how, lat: got.lat, lon: got.lon, dryRun: true });
     } else {
       /* Written one row at a time on purpose. A failure here must cost that
-         listing its pin and nothing else — a batch that half-applies leaves
+         listing its pin and nothing else, a batch that half-applies leaves
          nobody able to say which half. */
       const up = await fetch(`${SB_URL}/rest/v1/properties?id=eq.${r.id}`, {
         method: 'PATCH',
         headers: { ...h, Prefer: 'return=minimal' },
         /* The rung goes in with the coordinates, in the same write. A pin
            whose precision is unknown is a pin that gets drawn as though it
-           were surveyed, which is exactly what the column exists to stop —
+           were surveyed, which is exactly what the column exists to stop -
            and two rows written a moment apart, one with precision and one
            without, is how that gap appears. */
         body: JSON.stringify({ latitude: got.lat, longitude: got.lon, geo_precision: got.how }),

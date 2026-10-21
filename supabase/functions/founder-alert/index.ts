@@ -1,5 +1,5 @@
 /**
- * founder-alert — tells us when somebody arrives and when somebody registers.
+ * founder-alert, tells us when somebody arrives and when somebody registers.
  *
  * Eden: "I want to know every single time a user creates a new account [...]
  * That way we can keep a log of how many people actually come into the app

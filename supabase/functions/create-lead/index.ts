@@ -1,5 +1,5 @@
 /**
- * create-lead — THE LEAD BRIDGE. The most important function in the product.
+ * create-lead, THE LEAD BRIDGE. The most important function in the product.
  *
  * Triggered by "Contact agent" or by Tayo when a user expresses clear
  * interest. It:
@@ -10,7 +10,7 @@
  *   5. retries once on failure; if it still fails, flags the lead
  *      (delivery_failed) so it is NEVER silently lost.
  *
- * The lead row is persisted BEFORE delivery is attempted — a Twilio outage
+ * The lead row is persisted BEFORE delivery is attempted, a Twilio outage
  * can never lose a lead. The dashboard surfaces delivery_failed leads.
  *
  * DELIVERY IS OPTIONAL BY DESIGN. Twilio may be unconfigured (it currently
@@ -18,7 +18,7 @@
  * the lead from the CRM, and a lead sitting in the CRM with no WhatsApp is
  * incomparably better than a buyer who was told "request sent" while nothing
  * was written. Missing credentials therefore produce a saved, flagged lead
- * and a 207 — not a failure.
+ * and a 207, not a failure.
  *
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
  * (auto-injected), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM.
@@ -35,7 +35,7 @@ interface LeadPreferences {
   timeline: string | null;
   /* What Tayo already worked out with this buyer, when they ran the negotiator
      before making contact. It rides along so the agency opens the lead knowing
-     what was proposed and why — previously Tayo wrote an opening offer and a
+     what was proposed and why, previously Tayo wrote an opening offer and a
      message, and the only route to the agency was the buyer copying it to a
      clipboard and finding them somewhere else. */
   negotiation?: LeadNegotiation | null;
@@ -281,7 +281,7 @@ Deno.serve(async (req: Request) => {
       }
     } catch (e) { email = 'failed'; console.error('lead email failed: ' + e); }
 
-    // ── 3. record delivery outcome — flagged, never silent ──
+    // ── 3. record delivery outcome, flagged, never silent ──
     if (delivered) {
       await admin
         .from('leads')
@@ -330,7 +330,7 @@ function formatWhatsApp(p: {
   viewing?: { startsAt: string; ok: boolean; reason: string } | null;
 }): string {
   const lines = [
-    '🟢 *New qualified lead — Synapse*',
+    '🟢 *New qualified lead, Synapse*',
     '',
     `*Buyer:* ${p.consumerName}`,
     p.consumerPhone ? `*Phone:* ${p.consumerPhone}` : '*Phone:* (in app)',
@@ -342,8 +342,8 @@ function formatWhatsApp(p: {
   if (p.preferences) {
     const { budget_min, budget_max } = p.preferences;
     if (budget_min != null || budget_max != null) {
-      const lo = budget_min != null ? naira(budget_min) : '—';
-      const hi = budget_max != null ? naira(budget_max) : '—';
+      const lo = budget_min != null ? naira(budget_min) : '-';
+      const hi = budget_max != null ? naira(budget_max) : '-';
       lines.push(`*Buyer budget:* ${lo} – ${hi}`);
     }
   }

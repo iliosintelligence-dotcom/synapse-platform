@@ -1,5 +1,5 @@
 /**
- * listing-extract — reads an agent's free-text description and returns the
+ * listing-extract, reads an agent's free-text description and returns the
  * listing form's fields, for the agent to check before saving.
  *
  * Eden, 2026-10-02: agents "keep typing long descriptions that can't be used

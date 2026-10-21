@@ -1,8 +1,8 @@
 /**
- * property-intelligence — finds what is really around a property, and stores it.
+ * property-intelligence, finds what is really around a property, and stores it.
  *
  * WHY THIS EXISTS
- * The property page shipped with "Neighbourhood intelligence — Lekki Phase 1"
+ * The property page shipped with "Neighbourhood intelligence, Lekki Phase 1"
  * written into the HTML: six invented score bars and a note about a rising
  * corridor, rendered identically on every listing in the database. A
  * one-bedroom flat at 13 Aafin Iyanu, Ologuneru, in Ibadan carried Lekki's
@@ -24,7 +24,7 @@
  * by that property's own latitude and longitude. Nothing here is city-specific.
  *
  * POST { property_id: uuid, refresh?: boolean }
- *   or { city: string, limit?: number }   — backfill every live listing in a city
+ *   or { city: string, limit?: number }, backfill every live listing in a city
  *
  * Requires GOOGLE_MAPS_API_KEY with **Places API (New)** and **Routes API**
  * enabled. Not the legacy Places/Distance Matrix APIs, which Google no longer
@@ -182,7 +182,7 @@ async function nearby(key: string, lat: number, lon: number, spec: typeof CATEGO
        403, 429, every row is unusable). Before, both aborted the whole
        property. With a type list this long that would mean one unrecognised
        name costing a listing its entire survey. */
-    throw Object.assign(new Error(`places ${spec.type}: HTTP ${r.status} — ${msg}`),
+    throw Object.assign(new Error(`places ${spec.type}: HTTP ${r.status}, ${msg}`),
       { status: r.status });
   }
 

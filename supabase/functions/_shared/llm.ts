@@ -1,5 +1,5 @@
 /**
- * llm.ts — the fast path for every short AI job (Tayo's replies, captions, rewrites).
+ * llm.ts, the fast path for every short AI job (Tayo's replies, captions, rewrites).
  *
  * WHY (Eden, 2026-10-13): replies and captions took five to ten seconds. A person talking to Tayo expects a
  * human pace: two to three seconds. The slowness was the model host: a general "flash" model answers in several

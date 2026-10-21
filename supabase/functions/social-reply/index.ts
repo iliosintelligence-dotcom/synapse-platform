@@ -1,9 +1,9 @@
 /**
- * social-reply — answers an Instagram comment with the listing's link.
+ * social-reply, answers an Instagram comment with the listing's link.
  *
  * Instagram captions never linkify, so every listing posted there ends at a
  * dead end: the reader sees the home, wants the price, and has nowhere to tap.
- * A PRIVATE REPLY is the one route Meta provides out of that — a single direct
+ * A PRIVATE REPLY is the one route Meta provides out of that, a single direct
  * message to somebody who commented, and it may carry a tappable link.
  *
  *     POST /{page-id}/messages
@@ -12,7 +12,7 @@
  * ── the rules this file is built around ─────────────────────────────────
  *
  * ONE REPLY PER COMMENT, EVER. Meta allows exactly one. A retry does not send
- * a second message — it is refused, and the single chance is already spent. So
+ * a second message, it is refused, and the single chance is already spent. So
  * a comment is CLAIMED in the database before any request is made, never
  * after, and a claimed comment is never picked up again by anything.
  *
@@ -70,7 +70,7 @@ interface Comment {
 /* Said once, at the end, when the agency has not said it themselves. A person
    who believes they have reached an agent and has not been told otherwise has
    been misled, and no wording of ours further up the message fixes that. */
-const AUTOMATED_SUFFIX = '\n\n(Automated reply — say anything here and a real person will see it.)';
+const AUTOMATED_SUFFIX = '\n\n(Automated reply, say anything here and a real person will see it.)';
 const SAYS_IT_IS_AUTOMATED = /automat|bot\b|auto-?reply/i;
 
 async function sb(path: string, init?: RequestInit): Promise<Response> {

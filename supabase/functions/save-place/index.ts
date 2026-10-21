@@ -1,5 +1,5 @@
 /**
- * save-place — turns "my office is in Bodija" into a coordinate, once.
+ * save-place, turns "my office is in Bodija" into a coordinate, once.
  *
  * WHY THIS EXISTS
  * consumer_profiles stored `work_location` as free text and nothing else. Every
@@ -157,7 +157,7 @@ Deno.serve(async (req: Request) => {
       note: !geo
         ? 'Saved, but we could not place it on a map. A nearby landmark or a fuller address would help.'
         : geo.confidence === 'approximate'
-          ? 'Saved. We found something close to that name but are not certain it is the right spot — distances from it will be shown as rough.'
+          ? 'Saved. We found something close to that name but are not certain it is the right spot, distances from it will be shown as rough.'
           : undefined,
     });
   } catch (err) {
