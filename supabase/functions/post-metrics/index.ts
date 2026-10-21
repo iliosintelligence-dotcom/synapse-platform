@@ -1,10 +1,10 @@
 /**
- * post-metrics — engagement on a published post, from the platform itself.
+ * post-metrics, engagement on a published post, from the platform itself.
  *
  * The pipeline could already report the half of performance we measure: taps
  * on the short link, visits to the listing, enquiries that followed. What it
  * could not report is the half that happens on the platform and never touches
- * us — how many people saw it, liked it, commented. trypost exposes exactly
+ * us, how many people saw it, liked it, commented. trypost exposes exactly
  * that, per post, across every account it published to:
  *
  *   GET https://app.trypost.it/api/posts/{trypost_post_id}/metrics

@@ -1,16 +1,16 @@
 /**
- * analyze-listing — AI analysis of a property at upload time (build-plan v2.0,
+ * analyze-listing, AI analysis of a property at upload time (build-plan v2.0,
  * Phase 1 / Week 3). Deno / Supabase Edge Function.
  *
  * Runs as a system process (service role) the moment a property is created.
  * Reads the agency's input + media and produces a normalized, structured
  * analysis: a likely target buyer profile, key selling points, and a match tag
- * set — written to the property's ai_* columns, kept SEPARATE from the agency's
+ * set, written to the property's ai_* columns, kept SEPARATE from the agency's
  * own fields (it never overwrites what the agency typed).
  *
  * Provider-agnostic and prompt-versioned, mirroring toju-chat: defaults to
  * Claude (claude-opus-4-8), OpenAI (gpt-4o) available via ANALYZE_LLM_PROVIDER.
- * This is a single structured-JSON completion — no tools, no conversation.
+ * This is a single structured-JSON completion, no tools, no conversation.
  *
  * Invoke with { "property_id": "<uuid>" } (e.g. from a DB insert webhook or the
  * upload flow). Idempotent: re-running re-analyzes and overwrites only ai_*.
@@ -106,7 +106,7 @@ Deno.serve(async (req: Request) => {
       return json({ error: `Analysis failed: ${(e as Error).message}` }, 502);
     }
 
-    // Write ONLY the ai_* columns — never touch the agency's input fields.
+    // Write ONLY the ai_* columns, never touch the agency's input fields.
     const { error: uErr } = await admin
       .from('properties')
       .update({

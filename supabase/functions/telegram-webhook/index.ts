@@ -1,5 +1,5 @@
 /**
- * telegram-webhook — what Telegram tells the Synapse bot.
+ * telegram-webhook, what Telegram tells the Synapse bot.
  *
  * Two things, and nothing else is acted on:
  *
@@ -288,7 +288,7 @@ async function onMessage(msg: Json) {
   const rows = claim.ok ? await claim.json().catch(() => []) : [];
   if (!Array.isArray(rows) || !rows.length) {
     await say(msg.chat.id, 'That link has expired or has already been used. Go back to Synapse '
-      + 'and press “Link Telegram” again — links last fifteen minutes.');
+      + 'and press “Link Telegram” again, links last fifteen minutes.');
     return;
   }
   const profileId = rows[0].profile_id;

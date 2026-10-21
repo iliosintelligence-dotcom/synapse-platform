@@ -1,5 +1,5 @@
 /**
- * social-generate — AI caption generation for Synapse social syndication.
+ * social-generate, AI caption generation for Synapse social syndication.
  *
  * Given a verified listing + the channels an agency wants to post to, Gemini
  * writes a caption for each (Instagram, TikTok, YouTube, Facebook, WhatsApp
@@ -823,7 +823,7 @@ Deno.serve(async (req: Request) => {
     if (!Object.keys(captions).length) {
       return json({
         error: out.truncated
-          ? 'The reply was cut off before it finished — try fewer channels at once.'
+          ? 'The reply was cut off before it finished, try fewer channels at once.'
           : 'The generator returned something unreadable. Please try again.',
         truncated: out.truncated,
       }, 502);

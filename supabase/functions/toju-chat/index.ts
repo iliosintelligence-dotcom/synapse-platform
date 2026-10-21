@@ -1,5 +1,5 @@
 /**
- * toju-chat — Tayo, the AI property advisor. Deno / Supabase Edge Function.
+ * toju-chat, Tayo, the AI property advisor. Deno / Supabase Edge Function.
  *
  * Provider-agnostic, prompt-versioned AI gateway (Layer 3 → enables 7.7 "AI
  * Property OS" without an architecture rewrite). The LLM backend is swappable
@@ -7,12 +7,12 @@
  * registry, and tools come from a registry the gateway iterates. Still one
  * `search_properties` tool, the same mandatory-city rule, the same 30-message
  * trim and the same no-listings line. The prompt is v2 and the search ranks
- * rather than filters — both noted where they live, not here.
+ * rather than filters, both noted where they live, not here.
  *
  * Defaults to Claude (`claude-opus-4-8`); OpenAI (`gpt-4o`) remains available
  * via TOJU_LLM_PROVIDER=openai. Both run with the CALLER's JWT so all
  * reads/writes obey RLS (chat_sessions is owner-only; properties_select_public
- * exposes live, active, unexpired rows — it does NOT filter on verification,
+ * exposes live, active, unexpired rows, it does NOT filter on verification,
  * which is why this function has to be explicit about that itself).
  *
  * Hard constraints:
@@ -53,15 +53,15 @@ interface PromptVersion {
 /* v2 exists because v1 told Tayo to say two things Synapse cannot stand
    behind, and one of them contradicted our own terms of service.
 
-   "an AI real estate consultant" — consultant reads as a regulated
+   "an AI real estate consultant", consultant reads as a regulated
    professional. Estate practice in Nigeria is registered (ESVARBON), and
    terms.html already calls Tayo "an AI advisor". One word, and it is the
    word that decides whether we are holding an AI out as a practitioner.
 
    "All listings are independently verified; you can speak to that trust."
-   Two separate problems. It is not INDEPENDENT — Synapse runs those checks
+   Two separate problems. It is not INDEPENDENT, Synapse runs those checks
    itself, first-party, so "independent" claims a third party that does not
-   exist. And it is not ALL — verification_tier starts at unverified and
+   exist. And it is not ALL, verification_tier starts at unverified and
    most listings are, so Tayo was instructed to vouch for homes nobody had
    checked. terms.html says the opposite in as many words: "Verified is a
    process, not a guarantee." The product was arguing with its own contract.
@@ -73,7 +73,7 @@ const TOJU_SYSTEM_V2: PromptVersion = {
   id: 'toju-system',
   version: '2026-09-05.2',
   text: `You are Tayo, an AI property advisor for Synapse in Nigeria.
-You help people think through a decision — you are not a search box. You
+You help people think through a decision, you are not a search box. You
 reason out loud and explain WHY a property fits before showing it.
 
 Conversation style:
@@ -109,11 +109,11 @@ Hard rules:
 - Search needs a PLACE: either city, or area. An area is enough on its own --
   "Agbowo", "Lekki Phase 1", "Ikate" are how people actually name where they
   saw something, and demanding the city first is a question asked of somebody
-  who has already answered it. If you have neither, ask — do NOT guess or
+  who has already answered it. If you have neither, ask, do NOT guess or
   search a default city.
 - Never mention properties from a place the user did not ask about.
 - If search returns nothing, say exactly: "I don't have any listings in
-  {place} yet — want me to notify you when one comes up?" Do not invent
+  {place} yet, want me to notify you when one comes up?" Do not invent
   listings or suggest other cities unprompted.
 - Results may include homes Synapse has not checked. Show them, and say
   which is which: each result carries verification_status. Never quietly
@@ -123,7 +123,7 @@ Hard rules:
 What you must never claim:
 - Do NOT say listings are "independently verified" or imply a third party
   checked them. Synapse runs its own checks. Say "Synapse checked X" or
-  "not yet checked" — whichever is true of THAT listing.
+  "not yet checked", whichever is true of THAT listing.
 - Do NOT describe an unverified listing as verified, safe, or trustworthy.
   If a home has not been checked, say so plainly when it is relevant.
 - Verification means specific checks passed on a date. It is not a
@@ -135,7 +135,7 @@ What you must never claim:
   to, say plainly that you cannot, and say what you can do instead.
 - For anything that turns on title, survey, or money changing hands, tell
   the person to get their own lawyer's search before they commit. Say it
-  once, where it matters — not as a disclaimer on every message.
+  once, where it matters, not as a disclaimer on every message.
 - Never state a number you were not given. No invented yields, crime
   figures, power-supply statistics or price forecasts.`,
 };
@@ -152,7 +152,7 @@ void PROMPT_REGISTRY;
 /* ───────── tool registry ─────────
  * Gateway-neutral tool definitions. Each provider adapter translates these into
  * its own wire format, and the gateway dispatches a tool call to `run` by name.
- * Adding a tool later means appending an entry here — no edits to request bodies. */
+ * Adding a tool later means appending an entry here, no edits to request bodies. */
 
 interface GatewayTool {
   name: string;
@@ -256,7 +256,7 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   property_ids?: string[];
-  /** The action surfaced this turn — derived from the tool result, never the prose. */
+  /** The action surfaced this turn, derived from the tool result, never the prose. */
   suggested_action?: SuggestedAction | null;
   prompt_version?: string;
   model?: string;
@@ -264,7 +264,7 @@ interface ChatMessage {
 }
 
 /**
- * Derive the next-step action from the structured tool outcome — NOT by parsing
+ * Derive the next-step action from the structured tool outcome, NOT by parsing
  * the answer text. When the search returned listings, the user's natural next
  * step is to reach out about the top-ranked one; otherwise there is no action
  * (Tayo is asking a question or has no listings to act on).
@@ -292,7 +292,7 @@ Deno.serve(async (req: Request) => {
       return json({ error: `Server misconfigured: ${(e as Error).message}` }, 500);
     }
 
-    // Caller-scoped client — RLS enforced on every query.
+    // Caller-scoped client, RLS enforced on every query.
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -422,7 +422,7 @@ function resolveProvider(): LLMProvider {
 /**
  * The two-call flow: ask the model (with tools), and if it requests a known
  * tool, run it and ask again (without tools) for the final answer. Provider-
- * agnostic — the adapter handles each vendor's message/tool-call shape.
+ * agnostic, the adapter handles each vendor's message/tool-call shape.
  */
 async function runGateway(
   provider: LLMProvider,
@@ -551,7 +551,7 @@ interface AnthropicResponse {
  * Anthropic Messages API: `system` is a top-level field (not a message); an
  * assistant tool request is a `tool_use` content block with the arguments as a
  * parsed `input` object; the result returns as a `user` message containing a
- * `tool_result` block keyed by tool_use_id. No `temperature` — it is rejected
+ * `tool_result` block keyed by tool_use_id. No `temperature`, it is rejected
  * on claude-opus-4-8.
  */
 class AnthropicProvider implements LLMProvider {

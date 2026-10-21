@@ -1,5 +1,5 @@
 /**
- * push-key — hands the browser the VAPID PUBLIC key.
+ * push-key, hands the browser the VAPID PUBLIC key.
  *
  * The public key is public by definition: it ships to every subscriber and is
  * embedded in the subscription itself. The PRIVATE key never leaves Supabase

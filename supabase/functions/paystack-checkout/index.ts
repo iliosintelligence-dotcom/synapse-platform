@@ -1,10 +1,10 @@
 /**
- * paystack-checkout — start and confirm a Paystack payment for a Synapse
+ * paystack-checkout, start and confirm a Paystack payment for a Synapse
  * agency: a plan (Accelerate or Leader, monthly or annual) or an add-on.
  *
  * No Paystack key ever reaches the browser. Checkout uses Paystack's
  * hosted redirect page: this function calls /transaction/initialize and
- * hands the client an authorization_url to redirect to — card data is
+ * hands the client an authorization_url to redirect to, card data is
  * collected on Paystack's own domain, never ours.
  *
  * POST { action: 'init', plan: 'accelerator' | 'market_leader', period?: 'monthly' | 'annual' }
@@ -19,7 +19,7 @@
  *
  * Enterprise is never sold here: its terms are agreed with Synapse.
  *
- * Deployed with verify_jwt = true — every call must carry a real user JWT.
+ * Deployed with verify_jwt = true, every call must carry a real user JWT.
  * Env: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
  * (auto-injected), PAYSTACK_SECRET_KEY.
  */

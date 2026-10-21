@@ -1,5 +1,5 @@
 /**
- * synapse-studio — the back end of the Synapse studio (app/synapse.html).
+ * synapse-studio, the back end of the Synapse studio (app/synapse.html).
  *
  * Synapse's own social media team works here, separately from the agency
  * portal. Two kinds of caller:

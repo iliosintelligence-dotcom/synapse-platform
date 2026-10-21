@@ -1,5 +1,5 @@
 /**
- * delete-agency — an agency's owner deletes the agency and their own account.
+ * delete-agency, an agency's owner deletes the agency and their own account.
  *
  * Called from the Delete agency section at the foot of the Subscription pane
  * in app/agency.html, one step at a time so the portal can show real

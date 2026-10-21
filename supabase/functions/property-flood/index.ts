@@ -1,5 +1,5 @@
 /**
- * property-flood — river flood exposure for one listing, and the flood map around it.
+ * property-flood, river flood exposure for one listing, and the flood map around it.
  *
  * Reads the JRC / Copernicus GloFAS v2.1.2 flood DEPTH rasters (10-year and 100-year return
  * periods, 90 m) straight from their public cloud-optimised GeoTIFFs and stores the answer in

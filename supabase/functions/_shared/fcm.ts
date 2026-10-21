@@ -1,5 +1,5 @@
 /**
- * fcm — pushes to the Synapse app on a phone, through Firebase Cloud Messaging (HTTP v1).
+ * fcm, pushes to the Synapse app on a phone, through Firebase Cloud Messaging (HTTP v1).
  *
  * The site's web push (VAPID) cannot reach an app: an Android or iOS web view has no PushManager. The app registers a Firebase
  * device token instead (push-subscribe stores it in push_subscriptions as endpoint "fcm:<token>", platform android or ios), and

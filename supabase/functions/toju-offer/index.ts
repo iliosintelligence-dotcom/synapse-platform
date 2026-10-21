@@ -1,5 +1,5 @@
 /**
- * toju-offer — withdrawn.
+ * toju-offer, withdrawn.
  *
  * This let a buyer put a priced offer to an agency: Tayo recorded it, measured
  * it against the agency's negotiation floor, and called a person in when it

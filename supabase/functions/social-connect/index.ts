@@ -982,7 +982,7 @@ const TG_PROFILE = {
       + '“View this home” button under every post.',
     '',
     'Looking for a home? Send me a message and I’ll hand you to Tayo, '
-      + 'Synapse’s property advisor — or tap “Chat with Tayo” below.',
+      + 'Synapse’s property advisor, or tap “Chat with Tayo” below.',
     '',
     'Agencies: connect a channel from the Synapse agency portal, under Social '
       + '→ Add channel → Telegram.',
@@ -1612,7 +1612,7 @@ Deno.serve(async (req: Request) => {
         return json({ error: 'Telegram could not find ' + chat + '. '
           + (chatRes?.description ?? '')
           + ' Check the @name, and make sure the bot has been added to the channel '
-          + 'first — Telegram hides a private channel from a bot that is not in it.' }, 400);
+          + 'first, Telegram hides a private channel from a bot that is not in it.' }, 400);
       }
       const info = chatRes.result ?? {};
 

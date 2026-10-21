@@ -235,7 +235,7 @@ function checkMedia(post: QueuedPost, rules: MediaRules | number): string {
       + (r.maxVideos === 1 ? '' : 's') + ' in one post; this has ' + videos.length + '.';
   }
   if (!r.mixed && videos.length > 0 && videos.length !== post.media_urls.length) {
-    return r.who + ' cannot mix video and photos in one post — send the video on its own, '
+    return r.who + ' cannot mix video and photos in one post, send the video on its own, '
       + 'or photos on their own.';
   }
   return '';
@@ -979,7 +979,7 @@ async function sendStoryKit(admin: ReturnType<typeof createClient>, post: Queued
     + '2. Open ' + channel + ', tap its photo at the top, then “Add story”, and choose it.\n'
     + '3. Add a Link sticker and paste the listing link (tap “Copy link” below), so viewers can tap through.\n'
     + (suggested ? '4. Suggested text: ' + suggested + '\n' : '')
-    + '\nStories on a channel unlock once it has enough boosts — Telegram’s rule, not ours.';
+    + '\nStories on a channel unlock once it has enough boosts, Telegram’s rule, not ours.';
 
   const rows: Array<Array<Record<string, unknown>>> = [
     [{ text: 'Copy link', copy_text: { text: link.slice(0, 256) } }],
@@ -1442,7 +1442,7 @@ Deno.serve(async (req: Request) => {
        remembered. TRYPOST_CONTENT_TYPE above is a hardcoded map, and its own
        comment records that the first version was inferred from the
        <platform>_<kind> pattern and shipped 'youtube_video', which does not
-       exist — two of three guesses happened to be right, which is the problem
+       exist, two of three guesses happened to be right, which is the problem
        with guessing. A map like that drifts silently: nothing fails until a
        post fails.
 

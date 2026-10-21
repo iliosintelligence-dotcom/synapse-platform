@@ -1,5 +1,5 @@
 /**
- * paystack-webhook — Paystack's server-to-server confirmation of a charge.
+ * paystack-webhook, Paystack's server-to-server confirmation of a charge.
  *
  * This is the authoritative activation path: the client's own `verify` call
  * (paystack-checkout) is a UX nicety for the redirect-back flow, but an
@@ -59,7 +59,7 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-/** Constant-time comparison — a plain === on hex strings leaks timing info. */
+/** Constant-time comparison, a plain === on hex strings leaks timing info. */
 async function validSignature(rawBody: string, signature: string, secret: string): Promise<boolean> {
   if (!signature) return false;
   const key = await crypto.subtle.importKey(
