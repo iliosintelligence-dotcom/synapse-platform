@@ -1,5 +1,5 @@
 /**
- * delete-agency — the steps, without the wiring.
+ * delete-agency, the steps, without the wiring.
  *
  * Kept apart from index.ts so every branch can be exercised against fakes
  * (logic_test.ts) without a Supabase project: the database, Storage and Auth
