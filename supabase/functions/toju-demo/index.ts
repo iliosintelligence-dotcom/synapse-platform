@@ -1425,6 +1425,8 @@ interface Match {
   id: string;
   title: string;
   city: string;
+  state?: string | null;
+  areaSqm?: number | null;
   listingType: string;   // sale | rent | shortlet
   pricePeriod: string;   // total | per_year | ...
   price: number;
@@ -1903,7 +1905,7 @@ async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches:
   if (!c.browse && typeof c.minBedrooms === 'number' && c.minBedrooms > 0 && !shared) conds.push(`bedrooms=gte.${Math.round(c.minBedrooms)}`);
 
   const select =
-    'id,title,city,area_name,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
+    'id,title,city,state,area_sqm,area_name,listing_type,price_period,price,bedrooms,bathrooms,trust_score,' +
     'property_type,deal_structure,build_stage,handover_date,payment_plan,deposit_pct,instalment_months,units_available,plot_count,plot_size_sqm,min_investment,' +
     'verification_status,verified_at,' +
     /* Where the home actually is. Without these two the matches map had
@@ -1987,6 +1989,8 @@ async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches:
       price: Number(r.price ?? 0),
       bedrooms: Number(r.bedrooms ?? 0),
       bathrooms: Number(r.bathrooms ?? 0),
+      state: typeof r.state === 'string' && r.state.trim() ? r.state.trim() : null,
+      areaSqm: r.area_sqm == null || Number(r.area_sqm) <= 0 ? null : Number(r.area_sqm),
       trustScore: Number(r.trust_score ?? 0),
       latitude: r.latitude == null ? null : Number(r.latitude),
       longitude: r.longitude == null ? null : Number(r.longitude),
