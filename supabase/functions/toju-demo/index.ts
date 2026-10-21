@@ -26,7 +26,8 @@ import {
   type Ask, EMPTY_NEG, type NegDecision, type NegState, negotiationStep, amountsIn, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
 } from './facts.ts';
-import { contextHomeIds, isEmptyContext, liveContextForModel, parseLiveContext, type HomeLine } from './live-context.ts';
+import { forget as forgetFacts, memoryFacts } from './memory-panel.ts';
+import { contextHomeIds,isEmptyContext, liveContextForModel, parseLiveContext, type HomeLine } from './live-context.ts';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 /* Stable Flash keeps Tayo quick and inexpensive. The model can be overridden
@@ -776,6 +777,19 @@ Deno.serve(async (req: Request) => {
         criteria: row?.criteria ?? null,
         matches: await refreshStored(row?.matches ?? []),
       });
+    }
+    // "What Tayo remembers": what this visitor told Tayo, and the way to delete it
+    if (body.action === 'memory' || body.action === 'forget') {
+      if (!visitorId) return json({ facts: [] });
+      const row = await loadSession(visitorId);
+      let b = briefFromSaved(row?.criteria ?? null), p = profileFromSaved(row?.criteria ?? null);
+      if (body.action === 'forget' && row) {
+        ({ brief: b, profile: p } = forgetFacts(b, p, (body as { keys?: unknown }).keys));
+        const neg = (row.criteria as { negotiation?: unknown } | null)?.negotiation;
+        // matches are kept: they are homes, not facts about the person, and are refreshed from the database anyway
+        await saveSession(visitorId, row.messages, { ...savedCriteria(b, p), negotiation: neg }, (body as { keys?: unknown }).keys === 'all' ? [] : undefined);
+      }
+      return json({ facts: memoryFacts(b, p) });
     }
     if (body.action === 'restore') {
       // listingCount feeds the greeting's {{LISTING_COUNT}} token — everything
