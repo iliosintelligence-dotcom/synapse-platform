@@ -28,6 +28,9 @@ import {
 } from './facts.ts';
 import { forget as forgetFacts, memoryFacts } from './memory-panel.ts';
 import { ADVISOR_PLAYBOOK, DISCOVERY_NOTE } from './playbook.ts';
+import { runAgent } from './agent/loop.ts';
+import { EMPTY_STATE, fromLegacy, toLegacy, type Prefs, type SearchState } from './agent/memory.ts';
+import type { Listing as AgentListing } from './agent/tools.ts';
 import { contextHomeIds,isEmptyContext, liveContextForModel, parseLiveContext, type HomeLine } from './live-context.ts';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -553,6 +556,7 @@ async function loadPinned(id: string): Promise<PinnedHome | null> {
       ? (f.in_zone_100 ? 'inside the modelled 100-year river flood zone' : f.nearest_flood_m != null ? `modelled river flood water about ${f.nearest_flood_m} m away` : 'no modelled river flooding nearby') + ' (river model only)'
       : null,
     listedBy: match.agency,
+    raw: { agencyFee: p.agency_fee ?? null, legalFee: p.legal_fee ?? null, serviceCharge: p.service_charge ?? null },
   };
   const feeText = [p.service_charge, p.agency_fee, p.legal_fee].map((n) => (n == null ? '' : naira(Number(n)))).join(' ');
   return { match, facts, feeText };
@@ -763,6 +767,7 @@ Deno.serve(async (req: Request) => {
       mode?: string; list?: boolean; model?: string; provider?: string;
       /** What the buyer's device says they are doing (live-context.ts). Untrusted: only ever read through parseLiveContext. */
       context?: unknown;
+      agent?: boolean; debug?: boolean;
     };
     const visitorId = typeof body.visitorId === 'string' && UUID_RE.test(body.visitorId) ? body.visitorId : null;
 
@@ -956,6 +961,13 @@ Deno.serve(async (req: Request) => {
     const dreamNote = notes.find((n) => n.startsWith('[Background from my Dream Home mood board')) ?? null;
     const listingNote = notes.find((n) => n.startsWith('[The buyer is replying about one specific listing')) ?? null;
 
+    /* THE REASONING AGENT (2026-10-23, docs/toju-agent-architecture.md). Off unless the page asks for it or TOJU_AGENT is 'on'. A
+       conversation about one pinned listing (negotiation) stays on the pipeline below, which owns the agency's price floor. */
+    const agentOn = body.agent === true || (Deno.env.get('TOJU_AGENT') === 'on' && body.agent !== false);
+    if (agentOn && typeof body.listingId !== 'string') {
+      return json(await agentTurn({ key, visitorId, all, messages, userText, dreamNote, debug: body.debug === true }));
+    }
+
     /* LIVE CONTEXT: the homes the buyer's device says they last opened, recently viewed and saved, read from the database by id
        (never from the request's own words), so "the one I just looked at" means something. Looked up beside the other loads. */
     const liveCtx = parseLiveContext(body.context);
@@ -1146,6 +1158,82 @@ Deno.serve(async (req: Request) => {
     return json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
 });
+
+// ── the agent's adapter: Synapse's real search and listing reads, and the model, handed to the agent loop ──
+async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[]; messages: Msg[]; userText: string; dreamNote: string | null; debug: boolean }) {
+  const session = o.visitorId ? await loadSession(o.visitorId) : null;
+  const crit = (session?.criteria ?? null) as Record<string, unknown> | null;
+  const v3 = (crit && typeof crit._v3 === 'object' ? crit._v3 : null) as { prefs?: Prefs; state?: SearchState } | null;
+  const prefs: Prefs = v3?.prefs ?? fromLegacy(crit);
+  const state: SearchState = { ...EMPTY_STATE, ...(v3?.state ?? {}) };
+  const byId = new Map<string, Match>();
+
+  const toListing = (m: Match): AgentListing => ({
+    id: m.id, title: String(m.title ?? '').slice(0, 140),
+    place: [m.neighbourhood?.name, m.city, m.state].filter(Boolean).join(', '),
+    price: m.price, priceText: naira(m.price) + (m.listingType === 'rent' ? ' per year' : m.pricePeriod === 'per_night' ? ' per night' : ''),
+    period: m.pricePeriod, kind: m.deal?.propertyType === 'land' ? 'land' : m.listingType,
+    bedrooms: m.bedrooms || null, bathrooms: m.bathrooms || null, areaSqm: m.areaSqm ?? null, verification: m.verificationStatus,
+    agency: (m as unknown as { agency?: unknown }).agency ?? null,
+  });
+  const deps = {
+    async search(a: { place?: string; dealType?: string; propertyKind?: string; maxPrice?: number; minPrice?: number; bedrooms?: number; anchor?: string; limit?: number }) {
+      const c: Criteria = { city: a.place ?? null, dealType: a.dealType ?? null, propertyKind: a.propertyKind ?? null, maxPrice: a.maxPrice ?? null,
+        minPrice: a.minPrice ?? null, minBedrooms: a.bedrooms ?? null, anchor: a.anchor ?? null, browse: !a.dealType && !a.propertyKind };
+      const r = await fetchMatches(c, { limit: Math.min(12, (a.limit ?? 6) + 4) });
+      r.matches.forEach((m) => byId.set(m.id, m));
+      let priceRange: { min: number; max: number } | null = null;
+      if (!r.matches.length && a.place) {
+        const wide = await fetchMatches({ city: a.place, browse: true } as Criteria, { minPrice: null, maxPrice: null, limit: 60 });
+        const ps = wide.matches.filter((m) => !a.propertyKind || (a.propertyKind === 'land') === (m.deal?.propertyType === 'land')).map((m) => m.price).filter((n) => n > 0);
+        if (ps.length) priceRange = { min: Math.min(...ps), max: Math.max(...ps) };
+      }
+      return { total: r.total, listings: r.matches.map(toListing), priceRange };
+    },
+    async getProperty(id: string) {
+      const h = await loadPinned(id).catch(() => null);
+      if (!h) return null;
+      byId.set(h.match.id, h.match);
+      const f = h.facts as Record<string, unknown>, raw = (f.raw ?? {}) as Record<string, unknown>;
+      const n = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+      return {
+        ...toListing(h.match), description: f.description ?? null, amenities: f.amenities ?? [], furnished: f.furnished ?? null, condition: f.condition ?? null,
+        electricity: f.electricityBand ?? null, titleDocument: f.titleDocument ?? null, floodRisk: f.floodRisk ?? null, negotiable: f.negotiable ?? null,
+        toilets: f.toilets ?? null, parkingSpaces: f.parkingSpaces ?? null, deal: f.deal ?? null,
+        agencyFee: n(raw.agencyFee), legalFee: n(raw.legalFee), serviceCharge: n(raw.serviceCharge),
+      };
+    },
+  };
+
+  /* the model: the fast host first, Gemini when it is down */
+  const llm = async (system: string, msgs: Array<{ role: 'user' | 'assistant'; content: string }>) => {
+    const fast = await fastLlm({ system, messages: msgs, maxTokens: 1400, temperature: 0.3, timeoutMs: 12000 });
+    if (fast && 'text' in fast) return { text: fast.text };
+    return await gemini(o.key, system, msgs, 1400);
+  };
+
+  const prior = o.messages.slice(0, -1);
+  const turn = o.messages.filter((m) => m.role === 'user').length;
+  const r = await runAgent({ llm, deps, message: o.userText, history: prior, prefs, state, turn,
+    extraContext: o.dreamNote ? { dream_board: o.dreamNote.slice(0, 1200) } : undefined });
+
+  const matches = r.show.map((l) => byId.get(l.id)).filter((m): m is Match => !!m);
+  if (o.visitorId) {
+    /* the older pages read brief and profile; the agent reads _v3. Contact details are never touched here. */
+    const legacy = toLegacy(r.prefs);
+    const oldProfile = ((crit?._v2 as Record<string, unknown> | undefined)?.profile ?? {}) as Record<string, unknown>;
+    for (const k of ['phone', 'email', 'contactOk', 'contactDeclined']) if (oldProfile[k] !== undefined) (legacy.profile as Record<string, unknown>)[k] = oldProfile[k];
+    const b = legacy.brief as Record<string, unknown>;
+    const criteria = { city: b.place, dealType: b.dealType, maxPrice: b.maxPrice, minPrice: b.minPrice, minBedrooms: b.minBedrooms, propertyKind: b.propertyKind,
+      anchor: b.anchor, _v2: legacy, _v3: { prefs: r.prefs, state: r.state, at: new Date().toISOString() }, negotiation: crit?.negotiation ?? undefined };
+    await saveSession(o.visitorId, [...o.all, { role: 'assistant' as const, content: r.reply }], criteria, matches.length ? matches : undefined);
+  }
+  console.log(`agent turn: steps ${r.usage.steps}, llm ${r.usage.llmCalls}, tools ${r.usage.toolCalls} [${r.trace.filter((x) => x.kind === 'tool').map((x) => x.tool + (x.ok ? '' : '!')).join(',')}], stopped ${r.stoppedBy}`);
+  return {
+    reply: r.reply, more: null, showMatches: matches.length > 0, matches, suggestions: r.suggestions, priceHistory: null, searched: null, interaction: 'agent',
+    ...(o.debug ? { agentTrace: r.trace, agentUsage: r.usage, agentStopped: r.stoppedBy, prefsSaved: r.prefsSaved } : {}),
+  };
+}
 
 // ── Gemini helper ──
 async function gemini(key: string, system: string, messages: Msg[], maxTokens: number, model: string = MODEL,
