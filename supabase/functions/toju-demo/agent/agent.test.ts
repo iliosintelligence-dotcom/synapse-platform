@@ -218,3 +218,22 @@ Deno.test('parseJson tolerates a code fence or a sentence around the object', ()
   assertEquals(parseJson('Sure: {"reply":"a {b} c"} done')?.reply, 'a {b} c');
   assertEquals(parseJson('no json'), null);
 });
+
+Deno.test('a correction the model searched with but forgot to record is still remembered, because the person said it', async () => {
+  const { deps } = fakeDeps();
+  const prefs = applyUpdates({}, [{ key: 'place', value: 'Ibadan' }, { key: 'bedrooms', value: 2 }], 1).prefs;
+  const { llm } = scripted([{ tool_calls: [{ name: 'search_properties', args: { place: 'Akobo', maxPrice: 1_500_000 } }] }, { reply: 'Nothing in Akobo under that yet. Want me to widen it?' }]);
+  const r = await runAgent({ ...base, prefs, llm, deps, message: 'Actually make it Akobo, budget is about 1.5m a year' });
+  assertEquals(r.prefs.place.value, 'Akobo');
+  assertEquals(r.prefs.place.previous?.[0].value, 'Ibadan');
+  assertEquals(r.prefs.maxPrice.value, 1_500_000);
+  assertEquals(r.prefs.bedrooms.value, 2);
+});
+
+Deno.test('the safety net does not record what the model chose on its own', async () => {
+  const { deps } = fakeDeps();
+  const prefs = applyUpdates({}, [{ key: 'place', value: 'Bodija' }], 1).prefs;
+  const { llm } = scripted([{ tool_calls: [{ name: 'search_properties', args: { place: 'Akobo' } }] }, { reply: 'Nothing in Bodija, but Akobo next door has one.' }]);
+  const r = await runAgent({ ...base, prefs, llm, deps, message: 'anything cheaper?' });
+  assertEquals(r.prefs.place.value, 'Bodija');
+});

@@ -193,6 +193,26 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     const r = applyUpdates(ctx.prefs, final.preferences.map((p) => ({ ...p, source: p.source === 'inferred' ? 'inferred' : 'stated' })), ctx.atMessage);
     ctx.prefs = r.prefs; ctx.prefLog.push(...r.applied);
   }
+  /* A SAFETY NET FOR MEMORY. When the model searched with something the person literally said in this message (a place they named, an
+     amount they typed, "3 bedrooms") but forgot to record it, it is recorded as said. Nothing is taken from the model's own guesses here. */
+  const searched = trace.some((x) => x.tool === 'search_properties' && x.ok);
+  const q = ctx.state.lastQuery as Record<string, unknown> | null;
+  if (searched && q) {
+    const said = input.message.toLowerCase();
+    const amounts = amountsIn(input.message);
+    const ups: PrefUpdate[] = [];
+    for (const k of ['place', 'dealType', 'propertyKind', 'maxPrice', 'minPrice', 'bedrooms'] as const) {
+      const v = q[k];
+      if (v === undefined || v === null || ctx.prefLog.includes(k)) continue;
+      const cur = ctx.prefs[k];
+      if (cur && cur.status === 'active' && JSON.stringify(cur.value) === JSON.stringify(v)) continue;
+      const literal = typeof v === 'string'
+        ? (k === 'place' ? said.includes(v.toLowerCase()) : k === 'dealType' ? new RegExp('\\b' + (v === 'buy' ? '(buy|purchase)' : v) + '\\b').test(said) : said.includes(v))
+        : typeof v === 'number' && (k === 'bedrooms' ? new RegExp('\\b' + v + '\\s*-?\\s*(bed|bedroom|br)').test(said) : near(v, amounts));
+      if (literal) ups.push({ key: k, value: v as string | number, source: 'stated' });
+    }
+    if (ups.length) { const r = applyUpdates(ctx.prefs, ups, ctx.atMessage); ctx.prefs = r.prefs; ctx.prefLog.push(...r.applied); }
+  }
   /* Only listings a tool actually returned this run can be shown: the model cannot conjure a card. */
   const show = [...new Set(final.show)].map((id) => ctx.seen.get(id)).filter((l): l is Listing => !!l);
   return { reply: final.reply, show, suggestions: final.suggestions, prefs: ctx.prefs, state: ctx.state, trace, usage, stoppedBy, prefsSaved: [...new Set(ctx.prefLog)] };

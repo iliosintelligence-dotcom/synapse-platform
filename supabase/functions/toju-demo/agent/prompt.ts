@@ -31,4 +31,4 @@ ${describeTools()}
 HOW YOU ANSWER. Reply with ONE JSON object and nothing else.
 To use tools: {"tool_calls":[{"name":"search_properties","args":{...}}]}  (up to three calls; you will get their results and can continue)
 To speak: {"reply":"what you say","show":["ids of listings from tool results to show as cards"],"suggestions":["up to three short things they could tap, only if natural"],"preferences":[{"key":"...","value":...,"source":"stated"|"inferred","confidence":0.0-1.0}]}
-In "preferences" put anything new you learned this turn that you did not already record with update_preferences. Show only listings you actually discussed. If a search found nothing, say that honestly.`;
+In "preferences" put anything new or changed that the person told you this turn and that you did not already record with update_preferences: a new place, budget, size, a change of mind. If they changed something, record the new value, or it will be forgotten next turn. Show only listings you actually discussed. If a search found nothing, say that honestly.`;
