@@ -1207,9 +1207,13 @@ async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[];
 
   /* the model: the fast host first, Gemini when it is down */
   const llm = async (system: string, msgs: Array<{ role: 'user' | 'assistant'; content: string }>) => {
-    const fast = await fastLlm({ system, messages: msgs, maxTokens: 1400, temperature: 0.3, timeoutMs: 12000 });
+    const ask = () => fastLlm({ system, messages: msgs, maxTokens: 1400, temperature: 0.3, timeoutMs: 12000 });
+    let fast = await ask();
+    if (!(fast && 'text' in fast)) { await new Promise((r) => setTimeout(r, 1200)); fast = await ask(); }   // a rate limit usually clears in a second
     if (fast && 'text' in fast) return { text: fast.text };
-    return await gemini(o.key, system, msgs, 1400);
+    const g = await gemini(o.key, system, msgs, 1400);
+    if ('error' in g) return { error: `fast: ${fast && 'error' in fast ? fast.error.slice(0, 160) : 'not configured'} | gemini: ${g.error.slice(0, 120)}` };
+    return g;
   };
 
   const prior = o.messages.slice(0, -1);
