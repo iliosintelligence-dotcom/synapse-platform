@@ -131,6 +131,9 @@ export interface Profile {
   timeline: string | null;       // when they need to move or buy
   purpose: string | null;        // what the move or the plot is for, in their words
   financing: string | null;
+  horizon: string | null;        // how long they would hold it, and what then (an investor)
+  plotSize: string | null;       // the size of plot they need (land)
+  titleNeeds: string | null;     // which land documents matter to them (land)
   phone: string | null;
   email: string | null;
   /** Said yes to the agency being able to reach them with these. */
@@ -141,7 +144,7 @@ export interface Profile {
 }
 export const EMPTY_PROFILE: Profile = {
   name: null, household: null, work: null, transport: null, lifestyle: [], timeline: null, purpose: null,
-  financing: null, phone: null, email: null, contactOk: null, contactDeclined: false, asked: {},
+  financing: null, horizon: null, plotSize: null, titleNeeds: null, phone: null, email: null, contactOk: null, contactDeclined: false, asked: {},
 };
 
 const str = (v: unknown, max = 160): string | null => {
@@ -188,6 +191,7 @@ export function profileFromSaved(criteria: unknown): Profile {
     name: str(s.name, 60), household: str(s.household), work: str(s.work), transport: str(s.transport),
     lifestyle: Array.isArray(s.lifestyle) ? (s.lifestyle as unknown[]).map((x) => str(x, 40)).filter((x): x is string => !!x).slice(0, 12) : [],
     timeline: str(s.timeline, 80), purpose: str(s.purpose, 120), financing: str(s.financing, 80),
+    horizon: str(s.horizon, 80), plotSize: str(s.plotSize, 80), titleNeeds: str(s.titleNeeds, 120),
     phone: str(s.phone, 20), email: str(s.email, 120),
     contactOk: typeof s.contactOk === 'boolean' ? s.contactOk : null,
     contactDeclined: s.contactDeclined === true,
@@ -256,8 +260,9 @@ export function mergeBrief(prev: Brief, u: Understood, userText: string): Brief 
 export function mergeProfile(prev: Profile, u: Understood, userText: string): Profile {
   const p = u.profile as Record<string, unknown>;
   const next: Profile = { ...prev, lifestyle: [...prev.lifestyle], asked: { ...prev.asked } };
-  const set = (k: 'name' | 'household' | 'work' | 'transport' | 'timeline' | 'purpose' | 'financing', max = 160) => { const v = str(p[k], max); if (v) next[k] = v; };
+  const set = (k: 'name' | 'household' | 'work' | 'transport' | 'timeline' | 'purpose' | 'financing' | 'horizon' | 'plotSize' | 'titleNeeds', max = 160) => { const v = str(p[k], max); if (v) next[k] = v; };
   set('name', 60); set('household'); set('work'); set('transport'); set('timeline', 80); set('purpose', 120); set('financing', 80);
+  set('horizon', 80); set('plotSize', 80); set('titleNeeds', 120);
   if (Array.isArray(p.lifestyle)) {
     for (const t of p.lifestyle) { const v = str(t, 40); if (v && !next.lifestyle.some((x) => x.toLowerCase() === v.toLowerCase())) next.lifestyle.push(v); }
     next.lifestyle = next.lifestyle.slice(0, 12);
@@ -273,7 +278,7 @@ export function mergeProfile(prev: Profile, u: Understood, userText: string): Pr
 
 /* ───────────────────────── what to ask next ───────────────────────── */
 
-export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | 'commute' | 'priorities' | null;
+export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | 'commute' | 'priorities' | 'horizon' | 'payment' | 'plotSize' | 'titles' | null;
 
 export interface Ask { slot: Slot; hint: string; closed: string[] }
 
@@ -287,6 +292,7 @@ export interface Ask { slot: Slot; hint: string; closed: string[] }
 export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
   const tried = (s: string) => (profile.asked[s] ?? 0) >= 2;
   const land = brief.propertyKind === 'land';
+  const investing = brief.intent === 'invest' || /\b(invest|hold|resell|flip|appreciat)/i.test(profile.purpose ?? '');
   if (!brief.place && !tried('place')) return { slot: 'place', hint: 'Ask where they want it: a city or an area. Open question.', closed: [] };
   if (!brief.dealType && !brief.propertyKind && !brief.browse && !tried('purpose')) {
     return { slot: 'purpose', hint: 'Ask what they want to do: buy a home, rent, a shared room, buy land, or invest. Open question.', closed: [] };
@@ -294,14 +300,39 @@ export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
   if (!brief.maxPrice && !brief.minPrice && !tried('budget')) {
     return { slot: 'budget', hint: 'Ask what they are comfortable spending (annual rent if renting, total price if buying). Frame it as being on their side. Open question.', closed: [] };
   }
+
+  /* LAND, AND ANYONE INVESTING, GET A DEEPER CONVERSATION (Eden, 2026-10-22: it asked where and then stopped). What they will do with the
+     money decides which plots are right, so it is asked before when, and each answer opens the next specific question. */
+  if (land || investing) {
+    if (land && !profile.purpose && !tried('landUse')) {
+      return { slot: 'landUse', hint: 'Ask what the land is for: to hold as an investment and sell later, to build on (a home to live in, or to sell or let), farming, or commercial use. Open question.', closed: [] };
+    }
+    if (investing && !profile.horizon && !tried('horizon')) {
+      return { slot: 'horizon', hint: land
+        ? 'Ask how long they would hold the land and what they want to do at the end: resell as the area grows, develop it, or lease it. A year or two, three to five years, or longer.'
+        : 'Ask how long they plan to hold it and how they want it to pay them: rent it out, or resell later. Open question.', closed: [] };
+    }
+    if (!profile.financing && !brief.paymentPlan && !tried('payment')) {
+      return { slot: 'payment', hint: 'Ask how they plan to pay: all at once, or in instalments over time. Open question.', closed: [] };
+    }
+    if (land && !profile.plotSize && !tried('plotSize')) {
+      return { slot: 'plotSize', hint: 'Ask what size of plot they need: one standard plot (about 500 square metres), half a plot, several plots, or a larger parcel.', closed: [] };
+    }
+    if (land && !profile.titleNeeds && !tried('titles')) {
+      return { slot: 'titles', hint: 'Ask which land documents matter to them (survey plan, Certificate of Occupancy, Governor\'s consent) and whether they only want plots whose documents are checked. Plain words, one question.', closed: [] };
+    }
+    if (!profile.timeline && !tried('timeline')) return { slot: 'timeline', hint: 'Ask when they want to complete the purchase by.', closed: [] };
+    if (shown > 0 && !profile.name && !tried('name')) return { slot: 'name', hint: 'Ask what you should call them.', closed: [] };
+    return { slot: null, hint: 'Nothing more is needed. Offer one concrete next step about the plots on screen: open one, compare two, or ask the agency about its documents.', closed: [] };
+  }
+
   if (!profile.timeline && !tried('timeline')) return { slot: 'timeline', hint: 'Ask when they need to move in or buy by.', closed: [] };
-  if (land && !profile.purpose && !tried('landUse')) return { slot: 'landUse', hint: 'Ask what the land is for: build a home, hold it as an investment, farming or commercial use.', closed: [] };
-  if (!land && !profile.household && brief.dealType !== 'shared' && !tried('household')) return { slot: 'household', hint: 'Ask who is moving with them. Open question; never ask how many bedrooms.', closed: [] };
-  if (brief.dealType === 'buy' && !land && !brief.stage && shown > 0 && !tried('stage')) {
+  if (!profile.household && brief.dealType !== 'shared' && !tried('household')) return { slot: 'household', hint: 'Ask who is moving with them. Open question; never ask how many bedrooms.', closed: [] };
+  if (brief.dealType === 'buy' && !brief.stage && shown > 0 && !tried('stage')) {
     return { slot: 'stage', hint: 'Ask whether it must be a finished home or whether off-plan (built later, paid in instalments) is fine.', closed: ['Finished only', 'Off-plan is fine'] };
   }
   /* Once homes are on screen, the questions that change which one is right for THEIR life, not just their budget. */
-  if (shown > 0 && !land && !profile.work && !profile.transport && !tried('commute')) {
+  if (shown > 0 && !profile.work && !profile.transport && !tried('commute')) {
     return { slot: 'commute', hint: 'Ask where they work or study and how they get around, so you can weigh the commute and tell them honestly which homes cost them hours. Open question.', closed: [] };
   }
   if (shown > 0 && profile.lifestyle.length === 0 && !tried('priorities')) {

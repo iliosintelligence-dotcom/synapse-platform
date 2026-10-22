@@ -232,8 +232,15 @@ Return STRICT JSON, nothing else:
            "browse": <true|false>, "price": {"min": <whole naira|null>, "max": <whole naira|null>}},
  "profile": {"name": <string|null>, "household": <string|null>, "work": <string|null>, "transport": <string|null>,
              "lifestyle": [<short tags>], "timeline": <string|null>, "purpose": <string|null>, "financing": <string|null>,
+             "horizon": <string|null>, "plotSize": <string|null>, "titleNeeds": <string|null>,
              "contactOk": <true|false|null>, "contactDeclined": <true|false>},
  "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null}
+
+PROFILE FIELDS FOR LAND AND INVESTMENT: "purpose" is what the land or money is for, in their words (hold and sell later, build a home, farm,
+commercial). "horizon" is how long they would hold it and what they plan at the end (resell, develop, lease). "financing" is how they
+will pay (all at once, instalments, mortgage). "plotSize" is the plot size or number of plots they want. "titleNeeds" is which land
+documents matter to them (survey plan, C of O, Governor's consent, only checked documents). "timeline" is when they want to complete.
+Set one only when they said it in this message; a short answer to the question just asked counts.
 
 RULES
 - Put in "brief" and "profile" ONLY what the person said or changed in THIS latest message. Leave everything else null or out.
@@ -601,6 +608,11 @@ function pinnedPlain(h: PinnedHome, ask: Ask, neg?: NegDecision | null): string 
   const rent = m.listingType === 'rent';
   const q = ask.slot === 'budget' ? (rent ? ' What can you comfortably pay for the year?' : ' What budget are you working to, and how would you pay?')
     : ask.slot === 'timeline' ? ' When do you need to move in or complete by?'
+    : ask.slot === 'landUse' ? ' What is the land for: holding as an investment, building, farming or commercial use?'
+    : ask.slot === 'horizon' ? ' How long would you hold it before selling or developing?'
+    : ask.slot === 'payment' ? ' Would you pay all at once or in instalments?'
+    : ask.slot === 'plotSize' ? ' What size of plot do you need?'
+    : ask.slot === 'titles' ? ' Which land documents matter most to you?'
     : ask.slot === 'household' ? ' Who would be living there?'
     : ask.slot === 'name' ? ' What should I call you?' : ' Shall I put your questions to the agency?';
   return `${m.title}${where ? ' in ' + where : ''} is ${naira(m.price)}${rent ? ' a year' : ''}.${q}`;
