@@ -71,3 +71,12 @@ Deno.test('an investor in homes is gated on budget and how long they would hold'
   assertEquals(discoveryDone({ ...home, maxPrice: 90_000_000 }, p()), false);
   assertEquals(discoveryDone({ ...home, maxPrice: 90_000_000 }, p({ horizon: 'rent it out' })), true);
 });
+
+Deno.test('every question Tayo can ask has a plain wording for the evidence-only reply', async () => {
+  const { plainReply } = await import('./facts.ts');
+  const ev = { checked: true, place: 'Ibadan', kindLabel: 'land plots', liveInPlace: 3, sameKindInPlace: 3, priceRange: { min: 1, max: 2 }, budget: { min: null, max: 10_000_000 }, exactTotal: 3, role: 'exact' as const, shown: [{ id: 'x', title: 'Plot', price: 3_500_000, period: 'total', area: null, bedrooms: 0, kind: 'land' }], otherPlaces: [], note: null };
+  for (const slot of ['landUse', 'horizon', 'payment', 'plotSize', 'titles', 'experience'] as const) {
+    const r = plainReply(ev, { ...land, maxPrice: 10_000_000 }, { slot, hint: '', closed: [] });
+    assertEquals(/\?$/.test(r.trim()), true, `${slot}: ${r}`);
+  }
+});

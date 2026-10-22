@@ -482,6 +482,11 @@ function plainQuestion(a: Ask): string {
     case 'timeline': return 'When do you need to move or buy by?';
     case 'household': return 'Who is moving with you?';
     case 'landUse': return 'What is the land for?';
+    case 'horizon': return 'How long would you hold it before selling or developing?';
+    case 'payment': return 'Would you pay all at once, or in instalments?';
+    case 'plotSize': return 'What size of plot do you need?';
+    case 'titles': return 'Which land documents matter most to you?';
+    case 'experience': return 'Have you bought land or property before?';
     case 'stage': return 'Does it have to be finished, or is off-plan fine?';
     case 'name': return 'What should I call you?';
     case 'commute': return 'Where do you work or study, and how do you get there?';
