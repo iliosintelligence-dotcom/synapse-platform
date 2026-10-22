@@ -12,3 +12,4 @@ coverage/
 
 # Supabase CLI scratch (holds a cached CLI version string, not project state)
 supabase/.temp/
+scripts/toju_stress_report.json
