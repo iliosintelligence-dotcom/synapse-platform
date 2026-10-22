@@ -23,10 +23,11 @@
  */
 import { fastLlm } from '../_shared/llm.ts';
 import {
-  type Ask, EMPTY_NEG, type NegDecision, type NegState, negotiationStep, amountsIn, briefFromSaved, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
+  type Ask, EMPTY_NEG, type NegDecision, type NegState, negotiationStep, amountsIn, briefFromSaved, discoveryDone, type Brief, checkReply, type Evidence, mergeBrief, mergeProfile, naira, nextAsk, plainReply,
   type Profile, profileFromSaved, readUnderstood, type Understood,
 } from './facts.ts';
 import { forget as forgetFacts, memoryFacts } from './memory-panel.ts';
+import { ADVISOR_PLAYBOOK, DISCOVERY_NOTE } from './playbook.ts';
 import { contextHomeIds,isEmptyContext, liveContextForModel, parseLiveContext, type HomeLine } from './live-context.ts';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -232,11 +233,11 @@ Return STRICT JSON, nothing else:
            "browse": <true|false>, "price": {"min": <whole naira|null>, "max": <whole naira|null>}},
  "profile": {"name": <string|null>, "household": <string|null>, "work": <string|null>, "transport": <string|null>,
              "lifestyle": [<short tags>], "timeline": <string|null>, "purpose": <string|null>, "financing": <string|null>,
-             "horizon": <string|null>, "plotSize": <string|null>, "titleNeeds": <string|null>,
+             "horizon": <string|null>, "plotSize": <string|null>, "titleNeeds": <string|null>, "experience": <string|null>,
              "contactOk": <true|false|null>, "contactDeclined": <true|false>},
  "priceHistory": {"area": <string>, "city": <string|null>, "kind": "land"|"sale"|"rent"} | null}
 
-PROFILE FIELDS FOR LAND AND INVESTMENT: "purpose" is what the land or money is for, in their words (hold and sell later, build a home, farm,
+PROFILE FIELDS FOR LAND AND INVESTMENT: "experience" is whether they have bought before and who checks their paperwork. "purpose" is what the land or money is for, in their words (hold and sell later, build a home, farm,
 commercial). "horizon" is how long they would hold it and what they plan at the end (resell, develop, lease). "financing" is how they
 will pay (all at once, instalments, mortgage). "plotSize" is the plot size or number of plots they want. "titleNeeds" is which land
 documents matter to them (survey plan, C of O, Governor's consent, only checked documents). "timeline" is when they want to complete.
@@ -268,6 +269,8 @@ RULES
 - Never invent a value. If it was not said, it is null.`;
 
 const RESPOND_PROMPT = `${DOCTRINE}
+
+${ADVISOR_PLAYBOOK}
 
 YOU ARE WRITING THE REPLY, AND YOU WRITE IT FROM EVIDENCE.
 
@@ -613,6 +616,7 @@ function pinnedPlain(h: PinnedHome, ask: Ask, neg?: NegDecision | null): string 
     : ask.slot === 'payment' ? ' Would you pay all at once or in instalments?'
     : ask.slot === 'plotSize' ? ' What size of plot do you need?'
     : ask.slot === 'titles' ? ' Which land documents matter most to you?'
+    : ask.slot === 'experience' ? ' Have you bought land or property before?'
     : ask.slot === 'household' ? ' Who would be living there?'
     : ask.slot === 'name' ? ' What should I call you?' : ' Shall I put your questions to the agency?';
   return `${m.title}${where ? ' in ' + where : ''} is ${naira(m.price)}${rent ? ' a year' : ''}.${q}`;
@@ -981,11 +985,15 @@ Deno.serve(async (req: Request) => {
 
     /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
     const canSearch = !!brief.place && !pinned;
-    const { ev, matches: found } = pinned ? { ev: pinnedEvidence(pinned, brief), matches: [] as Match[] } : canSearch
+    let { ev, matches: found } = pinned ? { ev: pinnedEvidence(pinned, brief), matches: [] as Match[] } : canSearch
       ? await buildEvidence(brief, inv)
       : { ev: { checked: !!inv, place: null, kindLabel: kindLabelOf(brief), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
           budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 0, role: 'none' as const, shown: [], otherPlaces: [], note: null } as Evidence,
         matches: [] as Match[] };
+    /* GET TO KNOW THEM FIRST (Eden, 2026-10-22). For land and for investors no specific home is shown or named until Tayo knows what the
+       money is for and what it can be. The place's real price range stays in the evidence, so Tayo can still speak honestly in general. */
+    const discovering = !pinned && canSearch && !discoveryDone(brief, profile);
+    if (discovering) { found = []; ev = { ...ev, shown: [], role: 'exact', note: DISCOVERY_NOTE }; }
     const showCards = !pinned && found.length > 0 && u.intent !== 'chat';
     const ask = pinned ? pinnedAsk(pinned, brief, profile, pinnedInfo) : nextAsk(brief, profile, found.length);
     /* Which of the five conversations this is, for the model and for the page. */
@@ -1021,7 +1029,7 @@ Deno.serve(async (req: Request) => {
        reply is built from the evidence alone, so it cannot be wrong. */
     const respondInput = JSON.stringify({
       brief, profile: { ...profile, asked: undefined, phone: profile.phone ? 'given' : null, email: profile.email ? 'given' : null },
-      evidence: pinned ? undefined : evidenceForModel(ev, found), ask,
+      evidence: pinned ? undefined : evidenceForModel(ev, found), ask, discovering: discovering || undefined,
       interaction, remembered: hadMemory ? { name: prevProfile.name, place: prevBrief.place, dealType: prevBrief.dealType, kind: prevBrief.propertyKind,
         budgetMax: prevBrief.maxPrice ? naira(prevBrief.maxPrice) : null, bedrooms: prevBrief.minBedrooms, household: prevProfile.household, timeline: prevProfile.timeline } : null,
       listing: pinned ? pinned.facts : undefined, negotiation: negForModel, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,

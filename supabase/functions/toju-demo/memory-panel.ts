@@ -17,7 +17,7 @@ const BRIEF_FACTS: Array<[keyof Brief, string]> = [
 const PROFILE_FACTS: Array<[keyof Profile, string]> = [
   ['name', 'Your name'], ['household', 'Who it is for'], ['work', 'Work'], ['transport', 'Getting around'], ['lifestyle', 'Lifestyle'],
   ['timeline', 'When'], ['purpose', 'What it is for'], ['horizon', 'How long you would hold'], ['financing', 'Financing'],
-  ['plotSize', 'Plot size'], ['titleNeeds', 'Documents that matter'], ['phone', 'Phone'], ['email', 'Email'],
+  ['plotSize', 'Plot size'], ['titleNeeds', 'Documents that matter'], ['experience', 'Buying experience'], ['phone', 'Phone'], ['email', 'Email'],
 ];
 
 export const FORGETTABLE = new Set<string>([...BRIEF_FACTS.map(([k]) => k), ...PROFILE_FACTS.map(([k]) => k)]);

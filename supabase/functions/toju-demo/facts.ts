@@ -134,6 +134,7 @@ export interface Profile {
   horizon: string | null;        // how long they would hold it, and what then (an investor)
   plotSize: string | null;       // the size of plot they need (land)
   titleNeeds: string | null;     // which land documents matter to them (land)
+  experience: string | null;     // whether they have bought before, and who checks the paperwork for them
   phone: string | null;
   email: string | null;
   /** Said yes to the agency being able to reach them with these. */
@@ -144,7 +145,7 @@ export interface Profile {
 }
 export const EMPTY_PROFILE: Profile = {
   name: null, household: null, work: null, transport: null, lifestyle: [], timeline: null, purpose: null,
-  financing: null, horizon: null, plotSize: null, titleNeeds: null, phone: null, email: null, contactOk: null, contactDeclined: false, asked: {},
+  financing: null, horizon: null, plotSize: null, titleNeeds: null, experience: null, phone: null, email: null, contactOk: null, contactDeclined: false, asked: {},
 };
 
 const str = (v: unknown, max = 160): string | null => {
@@ -191,7 +192,7 @@ export function profileFromSaved(criteria: unknown): Profile {
     name: str(s.name, 60), household: str(s.household), work: str(s.work), transport: str(s.transport),
     lifestyle: Array.isArray(s.lifestyle) ? (s.lifestyle as unknown[]).map((x) => str(x, 40)).filter((x): x is string => !!x).slice(0, 12) : [],
     timeline: str(s.timeline, 80), purpose: str(s.purpose, 120), financing: str(s.financing, 80),
-    horizon: str(s.horizon, 80), plotSize: str(s.plotSize, 80), titleNeeds: str(s.titleNeeds, 120),
+    horizon: str(s.horizon, 80), plotSize: str(s.plotSize, 80), titleNeeds: str(s.titleNeeds, 120), experience: str(s.experience, 120),
     phone: str(s.phone, 20), email: str(s.email, 120),
     contactOk: typeof s.contactOk === 'boolean' ? s.contactOk : null,
     contactDeclined: s.contactDeclined === true,
@@ -260,9 +261,9 @@ export function mergeBrief(prev: Brief, u: Understood, userText: string): Brief 
 export function mergeProfile(prev: Profile, u: Understood, userText: string): Profile {
   const p = u.profile as Record<string, unknown>;
   const next: Profile = { ...prev, lifestyle: [...prev.lifestyle], asked: { ...prev.asked } };
-  const set = (k: 'name' | 'household' | 'work' | 'transport' | 'timeline' | 'purpose' | 'financing' | 'horizon' | 'plotSize' | 'titleNeeds', max = 160) => { const v = str(p[k], max); if (v) next[k] = v; };
+  const set = (k: 'name' | 'household' | 'work' | 'transport' | 'timeline' | 'purpose' | 'financing' | 'horizon' | 'plotSize' | 'titleNeeds' | 'experience', max = 160) => { const v = str(p[k], max); if (v) next[k] = v; };
   set('name', 60); set('household'); set('work'); set('transport'); set('timeline', 80); set('purpose', 120); set('financing', 80);
-  set('horizon', 80); set('plotSize', 80); set('titleNeeds', 120);
+  set('horizon', 80); set('plotSize', 80); set('titleNeeds', 120); set('experience', 120);
   if (Array.isArray(p.lifestyle)) {
     for (const t of p.lifestyle) { const v = str(t, 40); if (v && !next.lifestyle.some((x) => x.toLowerCase() === v.toLowerCase())) next.lifestyle.push(v); }
     next.lifestyle = next.lifestyle.slice(0, 12);
@@ -278,7 +279,7 @@ export function mergeProfile(prev: Profile, u: Understood, userText: string): Pr
 
 /* ───────────────────────── what to ask next ───────────────────────── */
 
-export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | 'commute' | 'priorities' | 'horizon' | 'payment' | 'plotSize' | 'titles' | null;
+export type Slot = 'place' | 'purpose' | 'budget' | 'timeline' | 'household' | 'landUse' | 'name' | 'stage' | 'commute' | 'priorities' | 'horizon' | 'payment' | 'plotSize' | 'titles' | 'experience' | null;
 
 export interface Ask { slot: Slot; hint: string; closed: string[] }
 
@@ -321,6 +322,9 @@ export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
     if (land && !profile.titleNeeds && !tried('titles')) {
       return { slot: 'titles', hint: 'Ask which land documents matter to them (survey plan, Certificate of Occupancy, Governor\'s consent) and whether they only want plots whose documents are checked. Plain words, one question.', closed: [] };
     }
+    if (!profile.experience && !tried('experience')) {
+      return { slot: 'experience', hint: 'Ask whether they have bought land or property before, and whether they have a lawyer or surveyor who will check the documents for them. If they have not, reassure them that is normal and say you will help them know what to ask for.', closed: [] };
+    }
     if (!profile.timeline && !tried('timeline')) return { slot: 'timeline', hint: 'Ask when they want to complete the purchase by.', closed: [] };
     if (shown > 0 && !profile.name && !tried('name')) return { slot: 'name', hint: 'Ask what you should call them.', closed: [] };
     return { slot: null, hint: 'Nothing more is needed. Offer one concrete next step about the plots on screen: open one, compare two, or ask the agency about its documents.', closed: [] };
@@ -340,6 +344,21 @@ export function nextAsk(brief: Brief, profile: Profile, shown: number): Ask {
   }
   if (shown > 0 && !profile.name && !tried('name')) return { slot: 'name', hint: 'Ask what you should call them.', closed: [] };
   return { slot: null, hint: 'Nothing more is needed. Offer one concrete next step about the homes on screen: open one, compare two, or book a viewing.', closed: [] };
+}
+
+/**
+ * Has Tayo found out enough to recommend a specific home? For land and for anyone investing: what it is for and what they can spend
+ * (or they were asked twice and did not say). Everyone else, and anyone who asked to browse, is unchanged.
+ */
+export function discoveryDone(brief: Brief, profile: Profile): boolean {
+  if (brief.browse) return true;
+  const land = brief.propertyKind === 'land';
+  const investing = brief.intent === 'invest' || /\b(invest|hold|resell|flip|appreciat)/i.test(profile.purpose ?? '');
+  if (!land && !investing) return true;
+  const tried = (s: string) => (profile.asked[s] ?? 0) >= 2;
+  const money = !!(brief.maxPrice || brief.minPrice) || tried('budget');
+  const aim = land ? (!!profile.purpose || tried('landUse')) : (!!profile.horizon || tried('horizon'));
+  return money && aim;
 }
 
 /* ───────────────────────── what the database said ───────────────────────── */
