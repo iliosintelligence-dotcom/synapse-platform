@@ -277,6 +277,8 @@ ${ADVISOR_PLAYBOOK}
 
 YOU ARE WRITING THE REPLY, AND YOU WRITE IT FROM EVIDENCE.
 
+When "agency" is in the JSON, the person came from that agency's own link: every home in "evidence" is that agency's, so speak as the agency's adviser and do not suggest other agencies. Answer questions about the agency only from "agency"; a document it uploaded is not the same as one Synapse has checked.
+
 NEVER write an em dash (the long dash) in anything you say. Use a comma, a full stop or a new sentence instead.
 
 You are given JSON: "brief" (what they want), "profile" (what you know about them), "evidence" (what Synapse's
@@ -949,15 +951,12 @@ Deno.serve(async (req: Request) => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     if (!lastUser) return json({ error: 'say something first' }, 400);
     const userText = lastUser.content;
-    if (typeof body.agencyId === 'string' && UUID_RE.test(body.agencyId)) {
-      const facts = await loadAgencyFacts(body.agencyId);
-      if (!facts) return json({ reply: 'I could not find that agency just now. Want me to look at homes instead?', more: null, showMatches: false, matches: [], suggestions: [] });
-      const out = await gemini(key, AGENCY_PROMPT, [{ role: 'user', content: JSON.stringify({ agency: facts, conversation: messages.slice(-8) }) }], 700);
-      if ('error' in out) return json({ error: out.error }, 502);
-      const pr = parseLoose(out.text) as { reply?: string };
-      const text = (typeof pr.reply === 'string' && pr.reply.trim()) ? pr.reply.trim() : (salvageReply(out.text) ?? safeFallbackReply(out.text));
-      return json({ reply: text, more: null, showMatches: false, matches: [], suggestions: [], priceHistory: null, searched: null, interaction: 'info' });
-    }
+    /* ONE AGENCY'S HOMES (2026-10-23). Someone who arrived from an agency's own link (its WhatsApp, Instagram or Facebook
+       auto-reply, or "Ask Tayo about their homes" on its profile) talks to Tayo about that agency's homes only: every search and
+       every count is that agency's, and what Synapse holds about the agency is there for questions about it. */
+    const agencyScopeId = typeof body.agencyId === 'string' && UUID_RE.test(body.agencyId) ? body.agencyId : null;
+    const agencyFacts = agencyScopeId ? await loadAgencyFacts(agencyScopeId).catch(() => null) : null;
+    const agencyScope = agencyFacts ? agencyScopeId : null;
     const dreamNote = notes.find((n) => n.startsWith('[Background from my Dream Home mood board')) ?? null;
     const listingNote = notes.find((n) => n.startsWith('[The buyer is replying about one specific listing')) ?? null;
 
@@ -965,16 +964,17 @@ Deno.serve(async (req: Request) => {
        conversation about one pinned listing (negotiation) stays on the pipeline below, which owns the agency's price floor. */
     const agentOn = body.agent === true || (Deno.env.get('TOJU_AGENT') === 'on' && body.agent !== false);
     if (agentOn && typeof body.listingId !== 'string') {
-      return json(await agentTurn({ key, visitorId, all, messages, userText, dreamNote, debug: body.debug === true }));
+      return json(await agentTurn({ key, visitorId, all, messages, userText, dreamNote, debug: body.debug === true, agencyId: agencyScope, agencyFacts }));
     }
 
     /* LIVE CONTEXT: the homes the buyer's device says they last opened, recently viewed and saved, read from the database by id
        (never from the request's own words), so "the one I just looked at" means something. Looked up beside the other loads. */
     const liveCtx = parseLiveContext(body.context);
     const ctxIds = liveCtx ? contextHomeIds(liveCtx, typeof body.listingId === 'string' ? body.listingId : null) : [];
-    const [liveCities, inv, session, ctxHomes] = await Promise.all([
+    const [liveCities, invAll, session, ctxHomes] = await Promise.all([
       citiesWithListings(), liveInventory(), visitorId ? loadSession(visitorId) : Promise.resolve(null), loadContextHomes(ctxIds),
     ]);
+    const inv = agencyScope && invAll ? invAll.filter((r) => r.agency_id === agencyScope) : invAll;
 
     /* 1. UNDERSTAND  2. REMEMBER. What they want and who they are, kept between turns: a refinement ("within 4
        million") changes one thing and keeps the rest, instead of the model having to re-derive it all. */
@@ -996,9 +996,9 @@ Deno.serve(async (req: Request) => {
     const pinned = pinnedId && !movedOn ? await loadPinned(pinnedId).catch((e) => { console.error('pinned listing failed: ' + e); return null; }) : null;
 
     /* 3. LOOK. Whenever there is a place, the database is read; the model's mood does not decide it. */
-    const canSearch = !!brief.place && !pinned;
+    const canSearch = (!!brief.place || !!agencyScope) && !pinned;
     let { ev, matches: found } = pinned ? { ev: pinnedEvidence(pinned, brief), matches: [] as Match[] } : canSearch
-      ? await buildEvidence(brief, inv)
+      ? await buildEvidence(brief, inv, agencyScope)
       : { ev: { checked: !!inv, place: null, kindLabel: kindLabelOf(brief), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
           budget: { min: brief.minPrice, max: brief.maxPrice }, exactTotal: 0, role: 'none' as const, shown: [], otherPlaces: [], note: null } as Evidence,
         matches: [] as Match[] };
@@ -1042,6 +1042,7 @@ Deno.serve(async (req: Request) => {
     const respondInput = JSON.stringify({
       brief, profile: { ...profile, asked: undefined, phone: profile.phone ? 'given' : null, email: profile.email ? 'given' : null },
       evidence: pinned ? undefined : evidenceForModel(ev, found), ask, discovering: discovering || undefined,
+      agency: agencyFacts ?? undefined,
       interaction, remembered: hadMemory ? { name: prevProfile.name, place: prevBrief.place, dealType: prevBrief.dealType, kind: prevBrief.propertyKind,
         budgetMax: prevBrief.maxPrice ? naira(prevBrief.maxPrice) : null, bedrooms: prevBrief.minBedrooms, household: prevProfile.household, timeline: prevProfile.timeline } : null,
       listing: pinned ? pinned.facts : undefined, negotiation: negForModel, turn: pinned ? messages.filter((m) => m.role === 'user').length : undefined,
@@ -1160,7 +1161,7 @@ Deno.serve(async (req: Request) => {
 });
 
 // ── the agent's adapter: Synapse's real search and listing reads, and the model, handed to the agent loop ──
-async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[]; messages: Msg[]; userText: string; dreamNote: string | null; debug: boolean }) {
+async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[]; messages: Msg[]; userText: string; dreamNote: string | null; debug: boolean; agencyId?: string | null; agencyFacts?: unknown }) {
   const session = o.visitorId ? await loadSession(o.visitorId) : null;
   const crit = (session?.criteria ?? null) as Record<string, unknown> | null;
   const v3 = (crit && typeof crit._v3 === 'object' ? crit._v3 : null) as { prefs?: Prefs; state?: SearchState } | null;
@@ -1178,13 +1179,13 @@ async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[];
   });
   const deps = {
     async search(a: { place?: string; dealType?: string; propertyKind?: string; maxPrice?: number; minPrice?: number; bedrooms?: number; anchor?: string; limit?: number }) {
-      const c: Criteria = { city: a.place ?? null, dealType: a.dealType ?? null, propertyKind: a.propertyKind ?? null, maxPrice: a.maxPrice ?? null,
+      const c: Criteria = { agencyId: o.agencyId ?? null, city: a.place ?? null, dealType: a.dealType ?? null, propertyKind: a.propertyKind ?? null, maxPrice: a.maxPrice ?? null,
         minPrice: a.minPrice ?? null, minBedrooms: a.bedrooms ?? null, anchor: a.anchor ?? null, browse: !a.dealType && !a.propertyKind };
       const r = await fetchMatches(c, { limit: Math.min(12, (a.limit ?? 6) + 4) });
       r.matches.forEach((m) => byId.set(m.id, m));
       let priceRange: { min: number; max: number } | null = null;
       if (!r.matches.length && a.place) {
-        const wide = await fetchMatches({ city: a.place, browse: true } as Criteria, { minPrice: null, maxPrice: null, limit: 60 });
+        const wide = await fetchMatches({ city: a.place, browse: true, agencyId: o.agencyId ?? null } as Criteria, { minPrice: null, maxPrice: null, limit: 60 });
         const ps = wide.matches.filter((m) => !a.propertyKind || (a.propertyKind === 'land') === (m.deal?.propertyType === 'land')).map((m) => m.price).filter((n) => n > 0);
         if (ps.length) priceRange = { min: Math.min(...ps), max: Math.max(...ps) };
       }
@@ -1219,7 +1220,7 @@ async function agentTurn(o: { key: string; visitorId: string | null; all: Msg[];
   const prior = o.messages.slice(0, -1);
   const turn = o.messages.filter((m) => m.role === 'user').length;
   const r = await runAgent({ llm, deps, message: o.userText, history: prior, prefs, state, turn,
-    extraContext: o.dreamNote ? { dream_board: o.dreamNote.slice(0, 1200) } : undefined });
+    extraContext: { ...(o.dreamNote ? { dream_board: o.dreamNote.slice(0, 1200) } : {}), ...(o.agencyFacts ? { agency: o.agencyFacts, agency_note: 'The person came from this agency\'s own link. Search and speak only about its homes.' } : {}) } });
 
   const matches = r.show.map((l) => byId.get(l.id)).filter((m): m is Match => !!m);
   if (o.visitorId) {
@@ -1369,6 +1370,7 @@ interface InvRow {
   property_type: string | null; listing_type: string | null;
   deal_structure: string | null; build_stage: string | null; min_investment: number | null;
   price: number | null;
+  agency_id?: string | null;
 }
 let INV_CACHE: { at: number; rows: InvRow[] } | null = null;
 async function liveInventory(): Promise<InvRow[] | null> {
@@ -1376,7 +1378,7 @@ async function liveInventory(): Promise<InvRow[] | null> {
   const s = sb();
   if (!s) return null;
   const res = await fetch(
-    `${s.url}/rest/v1/properties?select=city,state,area_name,property_type,listing_type,deal_structure,build_stage,min_investment,price&${freshLiveConds().join('&')}&limit=1000`,
+    `${s.url}/rest/v1/properties?select=city,state,area_name,property_type,listing_type,deal_structure,build_stage,min_investment,price,agency_id&${freshLiveConds().join('&')}&limit=1000`,
     { headers: s.headers },
   ).catch(() => null);
   if (!res || !res.ok) return null;
@@ -1519,6 +1521,8 @@ async function refreshStored(matches: unknown): Promise<unknown[]> {
 
 // ── matches from the digital twin ──
 interface Criteria {
+  /* Only this agency's homes: set when the person arrived from the agency's own link (an auto-reply, its profile). */
+  agencyId?: string | null;
   city?: string | null;
   /* The place they want to be near, in their own words. Resolved to a
      coordinate by resolveAnchor() and never used as text for matching. */
@@ -1633,7 +1637,7 @@ const matchKind = (m: Match): string => {
   return t === 'land' ? 'land' : t === 'shared' ? 'shared room' : t === 'commercial' ? 'commercial' : m.listingType === 'rent' ? 'rental' : 'home for sale';
 };
 
-async function buildEvidence(b: Brief, inv: InvRow[] | null): Promise<{ ev: Evidence; matches: Match[] }> {
+async function buildEvidence(b: Brief, inv: InvRow[] | null, agencyId: string | null = null): Promise<{ ev: Evidence; matches: Match[] }> {
   const place = b.place ? (parsePlace(b.place)?.name ?? b.place) : null;
   const base: Evidence = {
     checked: false, place, kindLabel: kindLabelOf(b), liveInPlace: 0, sameKindInPlace: 0, priceRange: null,
@@ -1642,7 +1646,7 @@ async function buildEvidence(b: Brief, inv: InvRow[] | null): Promise<{ ev: Evid
   if (!inv) return { ev: base, matches: [] };
 
   const here = rowsIn(inv, place);
-  const crit = critOf(b);
+  const crit: Criteria = { ...critOf(b), agencyId };
   const lo = b.minPrice, hi = b.maxPrice;
   const hasBudget = !crit.browse && (!!lo || !!hi);
   let matches: Match[] = [];
@@ -1989,6 +1993,7 @@ async function fetchMatches(c: Criteria, o: SearchOpts = {}): Promise<{ matches:
   /* Land is never a house, and a finished home is never off-plan
      (20261003090000_what_kind_of_deal). Browsing applies none of this. */
   if (byId) conds.push('id=eq.' + o.id);
+  if (!byId && c.agencyId && UUID_RE.test(c.agencyId)) conds.push('agency_id=eq.' + c.agencyId);
   if (!c.browse) {
     if (c.propertyKind === 'land') conds.push('property_type=eq.land');
     else if (c.propertyKind === 'home' && !shared) conds.push('property_type=not.in.(land,commercial)');
