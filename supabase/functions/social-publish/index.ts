@@ -531,8 +531,10 @@ const facebookAdapter: Adapter = async (post, conn) => {
    a Synapse channel it is synapse_channels.trypost_account_id. Either way
    there is NO OAuth token on our side, and loadConnections deliberately does
    not ask for one. We cannot leak a token we were never given. */
-const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
-const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
+/* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
+   more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
+const TRYPOST_URL = '';
+const TRYPOST_KEY = '';
 const trypostConfigured = (): boolean => Boolean(TRYPOST_URL && TRYPOST_KEY);
 
 /* Our social_platform values -> trypost content_type.
@@ -690,7 +692,7 @@ const trypostAdapter: Adapter = async (post, conn) => {
     Object.assign(payload, { x_fitted: sent !== (post.caption ?? '').trim(), x_weight: xWeight(sent) });
   }
 
-  if (!trypostConfigured()) return fail('trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY.');
+  if (!trypostConfigured()) return fail('TryPost has been disconnected.');
   if (!contentType) return fail('trypost has no content type for ' + post.platform + '.');
   if (!accountId) {
     return fail(post.leg === 'synapse'
@@ -1209,8 +1211,7 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
     if (!trypostConfigured()) {
-      return notConfigured('Synapse ' + post.platform
-        + ' (trypost is not configured: set TRYPOST_URL and TRYPOST_API_KEY)');
+      return notConfigured('Synapse ' + post.platform + ' (TryPost has been disconnected)');
     }
     if (!TRYPOST_CONTENT_TYPE[post.platform]) {
       return notConfigured('Synapse ' + post.platform + ' (no trypost content type)');
@@ -1451,7 +1452,7 @@ Deno.serve(async (req: Request) => {
        because that is Meta's limit; this is how to check trypost agrees rather
        than assume it. Read-only, and it returns no credential. */
     if (body.action === 'content-types') {
-      if (!trypostConfigured()) return json({ error: 'trypost is not configured' }, 400);
+      if (!trypostConfigured()) return json({ error: 'TryPost has been disconnected' }, 400);
       const res = await fetch(TRYPOST_URL + '/api/content-types', {
         headers: { Authorization: 'Bearer ' + TRYPOST_KEY, Accept: 'application/json' },
       }).catch(() => null);

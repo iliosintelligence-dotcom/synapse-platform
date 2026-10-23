@@ -24,12 +24,15 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
+import { fastLlm } from '../_shared/llm.ts';
 
 type Admin = ReturnType<typeof createClient>;
 type Row = Record<string, unknown>;
 
-const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') ?? '').replace(/\/+$/, '');
-const TRYPOST_KEY = Deno.env.get('TRYPOST_API_KEY') ?? '';
+/* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
+   more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
+const TRYPOST_URL = '';
+const TRYPOST_KEY = '';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_MODEL = Deno.env.get('STUDIO_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 const GEMINI_FALLBACK_MODEL = Deno.env.get('STUDIO_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
@@ -133,7 +136,7 @@ type Acct = {
 
 /** What TryPost holds, with its own platform names mapped to ours. */
 async function fetchAccounts(): Promise<{ accounts: Acct[]; error?: string }> {
-  if (!trypostOn()) return { accounts: [], error: 'TryPost is not configured on the server.' };
+  if (!trypostOn()) return { accounts: [], error: 'TryPost has been disconnected. Telegram channels post through the Synapse bot.' };
   let res: Response;
   try {
     res = await fetch(TRYPOST_URL + '/api/social-accounts', { headers: tpHeaders() });
@@ -377,8 +380,6 @@ async function postCancel(admin: Admin, b: Row): Promise<Response> {
 /* ── captions ──────────────────────────────────────────────────────────── */
 
 async function suggestCaption(b: Row): Promise<Response> {
-  const key = Deno.env.get('GEMINI_API_KEY');
-  if (!key) return json({ error: 'Caption help is not switched on.' }, 503);
   const brief = String(b.brief ?? '').trim().slice(0, 800);
   if (!brief) return json({ error: 'Say what the post is about.' }, 400);
   const platform = LABEL[String(b.platform ?? '').toLowerCase()] ?? 'social media';
@@ -386,7 +387,29 @@ async function suggestCaption(b: Row): Promise<Response> {
     + 'helps buyers and renters find homes that fit how they live, and it shows agencies\' listings that are checked and kept current. '
     + 'Voice: calm, specific, warm, plain English. No hype, no pressure, no invented facts, figures or promises. '
     + 'At most two emoji, no hashtag walls (up to three relevant hashtags at the end is fine). '
-    + 'Write for ' + platform + '. Return ONLY a JSON array of exactly three different caption strings.';
+    + 'Write for ' + platform + '. Never use the long dash character.';
+
+  /* OUR AI FIRST (2026-10-23). This button called Gemini and nothing else, so when the Gemini quota ran out the button simply failed.
+     It now uses the same fast models as Tayo, and Gemini only if they are down. */
+  const fast = await fastLlm({
+    system: system + ' Return a JSON object {"captions": [three different caption strings]}.',
+    messages: [{ role: 'user', content: 'The post is about: ' + brief }],
+    maxTokens: 900, temperature: 0.55, timeoutMs: 15000,
+    schema: { type: 'object', properties: { captions: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3 } }, required: ['captions'] },
+  });
+  if (fast && 'text' in fast) {
+    try {
+      const o = JSON.parse(fast.text.slice(fast.text.indexOf('{'), fast.text.lastIndexOf('}') + 1)) as { captions?: unknown };
+      const opts = Array.isArray(o.captions) ? o.captions.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 3) : [];
+      if (opts.length) return json({ options: opts });
+    } catch { /* fall through to Gemini */ }
+  } else if (fast && 'error' in fast) {
+    console.error('caption: fast model failed, trying Gemini: ' + fast.error.slice(0, 200));
+  }
+
+  const key = Deno.env.get('GEMINI_API_KEY');
+  if (!key) return json({ error: 'The caption writer is busy. Try again in a moment.' }, 503);
+  const geminiSystem = system + ' Return ONLY a JSON array of exactly three different caption strings.';
   let res: Response | null = null;
   let data: Row = {};
   for (const model of [...new Set([GEMINI_MODEL, GEMINI_FALLBACK_MODEL])]) {
@@ -397,7 +420,7 @@ async function suggestCaption(b: Row): Promise<Response> {
           method: 'POST',
           headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
+            systemInstruction: { parts: [{ text: geminiSystem }] },
             contents: [{ role: 'user', parts: [{ text: 'The post is about: ' + brief }] }],
             generationConfig: {
               maxOutputTokens: 900,
@@ -419,7 +442,7 @@ async function suggestCaption(b: Row): Promise<Response> {
   const m = text.match(/\[[\s\S]*\]/);
   let options: string[] = [];
   try { options = (JSON.parse(m ? m[0] : '[]') as unknown[]).map(String).filter(Boolean).slice(0, 3); } catch { /* fall through */ }
-  if (!res.ok || !options.length) return json({ error: 'The caption writer did not give an answer. Try again.' }, 502);
+  if (!res.ok || !options.length) return json({ error: res.status === 429 ? 'The caption writer is busy. Try again in a moment.' : 'The caption writer did not give an answer. Try again.' }, 502);
   return json({ options });
 }
 
@@ -559,7 +582,6 @@ function fitForX(caption: string): string {
 }
 
 async function publishDue(admin: Admin) {
-  if (!trypostOn()) return { error: 'TryPost is not configured', sent: 0 };
   const { data: claimed, error } = await admin.rpc('claim_synapse_posts', { p_limit: 10 });
   if (error) return { error: error.message, sent: 0 };
   let sent = 0, failed = 0;
@@ -582,7 +604,12 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     return false;
   };
 
-  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, is_active').eq('id', p.channel_id).maybeSingle();
+  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, chat_id, is_active').eq('id', p.channel_id).maybeSingle();
+  if (ch && (ch as Row).is_active === true && platform === 'telegram') return await sendTelegram(settle, retry, p, String((ch as Row).chat_id ?? ''));
+  if (!trypostOn()) {
+    await settle({ status: 'failed', failure_reason: 'TryPost has been disconnected, and Synapse does not post to ' + (LABEL[platform] ?? platform) + ' directly yet.' });
+    return false;
+  }
   const accountId = String((ch as Row | null)?.trypost_account_id ?? '');
   const contentType = CONTENT_TYPE[platform];
   if (!ch || (ch as Row).is_active !== true) { await settle({ status: 'failed', failure_reason: 'The channel was switched off.' }); return false; }
@@ -645,6 +672,38 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
   return true;
 }
 
+/* Telegram through our own bot, the same one social-publish uses for city channels. */
+async function sendTelegram(settle: (patch: Row) => unknown, retry: (why: string) => Promise<boolean>, p: Row, chatId: string): Promise<boolean> {
+  const token = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
+  if (!chatId) { await settle({ status: 'failed', failure_reason: 'This Telegram channel is not linked to the Synapse bot yet.' }); return false; }
+  if (!token) { await settle({ status: 'failed', failure_reason: 'The Synapse bot is not configured on the server.' }); return false; }
+  const media = ((p.media_urls as string[]) ?? []).slice(0, 10);
+  const text = String(p.caption ?? '').trim();
+  const cap = text.length > 1024 ? text.slice(0, 1020).replace(/\s+\S*$/, '') + '\u2026' : text;
+  const call = async (method: string, body: Row) => {
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({ ok: false, description: 'unreadable reply' })) as Row;
+    if (!j.ok) throw Object.assign(new Error(String(j.description ?? 'Telegram refused ' + method)), { status: r.status });
+    return j.result as Row | Row[];
+  };
+  try {
+    let result: Row | Row[];
+    if (!media.length) result = await call('sendMessage', { chat_id: chatId, text: text.slice(0, 4096) });
+    else if (media.length === 1) result = await call(VIDEO_URL.test(media[0]) ? 'sendVideo' : 'sendPhoto', { chat_id: chatId, [VIDEO_URL.test(media[0]) ? 'video' : 'photo']: media[0], caption: cap });
+    else result = await call('sendMediaGroup', { chat_id: chatId, media: media.map((u, i) => ({ type: VIDEO_URL.test(u) ? 'video' : 'photo', media: u, ...(i === 0 ? { caption: cap } : {}) })) });
+    const first = Array.isArray(result) ? result[0] : result;
+    await settle({ status: 'live', published_at: new Date().toISOString(), failure_reason: null,
+      payload: { ...(p.payload as Row ?? {}), delivery: 'live', via: 'telegram_bot', message_id: first?.message_id ?? null } });
+    return true;
+  } catch (e) {
+    const status = (e as { status?: number }).status ?? 0;
+    const why = 'Telegram: ' + (e instanceof Error ? e.message : String(e));
+    /* 400 and 403 are Telegram saying the post or the rights are wrong; sending again will not change that. */
+    if (status === 400 || status === 403) { await settle({ status: 'failed', failure_reason: why }); return false; }
+    return await retry(why);
+  }
+}
+
 function pick(o: Row | null | undefined, ...keys: string[]): unknown {
   if (!o) return null;
   for (const k of keys) if (o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k];
@@ -653,7 +712,7 @@ function pick(o: Row | null | undefined, ...keys: string[]): unknown {
 
 /** "Sent" means TryPost accepted it. This asks whether it went live. */
 async function confirmDelivery(admin: Admin) {
-  if (!trypostOn()) return { error: 'TryPost is not configured', settled: 0 };
+  if (!trypostOn()) return { settled: 0, note: 'TryPost has been disconnected; nothing to check.' };
   /* Thirty days is as long as we keep asking. A post still unsettled then is
      closed as unconfirmed, so it does not sit as 'sent' for ever. */
   await admin.from('synapse_posts').update({

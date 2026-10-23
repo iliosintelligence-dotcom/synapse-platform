@@ -28,8 +28,10 @@
  * function has no identity to scope by.
  */
 
-const TRYPOST_URL = (Deno.env.get('TRYPOST_URL') || 'https://app.trypost.it').replace(/\/+$/, '');
-const TRYPOST_API_KEY = Deno.env.get('TRYPOST_API_KEY') || '';
+/* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
+   more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
+const TRYPOST_URL = '';
+const TRYPOST_API_KEY = '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
 const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
 
@@ -553,6 +555,8 @@ async function sweep(limit: number): Promise<Response> {
      provider asked a different way, and a trypost outage must not stop an
      agency's own numbers refreshing. */
   const meta = await sweepMeta(limit, h);
+  /* TryPost is disconnected: posts published straight to Meta (above) still refresh; there are no TryPost numbers to ask for. */
+  if (!TRYPOST_API_KEY) return json({ looked_at: 0, updated: 0, meta, trypost: 'disconnected' });
 
   const res = await fetch(q, { headers: h });
   if (!res.ok) return json({ error: `read failed ${res.status}`, meta }, 502);
@@ -625,14 +629,6 @@ Deno.serve(async (req) => {
   const auth = req.headers.get('Authorization') || '';
   if (!auth) return json({ error: 'Sign in first' }, 401);
 
-  if (!TRYPOST_API_KEY) {
-    /* Said plainly rather than as an empty result. A card showing no
-       engagement because nothing is configured looks exactly like a post
-       nobody engaged with, and those want opposite responses from whoever is
-       reading the screen. */
-    return json({ configured: false, results: {}, note: 'No trypost API key is set on this project.' });
-  }
-
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { /* an empty body is a no-op, not an error */ }
 
@@ -667,11 +663,18 @@ Deno.serve(async (req) => {
       return json({ error: 'The delivery check is for the scheduler, not for a session.' }, 403);
     }
     if (!SB_URL) return json({ error: 'Server misconfigured' }, 500);
+    if (!TRYPOST_API_KEY) return json({ checked: 0, note: 'TryPost has been disconnected; there is nothing of its to check.' });
     const limit = Math.min(Math.max(Number(body.limit) || 30, 1), 60);
     /* days widens the look-back for a one-off backfill; the schedule uses 3. */
     const days = Math.min(Math.max(Number(body.days) || 3, 1), 60);
     const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
     return json(await confirmDelivery(limit, h, days));
+  }
+
+  if (!TRYPOST_API_KEY) {
+    /* Said plainly rather than as an empty result. A card showing no engagement because nothing is configured looks exactly like a
+       post nobody engaged with, and those want opposite responses from whoever is reading the screen. */
+    return json({ configured: false, results: {}, note: 'TryPost has been disconnected.' });
   }
 
   const ids = Array.isArray(body.postIds)
