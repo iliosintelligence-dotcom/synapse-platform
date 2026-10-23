@@ -1,5 +1,5 @@
 /**
- * social-reply, answers an Instagram comment with the listing's link.
+ * social-reply, answers an Instagram or Facebook comment with the listing's link.
  *
  * Instagram captions never linkify, so every listing posted there ends at a
  * dead end: the reader sees the home, wants the price, and has nowhere to tap.
@@ -171,8 +171,9 @@ Deno.serve(async (req: Request) => {
 
       /* ── the Page that is allowed to send it ────────────────────────── */
       if (!pages.has(c.social_post_id)) {
-        /* Which Instagram account carried the post, and which Page owns that
-           account. parent_account_id is why this is a lookup and not a guess:
+        /* Which account carried the post, and which Page sends for it. A
+           Facebook post's account IS the Page; an Instagram account's Page is
+           its parent_account_id, which is why this is a lookup and not a guess:
            an agency with two Pages has two possible senders and only one of
            them is the one whose post was commented on. */
         const postRes = await sb(
@@ -183,18 +184,19 @@ Deno.serve(async (req: Request) => {
         let resolved: { pageId: string; token: string } | null = null;
         if (accountId) {
           const accRes = await sb(
-            `social_accounts?select=id,parent_account_id&id=eq.${accountId}`
+            `social_accounts?select=id,platform,platform_account_id,parent_account_id&id=eq.${accountId}`
             + '&is_active=is.true&deleted_at=is.null&limit=1');
           const accs = accRes.ok ? await accRes.json().catch(() => []) : [];
           const acc = Array.isArray(accs) && accs[0] ? accs[0] : null;
-          if (acc?.parent_account_id) {
+          const pageId = acc?.platform === 'facebook' ? acc.platform_account_id : acc?.parent_account_id;
+          if (acc && pageId) {
             const tokRes = await sb('rpc/social_account_token', {
               method: 'POST',
               body: JSON.stringify({ p_account_id: acc.id }),
             });
             const tok = tokRes.ok ? await tokRes.json().catch(() => null) : null;
             if (typeof tok === 'string' && tok) {
-              resolved = { pageId: String(acc.parent_account_id), token: tok };
+              resolved = { pageId: String(pageId), token: tok };
             }
           }
         }
