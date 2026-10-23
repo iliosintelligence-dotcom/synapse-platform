@@ -1210,8 +1210,8 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
     /* Synapse on Telegram is our own bot, not trypost: a city channel is a
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
-    /* A studio Facebook Page holds its own token (loadCityChannels), so it is published like an agency's Page. */
-    if (post.platform === 'facebook' && post.city_channel_id) return facebookAdapter;
+    /* A studio Facebook Page holds its own token (loadCityChannels / loadSynapseChannels), so it is published like an agency's Page. */
+    if (post.platform === 'facebook') return facebookAdapter;
     if (!trypostConfigured()) {
       return notConfigured('Synapse ' + post.platform + ' (TryPost has been disconnected)');
     }
@@ -1262,6 +1262,23 @@ async function loadSynapseChannels(
          set rather than omitted so the shape is one thing everywhere. */
       authSource: 'instagram_login',
     };
+  }
+  /* SYNAPSE'S FACEBOOK IS A PAGE THE STUDIO CONNECTED (2026-10-24, TryPost retired). The oldest active one carries any
+     synapse-leg Facebook post that names no channel, with its own Page token; adapterFor sends it to the native adapter. */
+  const { data: pages } = await admin
+    .from('city_channels')
+    .select('id, meta_page_id, handle, created_at')
+    .eq('platform', 'facebook').eq('is_active', true).not('meta_page_id', 'is', null)
+    .order('created_at', { ascending: true }).limit(1);
+  const page = ((pages ?? []) as Array<Record<string, string>>)[0];
+  if (page) {
+    const { data: tok } = await admin.rpc('city_channel_token', { p_id: page.id });
+    if (tok) {
+      out.facebook = {
+        accountId: page.id, platformAccountId: page.meta_page_id, username: page.handle ?? 'synapse',
+        token: tok as unknown as string, authSource: 'facebook_login',
+      };
+    }
   }
   return out;
 }
@@ -1584,8 +1601,9 @@ Deno.serve(async (req: Request) => {
               ? (post.city_channel_id
                   ? 'This Synapse city channel is not active: the bot is not a posting '
                     + 'admin of it, or it has no chat id yet (city_channels).'
-                  : 'Synapse has no active ' + post.platform + ' channel. Add it to '
-                    + 'synapse_channels with its trypost social_account_id.')
+                  : post.platform === 'facebook'
+                    ? 'Synapse has no Facebook Page connected. Connect one in the studio: Channels, Add a channel, Facebook.'
+                    : 'Synapse does not post to ' + post.platform + ' directly yet.')
               : notConnected(post.platform),
             payload: buildPayload(post),
           }
