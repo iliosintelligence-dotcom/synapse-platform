@@ -1210,6 +1210,8 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
     /* Synapse on Telegram is our own bot, not trypost: a city channel is a
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
+    /* A studio Facebook Page holds its own token (loadCityChannels), so it is published like an agency's Page. */
+    if (post.platform === 'facebook' && post.city_channel_id) return facebookAdapter;
     if (!trypostConfigured()) {
       return notConfigured('Synapse ' + post.platform + ' (TryPost has been disconnected)');
     }
@@ -1277,11 +1279,21 @@ async function loadCityChannels(
   if (!ids.length) return out;
   const { data } = await admin
     .from('city_channels')
-    .select('id, platform, chat_id, trypost_account_id, handle')
+    .select('id, platform, chat_id, trypost_account_id, meta_page_id, handle')
     .in('id', ids)
     .eq('is_active', true);
   const botToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
   for (const c of (data ?? []) as Array<Record<string, string>>) {
+    /* A Facebook Page the studio connected itself (2026-10-23): its own Page token, posted by the native adapter. */
+    if (c.platform === 'facebook' && c.meta_page_id) {
+      const { data: tok } = await admin.rpc('city_channel_token', { p_id: c.id });
+      if (!tok) continue;
+      out[c.id] = {
+        accountId: c.id, platformAccountId: c.meta_page_id, username: c.handle ?? 'synapse',
+        token: tok as unknown as string, authSource: 'facebook_login',
+      };
+      continue;
+    }
     const tg = c.platform === 'telegram';
     const target = tg ? c.chat_id : c.trypost_account_id;
     if (!target || (tg && !botToken)) continue;   // not reachable: reported as not active

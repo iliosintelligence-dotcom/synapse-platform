@@ -94,6 +94,7 @@ Deno.serve(async (req: Request) => {
       case 'activity': return json(await rpc(admin, 'synapse_activity', { p_limit: 50 }));
       case 'trypost_accounts': return await trypostAccounts(admin);
       case 'channel_add': return await channelAdd(admin, user.id, body);
+      case 'channel_add_telegram': return await channelAddTelegram(admin, user.id, body);
       case 'channel_update': return await channelUpdate(admin, body);
       case 'channel_remove': return await channelRemove(admin, body);
       case 'legacy_toggle': return await legacyToggle(admin, body);
@@ -124,7 +125,15 @@ async function rpc(admin: Admin, fn: string, args: Row = {}) {
 
 async function overview(admin: Admin) {
   const o = (await rpc(admin, 'synapse_overview')) as Row;
-  return { ...o, trypost_configured: trypostOn() };
+  /* DIRECT: a channel Synapse posts to itself, with no TryPost: a Facebook Page the studio connected (meta_page_id) or a
+     Telegram channel our bot administers (chat_id). */
+  const { data: direct } = await admin.from('city_channels').select('id, platform, meta_page_id, chat_id');
+  const isDirect: Record<string, boolean> = {};
+  for (const c of (direct ?? []) as Row[]) {
+    isDirect[String(c.id)] = (c.platform === 'facebook' && !!c.meta_page_id) || (c.platform === 'telegram' && !!c.chat_id);
+  }
+  const channels = ((o.channels ?? []) as Row[]).map((c) => ({ ...c, direct: isDirect[String(c.id)] === true }));
+  return { ...o, channels, trypost_configured: trypostOn() };
 }
 
 /* ── accounts ──────────────────────────────────────────────────────────── */
@@ -208,6 +217,24 @@ async function channelAdd(admin: Admin, uid: string, b: Row): Promise<Response> 
   if (error) {
     return json({ error: /duplicate|unique/i.test(error.message) ? 'That account is already a channel.' : error.message }, 400);
   }
+  return json({ ok: true, id: (data as Row).id });
+}
+
+/* A Telegram channel, by its public @name. It stays off until the Synapse bot is made an administrator that may post there:
+   telegram-webhook then calls claim_city_channel, which matches this @name, fills in the chat id and switches it on. */
+async function channelAddTelegram(admin: Admin, uid: string, b: Row): Promise<Response> {
+  const raw = String(b.handle ?? '').trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '');
+  if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(raw)) return json({ error: 'Write the channel\u2019s public name, like @SynapseLagos.' }, 400);
+  const handle = '@' + raw;
+  const city = String(b.city ?? '').trim().slice(0, 60) || null;
+  const { data: have } = await admin.from('city_channels').select('id').eq('platform', 'telegram').ilike('handle', handle).maybeSingle();
+  if (have) return json({ ok: true, id: (have as Row).id, existing: true });
+  const { data, error } = await admin.from('city_channels').insert({
+    platform: 'telegram', handle, label: handle, title: handle, city,
+    is_active: false, autopilot: false, mirror_agency_posts: false, added_by: uid,
+    daily_cap: 3, min_gap: '3 hours', window_start: 9, window_end: 20,
+  }).select('id').single();
+  if (error) return json({ error: error.message }, 400);
   return json({ ok: true, id: (data as Row).id });
 }
 
@@ -322,7 +349,7 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
   const at = uniq[0];
 
   const { data: chans } = await admin.from('city_channels')
-    .select('id, platform, label, handle, trypost_account_id, is_active').in('id', ids);
+    .select('id, platform, label, handle, trypost_account_id, meta_page_id, chat_id, is_active').in('id', ids);
   const found = (chans ?? []) as Row[];
   const group = crypto.randomUUID();
   const rows: Row[] = [];
@@ -331,9 +358,12 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
     const name = c ? String(c.label ?? c.handle ?? c.platform) : 'that channel';
     if (!c || c.is_active !== true) return json({ error: `${name} is switched off.` }, 400);
     const p = String(c.platform);
-    if (!c.trypost_account_id || !CONTENT_TYPE[p]) return json({ error: `${name} cannot take studio posts yet.` }, 400);
+    const direct = (p === 'facebook' && !!c.meta_page_id) || (p === 'telegram' && !!c.chat_id);
+    if (!direct && (!trypostOn() || !c.trypost_account_id || !CONTENT_TYPE[p])) return json({ error: `${name} cannot take studio posts yet.` }, 400);
     const hasVideo = media.some((u) => VIDEO_URL.test(u));
-    if (p === 'youtube') {
+    if (direct) {
+      if (media.filter((u) => VIDEO_URL.test(u)).length > 1) return json({ error: `${name} takes one video at a time. Remove the others, or untick ${name}.` }, 400);
+    } else if (p === 'youtube') {
       if (media.length !== 1 || !hasVideo) return json({ error: `${name} takes one video (MP4 or MOV, vertical, up to 3 minutes) and nothing else. Add the video, remove any pictures, or untick ${name}.` }, 400);
     } else if (hasVideo) {
       return json({ error: `${name} cannot take a video from here yet. Only YouTube does. Remove the video, or untick ${name}.` }, 400);
@@ -604,8 +634,11 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     return false;
   };
 
-  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, chat_id, is_active').eq('id', p.channel_id).maybeSingle();
+  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, chat_id, meta_page_id, is_active').eq('id', p.channel_id).maybeSingle();
   if (ch && (ch as Row).is_active === true && platform === 'telegram') return await sendTelegram(settle, retry, p, String((ch as Row).chat_id ?? ''));
+  if (ch && (ch as Row).is_active === true && platform === 'facebook' && (ch as Row).meta_page_id) {
+    return await sendFacebook(admin, settle, retry, p, String(p.channel_id), String((ch as Row).meta_page_id));
+  }
   if (!trypostOn()) {
     await settle({ status: 'failed', failure_reason: 'TryPost has been disconnected, and Synapse does not post to ' + (LABEL[platform] ?? platform) + ' directly yet.' });
     return false;
@@ -670,6 +703,53 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     payload: { ...(p.payload as Row ?? {}), delivery: 'pending' },
   });
   return true;
+}
+
+/* Facebook through the Page the studio connected itself (social-connect ?for=studio): one photo is a photo post, several are
+   one post with them attached, a video is a video post, nothing is a text post. The same calls social-publish makes. */
+async function sendFacebook(admin: Admin, settle: (patch: Row) => unknown, retry: (why: string) => Promise<boolean>, p: Row, channelId: string, pageId: string): Promise<boolean> {
+  const { data: tok } = await admin.rpc('city_channel_token', { p_id: channelId });
+  if (!tok) { await settle({ status: 'failed', failure_reason: 'This Facebook Page needs connecting again in Channels.' }); return false; }
+  const token = String(tok);
+  const G = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(pageId);
+  const call = async (path: string, params: Row) => {
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries({ ...params, access_token: token })) form.set(k, String(v));
+    const r = await fetch(G + path, { method: 'POST', body: form });
+    const j = await r.json().catch(() => ({})) as Row;
+    if (!r.ok || j.error) {
+      const e = (j.error ?? {}) as Row;
+      throw Object.assign(new Error(String(e.message ?? 'Facebook refused the post (HTTP ' + r.status + ')')), { status: r.status });
+    }
+    return j;
+  };
+  const media = ((p.media_urls as string[]) ?? []).slice(0, 10);
+  const text = String(p.caption ?? '');
+  const video = media.find((u) => VIDEO_URL.test(u));
+  const photos = media.filter((u) => !VIDEO_URL.test(u));
+  try {
+    let out: Row;
+    if (video) out = await call('/videos', { file_url: video, description: text });
+    else if (photos.length === 1) out = await call('/photos', { url: photos[0], caption: text });
+    else if (photos.length > 1) {
+      const ids: string[] = [];
+      for (const url of photos) ids.push(String((await call('/photos', { url, published: 'false' })).id));
+      const attached: Row = {};
+      ids.forEach((id, i) => { attached['attached_media[' + i + ']'] = JSON.stringify({ media_fbid: id }); });
+      out = await call('/feed', { message: text, ...attached });
+    } else out = await call('/feed', { message: text });
+    const postId = String(out.post_id ?? out.id ?? '');
+    await settle({ status: 'live', published_at: new Date().toISOString(), failure_reason: null,
+      payload: { ...(p.payload as Row ?? {}), delivery: 'live', via: 'facebook_page', post_id: postId,
+        live_url: postId ? 'https://www.facebook.com/' + postId : null } });
+    return true;
+  } catch (e) {
+    const status = (e as { status?: number }).status ?? 0;
+    const why = 'Facebook: ' + (e instanceof Error ? e.message : String(e));
+    /* A 4xx is Facebook saying the post or the permission is wrong; sending it again will not change that. */
+    if (status >= 400 && status < 500) { await settle({ status: 'failed', failure_reason: why }); return false; }
+    return await retry(why);
+  }
 }
 
 /* Telegram through our own bot, the same one social-publish uses for city channels. */

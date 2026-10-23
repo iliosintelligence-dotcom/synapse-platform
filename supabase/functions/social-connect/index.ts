@@ -723,13 +723,17 @@ async function finishFacebook(
       ig_username: pg.instagram_business_account?.username ?? null,
     };
   });
-  const { data: pickId, error: stashErr } = await admin.rpc('stash_connect_pick', {
-    p_agency_id: claims.agency_id as string,
-    p_profile_id: claims.profile_id as string,
-    p_pages: shared,
-    p_tokens: tokens,
-    p_scopes: grantedScopes,
-  });
+  const { data: pickId, error: stashErr } = claims.studio === true
+    ? await admin.rpc('stash_studio_pick', {
+        p_profile_id: claims.profile_id as string, p_pages: shared, p_tokens: tokens, p_scopes: grantedScopes,
+      })
+    : await admin.rpc('stash_connect_pick', {
+        p_agency_id: claims.agency_id as string,
+        p_profile_id: claims.profile_id as string,
+        p_pages: shared,
+        p_tokens: tokens,
+        p_scopes: grantedScopes,
+      });
   if (stashErr || typeof pickId !== 'string') {
     console.error('social-connect: could not hold the shared Pages: ' + (stashErr?.message ?? 'no id'));
     return backToPortal('error', 'Facebook shared ' + usable.length + ' Page(s), but Synapse could not '
@@ -868,6 +872,32 @@ async function memberCaller(req: Request): Promise<
     return json({ error: 'Only a member of this agency can connect a channel' }, 403);
   }
   return { userId: user.id, agencyId: membership.agency_id as string, admin };
+}
+
+/** A studio connection ends in the studio, not the agency portal: the portal redirect is re-pointed, its outcome kept. */
+function toStudio(res: Response): Response {
+  const loc = res.headers.get('Location');
+  if (!loc) return res;
+  const from = new URL(loc, 'https://www.synapsecore.dev');
+  const to = new URL(Deno.env.get('STUDIO_URL') || 'https://www.synapsecore.dev/app/synapse.html');
+  from.searchParams.forEach((v, k) => to.searchParams.set(k, v));
+  return new Response(null, { status: 302, headers: { ...corsHeaders, Location: to.toString() } });
+}
+
+/** The signed-in Synapse staff member, for the studio's Page choice. */
+async function staffCaller(req: Request): Promise<
+  { userId: string; admin: ReturnType<typeof createClient> } | Response> {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  if (!authHeader) return json({ error: 'Not authenticated' }, 401);
+  const host = Deno.env.get('SUPABASE_URL') ?? '';
+  const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return json({ error: 'Not authenticated' }, 401);
+  const { data: role } = await asUser.rpc('synapse_staff_role');
+  if (!role) return json({ error: 'Only Synapse staff can do this' }, 403);
+  return { userId: user.id, admin: createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '') };
 }
 
 /* ── the flow ─────────────────────────────────────────────────────────────── */
@@ -1311,6 +1341,58 @@ Deno.serve(async (req: Request) => {
        names only, and which agency already holds any of them; POST connects
        the ones ticked. Only the member who started the connection, in the
        agency it was started for, can see or spend it. */
+    /* ── which of the shared Pages are Synapse's (the studio) ────────────
+       The same choice as an agency's below, for a pick held by stash_studio_pick: only the staff member who started it can
+       see or spend it, and each ticked Page becomes a studio channel (connect_studio_page), quiet until switched on. */
+    if ((url.searchParams.get('action') ?? '') === 'studio-pick') {
+      const who = await staffCaller(req);
+      if (who instanceof Response) return who;
+      const readPick = async (pick: string) => {
+        if (!/^[0-9a-f-]{36}$/i.test(pick)) return null;
+        const { data: row } = await who.admin.from('social_connect_picks')
+          .select('pages, expires_at, profile_id, for_studio').eq('id', pick).maybeSingle();
+        if (!row || row.for_studio !== true || row.profile_id !== who.userId
+            || Date.parse(row.expires_at as string) < Date.now()) return null;
+        return row;
+      };
+      const expired = () => json({ error: 'This choice has expired. Connect Facebook again.' }, 404);
+      if (req.method === 'GET') {
+        const row = await readPick(url.searchParams.get('pick') ?? '');
+        if (!row) return expired();
+        const pages = (row.pages ?? []) as SharedPage[];
+        const { data: have } = await who.admin.from('city_channels').select('meta_page_id')
+          .in('meta_page_id', pages.map((p) => p.id));
+        const here = new Set(((have ?? []) as Array<{ meta_page_id: string }>).map((r) => r.meta_page_id));
+        return json({ expires_at: row.expires_at,
+          pages: pages.map((p) => ({ id: p.id, name: p.name, connected: here.has(p.id) ? 'here' : null })) });
+      }
+      if (req.method === 'POST') {
+        let body: Record<string, unknown> = {};
+        try { body = await req.json(); } catch { /* nothing chosen */ }
+        const pick = String(body.pick ?? '');
+        const ids = Array.isArray(body.page_ids) ? (body.page_ids as unknown[]).map(String) : [];
+        if (!ids.length) return json({ error: 'Tick at least one Page.' }, 400);
+        if (!(await readPick(pick))) return expired();
+        const { data: got, error: takeErr } = await who.admin.rpc('take_connect_pick', { p_id: pick });
+        if (takeErr || !got) return expired();
+        const taken = got as { pages: SharedPage[]; tokens: Record<string, string> };
+        const connected: string[] = [], problems: string[] = [];
+        for (const pg of (taken.pages ?? []).filter((p) => ids.includes(p.id))) {
+          const tok = (taken.tokens ?? {})[pg.id];
+          if (!tok) { problems.push((pg.name || pg.id) + ': no token came back for it'); continue; }
+          const { error } = await who.admin.rpc('connect_studio_page', {
+            p_page_id: pg.id, p_name: pg.name ?? '', p_token: tok, p_added_by: who.userId,
+          });
+          if (error) problems.push((pg.name || pg.id) + ': ' + error.message);
+          else connected.push(pg.name || pg.id);
+        }
+        if (!connected.length) return json({ error: 'Nothing could be saved: ' + problems.join('; ') }, 500);
+        console.log('social-connect: ' + connected.length + ' studio Page(s) connected');
+        return json({ connected, problems });
+      }
+      return json({ error: 'GET to list, POST to connect' }, 405);
+    }
+
     if ((url.searchParams.get('action') ?? '') === 'facebook-pick') {
       const who = await memberCaller(req);
       if (who instanceof Response) return who;
@@ -1864,6 +1946,31 @@ Deno.serve(async (req: Request) => {
 
          Same three roles queue_social_post accepts, and connected_by records
          who did it. */
+      /* THE STUDIO'S OWN PAGES (2026-10-23). for=studio connects Synapse's Facebook Pages for the studio, started by a
+         Synapse staff member; it belongs to no agency. Facebook only: Instagram stays with the developer. */
+      if (url.searchParams.get('for') === 'studio') {
+        if (platform !== 'facebook') return json({ error: 'The studio connects Facebook Pages here.' }, 400);
+        const { data: staffRole } = await userClient.rpc('synapse_staff_role');
+        if (!staffRole) return json({ error: 'Only Synapse staff can connect the studio’s Pages' }, 403);
+        const sState = await signState({
+          studio: true, profile_id: user.id, platform, nonce: crypto.randomUUID(), exp: Date.now() + STATE_TTL_MS,
+        });
+        const sAuth = new URL('https://www.facebook.com/v21.0/dialog/oauth');
+        sAuth.searchParams.set('client_id', idFor(platform));
+        sAuth.searchParams.set('redirect_uri', redirectUri);
+        sAuth.searchParams.set('response_type', 'code');
+        if (fbConfigId) {
+          sAuth.searchParams.set('config_id', fbConfigId);
+          sAuth.searchParams.set('override_default_response_type', 'true');
+        } else {
+          sAuth.searchParams.set('scope', scopesFor(platform).join(','));
+        }
+        sAuth.searchParams.set('auth_type', 'rerequest');
+        sAuth.searchParams.set('state', sState);
+        console.log('social-connect start: studio facebook mode=' + (fbConfigId ? 'login-for-business' : 'classic'));
+        return json({ url: sAuth.toString(), platform, studio: true, expiresInMinutes: STATE_TTL_MS / 60000 });
+      }
+
       const admin = createClient(supaUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
       const { data: membership } = await admin
         .from('agency_members')
@@ -2045,7 +2152,8 @@ Deno.serve(async (req: Request) => {
        the callback's parameters are attacker-reachable and this one decides
        which token exchange runs and which account gets written. */
     if (claims.platform === 'facebook') {
-      return await finishFacebook(code, claims, appId, appSecret, redirectUri, fbConfigId);
+      const done = await finishFacebook(code, claims, appId, appSecret, redirectUri, fbConfigId);
+      return claims.studio === true ? toStudio(done) : done;
     }
 
     /* short-lived token */
