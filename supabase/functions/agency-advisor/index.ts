@@ -77,13 +77,13 @@ async function gatherFacts(admin: any, agencyId: string): Promise<Facts> {
     .from('agencies').select('name, city, logo_url, brand_color, brand_font')
     .eq('id', agencyId).maybeSingle();
 
-  const fourteenDaysAgo = new Date(Date.now() - 21 * 864e5).toISOString();
+  const now = new Date().toISOString();
 
   const listingsTotal    = await count('properties', (q: any) => q.is('deleted_at', null));
   const listingsLive     = await count('properties', (q: any) => q.is('deleted_at', null).eq('status', 'live'));
   const listingsVerified = await count('properties', (q: any) => q.is('deleted_at', null).eq('verification_status', 'verified'));
   const listingsStale    = await count('properties', (q: any) =>
-    q.is('deleted_at', null).eq('status', 'live').lt('listed_at', fourteenDaysAgo));
+    q.is('deleted_at', null).eq('status', 'live').lt('expires_at', now));   // the window depends on the deal; expires_at holds it
   const teamSize         = await count('agency_members', (q: any) => q.is('deleted_at', null));
   const leadsTotal       = await count('leads', (q: any) => q.is('deleted_at', null));
   const viewings         = await count('viewings', (q: any) => q);
@@ -145,8 +145,9 @@ SYNAPSE, AS BUILT TODAY (agency portal, left-hand tabs):
 - Overview: every listing with its verification checks and a map.
 - Listings: add or edit a listing. A listing needs photos, price, city and
   address. Verification is decided by the platform, not by the agency, and a
-  listing stays live for 21 days from when it was last confirmed; after that it
-  needs re-listing.
+  listing stays live for a window that depends on the deal, counted from when
+  it was last confirmed: short-lets a week, rentals 21 days, sales (houses,
+  land, investments) 3 months. After that it needs re-listing.
 - Marketing: pick a listing, press Generate, and the AI writes a caption per
   platform and checks each against that platform's real limits. "Rehearse" runs
   the whole pipeline and shows exactly what WOULD be sent without touching an
@@ -170,7 +171,7 @@ function systemPrompt(f: Facts): string {
 WHERE THIS AGENCY ACTUALLY IS: ${f.stage}
 
 THEIR REAL NUMBERS, counted from their own records just now:
-- Listings: ${f.listingsTotal} total, ${f.listingsLive} live, ${f.listingsVerified} verified, ${f.listingsStale} past the 21-day freshness window
+- Listings: ${f.listingsTotal} total, ${f.listingsLive} live, ${f.listingsVerified} verified, ${f.listingsStale} past their freshness window
 - Team: ${f.teamSize} member(s)
 - Leads: ${f.leadsTotal} total${Object.keys(f.leadsByStage).length ? ' (' + Object.entries(f.leadsByStage).map(([k, v]) => k + ': ' + v).join(', ') + ')' : ''}
 - Viewings booked: ${f.viewings}
