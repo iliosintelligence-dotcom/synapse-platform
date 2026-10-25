@@ -61,7 +61,7 @@ jobs:
           # and the deploy is skipped for the one push that changed the most.
           fetch-depth: 0
 
-      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v1
         with:
           # A PINNED version, not "latest". Resolving "latest" is an anonymous
           # GitHub API call, and when the main and master pushes deploy at the
