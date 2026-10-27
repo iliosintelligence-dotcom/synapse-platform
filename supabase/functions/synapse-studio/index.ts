@@ -25,6 +25,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
 import { fastLlm } from '../_shared/llm.ts';
+import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit.ts';
 
 type Admin = ReturnType<typeof createClient>;
 type Row = Record<string, unknown>;
@@ -412,12 +413,17 @@ async function postCancel(admin: Admin, b: Row): Promise<Response> {
 async function suggestCaption(b: Row): Promise<Response> {
   const brief = String(b.brief ?? '').trim().slice(0, 800);
   if (!brief) return json({ error: 'Say what the post is about.' }, 400);
-  const platform = LABEL[String(b.platform ?? '').toLowerCase()] ?? 'social media';
+  const key0 = String(b.platform ?? '').toLowerCase();
+  const platform = LABEL[key0] ?? 'social media';
+  /* held to the platform's length (caption-fit.ts): Telegram and X used to cut a long one off mid-sentence at publish */
+  const max = captionTarget(key0) ?? 2000;
+  const fit = (opts: string[]) => opts.map((o) => fitAtSentence(o, max));
   const system = 'You write social posts for Synapse, a Nigerian real-estate platform. Synapse has an AI advisor called Tayo that '
     + 'helps buyers and renters find homes that fit how they live, and it shows agencies\' listings that are checked and kept current. '
     + 'Voice: calm, specific, warm, plain English. No hype, no pressure, no invented facts, figures or promises. '
     + 'At most two emoji, no hashtag walls (up to three relevant hashtags at the end is fine). '
-    + 'Write for ' + platform + '. Never use the long dash character.';
+    + 'Write for ' + platform + '. Never use the long dash character. '
+    + (lengthRule(key0) || 'Length: under ' + max + ' characters.');
 
   /* OUR AI FIRST (2026-10-23). This button called Gemini and nothing else, so when the Gemini quota ran out the button simply failed.
      It now uses the same fast models as Tayo, and Gemini only if they are down. */
@@ -431,7 +437,7 @@ async function suggestCaption(b: Row): Promise<Response> {
     try {
       const o = JSON.parse(fast.text.slice(fast.text.indexOf('{'), fast.text.lastIndexOf('}') + 1)) as { captions?: unknown };
       const opts = Array.isArray(o.captions) ? o.captions.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 3) : [];
-      if (opts.length) return json({ options: opts });
+      if (opts.length) return json({ options: fit(opts) });
     } catch { /* fall through to Gemini */ }
   } else if (fast && 'error' in fast) {
     console.error('caption: fast model failed, trying Gemini: ' + fast.error.slice(0, 200));
@@ -473,7 +479,7 @@ async function suggestCaption(b: Row): Promise<Response> {
   let options: string[] = [];
   try { options = (JSON.parse(m ? m[0] : '[]') as unknown[]).map(String).filter(Boolean).slice(0, 3); } catch { /* fall through */ }
   if (!res.ok || !options.length) return json({ error: res.status === 429 ? 'The caption writer is busy. Try again in a moment.' : 'The caption writer did not give an answer. Try again.' }, 502);
-  return json({ options });
+  return json({ options: fit(options) });
 }
 
 /* ── the team ──────────────────────────────────────────────────────────── */

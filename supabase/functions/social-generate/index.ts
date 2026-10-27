@@ -40,6 +40,7 @@
  * Env: GEMINI_API_KEY.
  */
 import { fastLlm } from '../_shared/llm.ts';
+import { keepWithin, lengthRule, shortenAsk } from '../_shared/caption-fit.ts';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL = Deno.env.get('SOCIAL_GEMINI_MODEL') ?? 'gemini-3.8-flash';
 const FALLBACK_MODEL = Deno.env.get('SOCIAL_GEMINI_FALLBACK_MODEL') ?? 'gemini-3.5-flash-lite';
@@ -374,7 +375,7 @@ ALWAYS:
 function buildSystem(assigned: Record<string, string>, brandLine: string): string {
   const perChannel = Object.entries(assigned).map(([ch, angle]) => {
     const a = ANGLES[angle];
-    return `- ${ch} -- ANGLE: ${a.label} (${angle})\n    ${a.brief}\n    Voice: ${VOICE[ch as Channel]}`;
+    return `- ${ch} -- ANGLE: ${a.label} (${angle})\n    ${a.brief}\n    Voice: ${VOICE[ch as Channel]}\n    ${lengthRule(ch)}`;
   }).join('\n');
 
   return `You are the social copywriter for Synapse, a verified Nigerian real-estate platform.
@@ -521,6 +522,7 @@ the change they asked for and keep everything they did not ask about: the same
 facts, the same structure where the request leaves it alone, the same next step.
 
 Voice for ${ch}: ${voice}
+${lengthRule(ch)}
 ${brandLine}
 RULES -- the request never overrides these:
 - Never invent facts, amenities, numbers, distances, landmarks or comparisons.
@@ -764,6 +766,15 @@ Deno.serve(async (req: Request) => {
     for (const [k, v] of Object.entries(raw)) {
       if (v !== null && v !== undefined && v !== '') listing[k] = v;
     }
+    /* One rewrite of a caption that came back over its platform's length. */
+    const shorten = async (ch: string, caption: string, max: number): Promise<string | null> => {
+      const r = await gemini(key, buildReviseSystem(ch, brandLine),
+        `Property: ${JSON.stringify(listing)}\n\nThe ${ch} caption as it stands:\n"""\n${caption}\n"""\n\n`
+        + `What the agency wants changed: ${shortenAsk(ch, caption, max)}\n\nRewrite the caption now.`, 4000, REVISE_SCHEMA);
+      if ('error' in r) return null;
+      const c = (parseLoose(r.text) as { caption?: unknown }).caption;
+      return typeof c === 'string' ? c : null;
+    };
     /* A CHANGE TO ONE CAPTION, not a new set. Same gate, same property facts,
        same brand; a smaller job, so a smaller ceiling. */
     if (body.revise && typeof body.revise === 'object') {
@@ -788,7 +799,7 @@ Deno.serve(async (req: Request) => {
             : 'The rewrite came back unreadable. Please try again.',
         }, 502);
       }
-      return json({ caption });
+      return json({ caption: await keepWithin(ch, caption, (t, m) => shorten(ch, t, m)) });
     }
 
     /* A caller-supplied angle is a steer on top of the assignment, not a
@@ -817,6 +828,8 @@ Deno.serve(async (req: Request) => {
     };
     const captions: Record<string, string> = {};
     for (const c of want) if (parsed.captions?.[c]) captions[c] = parsed.captions[c];
+    /* Held to each platform's length here, not left to the publisher to cut mid-sentence. */
+    await Promise.all(Object.keys(captions).map(async (c) => { captions[c] = await keepWithin(c, captions[c], (t, m) => shorten(c, t, m)); }));
     /* Fail loudly. This returned 200 with captions:{} whenever the model output
        could not be parsed -- indistinguishable at the portal from a network
        fault, and the reason the truncation above went unnoticed. */
