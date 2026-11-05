@@ -34,6 +34,34 @@ verify_jwt = false
 [functions.social-connect]
 verify_jwt = false
 
+# The per-platform social functions (2026-11-05). Open, for two reasons that
+# are the same as social-connect's: X, Google and LinkedIn send the browser
+# back here with no JWT (the OAuth callback), and social-publish calls them
+# with the service key. Nothing here is unauthenticated in practice: start
+# and pick resolve the signed-in member, the callback trusts only the
+# HMAC-signed state it issued, and publish, refresh and sweep refuse anyone
+# but the service key (isServiceCall in _shared/social/core.ts).
+[functions.social-facebook]
+verify_jwt = false
+
+[functions.social-instagram]
+verify_jwt = false
+
+[functions.social-telegram]
+verify_jwt = false
+
+[functions.social-tiktok]
+verify_jwt = false
+
+[functions.social-x]
+verify_jwt = false
+
+[functions.social-youtube]
+verify_jwt = false
+
+[functions.social-linkedin]
+verify_jwt = false
+
 # Telegram calls it, with no Supabase session. It authenticates every
 # delivery by the X-Telegram-Bot-Api-Secret-Token header instead.
 [functions.telegram-webhook]

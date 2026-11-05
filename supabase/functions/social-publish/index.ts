@@ -1403,6 +1403,81 @@ async function loadConnections(
   return out;
 }
 
+/* ── THE SWITCH TO THE PER-PLATFORM FUNCTIONS (2026-11-05) ─────────────────
+   Each platform now has its own function (social-facebook, social-instagram,
+   social-telegram, social-tiktok, social-x, social-youtube, social-linkedin)
+   on one shared process, _shared/social/core.ts. They are deployed beside
+   this file and DO NOTHING until switched on, platform by platform:
+
+     platform_settings.social_dispatch = {"platforms": ["telegram"]}
+
+   A platform on that list is handed to its own function, which resolves the
+   account, sends, and writes the outcome on the row itself. A platform not on
+   it goes through the adapters in this file exactly as before. Switching a
+   platform off again is the same edit, with no deploy -- which is the whole
+   point: production keeps working as it does today until each platform has
+   been watched working the new way. "*" switches every platform over.
+
+   X, YouTube and LinkedIn have no adapter here, so they publish only once
+   switched on. Read once per run; unreadable means nothing is switched. */
+async function dispatchedPlatforms(admin: ReturnType<typeof createClient>): Promise<Set<string>> {
+  try {
+    const { data } = await admin.from('platform_settings').select('value').eq('key', 'social_dispatch').maybeSingle();
+    const list = (data?.value as { platforms?: unknown } | null)?.platforms;
+    return new Set(Array.isArray(list) ? list.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Hands one claimed post to social-<platform>, which settles the row itself.
+ *  Waits at most 100 s: a video can take minutes, and the platform function
+ *  saves the outcome whether or not anybody is still waiting.
+ *
+ *  PUT BACK ONLY WHEN SENDING PROVABLY NEVER STARTED. A refusal at the door
+ *  (400/401/403/404: the function is missing, or refused the caller before
+ *  touching the post) means nothing went out, so the row goes back on the
+ *  retry ladder. Anything else -- a dropped connection, a 5xx, a timeout --
+ *  may have happened after the post went out. That row is left 'publishing',
+ *  and drain_social_queue settles it after twenty minutes as "check the
+ *  channel": a person decides, and the post is never sent twice on its own. */
+async function dispatchToPlatform(
+  admin: ReturnType<typeof createClient>,
+  post: QueuedPost,
+  supabaseUrl: string,
+  serviceKey: string,
+): Promise<Record<string, unknown>> {
+  const uncertain = (why: string) => ({
+    id: post.id, platform: post.platform, leg: post.leg, status: 'publishing',
+    note: why + ' The outcome is saved on the post if it finishes; otherwise it is marked for checking after twenty minutes.',
+  });
+  const call = fetch(supabaseUrl + '/functions/v1/social-' + post.platform, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + serviceKey, apikey: serviceKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'publish', post_id: post.id }),
+  }).then(async (r) => {
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) return j as Record<string, unknown>;
+    if (![400, 401, 403, 404].includes(r.status)) {
+      return uncertain('The ' + post.platform + ' publisher answered HTTP ' + r.status + '.');
+    }
+    const why = 'The ' + post.platform + ' publisher could not start (HTTP ' + r.status + ')'
+      + (j?.error ? ': ' + String(j.error).slice(0, 200) : '.');
+    const exhausted = post.attempts >= post.max_attempts;
+    const delayMinutes = Math.pow(5, Math.max(0, post.attempts - 1));
+    await admin.from('social_posts').update(exhausted
+      ? { status: 'failed', failure_reason: why, provider: post.platform }
+      : { status: 'scheduled', failure_reason: why, provider: post.platform,
+          scheduled_at: new Date(Date.now() + delayMinutes * 60_000).toISOString() })
+      .eq('id', post.id).eq('status', 'publishing');
+    return { id: post.id, platform: post.platform, leg: post.leg, status: exhausted ? 'failed' : 'scheduled', error: why };
+  }).catch((e) => uncertain('The connection to the ' + post.platform + ' publisher was lost ('
+    + (e instanceof Error ? e.message : String(e)).slice(0, 120) + ').'));
+  const waited = new Promise<Record<string, unknown>>((res) =>
+    setTimeout(() => res(uncertain('Still being processed by ' + post.platform + '.')), 100_000));
+  return await Promise.race([call, waited]);
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -1562,8 +1637,19 @@ Deno.serve(async (req: Request) => {
     let dryRun = 0;
     const results: Array<Record<string, unknown>> = [];
 
+    const switched = live ? await dispatchedPlatforms(admin) : new Set<string>();
+
     for (const post of rows) {
       const rehearsal = post.dry_run || !live;
+
+      /* Switched over: the platform's own function does the rest, outcome included. */
+      if (!rehearsal && (switched.has('*') || switched.has(post.platform))) {
+        const r = await dispatchToPlatform(admin, post, url, serviceKey);
+        if (r.status === 'published') published++;
+        else if (r.status === 'failed' || r.status === 'scheduled') failed++;
+        results.push(r);
+        continue;
+      }
       /* Whose account: ours from synapse_channels, or the agency's from
          social_accounts. Reading the agency's connection for a synapse-leg
          post would have published a listing to the AGENCY'S Instagram while
