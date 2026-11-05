@@ -26,6 +26,24 @@ Facebook, Instagram and TikTok are still **connected** through `social-connect`,
 
 Every platform function answers the same actions: `status`, `start`, the OAuth callback, `pick` (choose between held accounts), and the service-only `publish`, `refresh` and `sweep`.
 
+## Switched on platform by platform
+
+Deploying this changes nothing in production by itself. `social-publish` keeps its existing adapters, and hands a platform to its new function only when that platform is switched on:
+
+```sql
+-- switch one platform over (no deploy needed)
+insert into platform_settings (key, value) values ('social_dispatch', '{"platforms": ["telegram"]}')
+on conflict (key) do update set value = excluded.value;
+
+-- add more as each is watched working: ["telegram", "facebook", "instagram", "tiktok", "x", "youtube", "linkedin"]
+-- switch everything back to the old path at once:
+update platform_settings set value = '{"platforms": []}' where key = 'social_dispatch';
+```
+
+Suggested order: Telegram (Synapse's own channels) → Facebook → Instagram → TikTok → X, YouTube and LinkedIn once their apps exist. X, YouTube and LinkedIn have no old adapter, so they publish only once switched on.
+
+When every platform has run on the new path for a while, the old adapters in `social-publish` can be deleted in a follow-up.
+
 ## Order of deployment
 
 1. **Run the migration** `20261105090000_every_platform_has_its_own_function.sql` (Actions → migrate). It must land before the X, YouTube and LinkedIn sign-ins are used. Facebook, Instagram, Telegram and TikTok publishing does not depend on it.
@@ -63,7 +81,8 @@ The backend is complete; the portal needs three small changes to use it:
 
 ## Behaviour changes worth knowing
 
-- A rehearsal run no longer consumes a post queued for real; it puts it back untouched.
+These apply to a platform once it is switched on:
+
 - A failure the platform calls permanent (bad media, no permission, no account connected) fails at once instead of retrying three times over half an hour.
 - An agency's X post goes to the agency's own X account, no longer to Synapse's X (TryPost is gone).
 - Synapse's autopilot and mirroring now reach the Facebook Pages the studio connected; before, they only reached Telegram.
