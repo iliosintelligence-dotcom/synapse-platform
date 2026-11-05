@@ -30,7 +30,7 @@
 import {
   admin, backToPortal, buildPayload, checkMedia, type Connection, fail, fetchMedia, isVideoUrl, markAccountError,
   platformFunction, postsToSweep, type PublishResult, type QueuedPost, refreshTokenOf, saveAccount, saveTokens,
-  fileComments, writeMetrics, json, type StartContext, tokenRequest,
+  fileComments, writeMetrics, json, refreshGuarded, type StartContext, tokenRequest,
 } from '../_shared/social/core.ts';
 
 const X_API = 'https://api.x.com/2';
@@ -239,7 +239,7 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
   for (const [, items] of byAccount) {
     let conn = items[0].conn;
     if (conn.expiresAt && Date.parse(conn.expiresAt) - Date.now() < 15 * 60 * 1000) {
-      const fresh = await refresh(conn);
+      const fresh = await refreshGuarded(conn, refresh);
       if (!fresh) continue;
       conn = { ...conn, token: fresh };
     }
@@ -262,7 +262,19 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
       console.error('social-x: metrics ' + r.status + ' for account ' + conn.accountId);
     }
 
-    /* Replies, through the account's mentions. The cursor moves only after the write. */
+    /* Replies, through the account's mentions. Matched against EVERY X post
+       this account published in the last thirty days -- not only the few due
+       a metrics read in this batch -- because the cursor is account-wide: a
+       reply passed over now would never be looked at again. */
+    const { data: mine } = await admin().from('social_posts')
+      .select('id, agency_id, property_id, platform, platform_post_id')
+      .eq('platform', 'x').eq('provider', 'x').eq('status', 'published').is('deleted_at', null)
+      .eq('agency_id', items[0].post.agency_id)
+      .gt('published_at', new Date(Date.now() - 30 * 86400e3).toISOString())
+      .not('platform_post_id', 'is', null).limit(500);
+    const ours = new Map<string, { id: string; agency_id: string; property_id: string | null; platform: string }>(
+      ((mine ?? []) as Array<{ id: string; agency_id: string; property_id: string | null; platform: string; platform_post_id: string }>)
+        .map((p) => [p.platform_post_id, p]));
     const { data: cur } = await admin().from('social_sync_cursors').select('since_id')
       .eq('account_id', conn.accountId).eq('platform', 'x').maybeSingle();
     const q = new URLSearchParams({ max_results: '50', 'tweet.fields': 'conversation_id,created_at,author_id',
@@ -274,14 +286,23 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
     const users = new Map<string, string>(((mj?.includes?.users ?? []) as Array<{ id: string; username: string }>)
       .map((u) => [u.id, '@' + u.username]));
     const mentions = (mj?.data ?? []) as Array<{ id: string; text: string; conversation_id?: string; created_at?: string; author_id?: string }>;
-    for (const it of items) {
-      const replies = mentions.filter((m) => m.conversation_id === it.post.platform_post_id && m.id !== it.post.platform_post_id);
-      filed += await fileComments(it.post, replies.map((m) => ({
+    const byPost = new Map<string, typeof mentions>();
+    for (const m of mentions) {
+      if (!m.conversation_id || !ours.has(m.conversation_id) || m.id === m.conversation_id) continue;
+      if (!byPost.has(m.conversation_id)) byPost.set(m.conversation_id, []);
+      byPost.get(m.conversation_id)!.push(m);
+    }
+    let allFiled = true;
+    for (const [conversation, replies] of byPost) {
+      const n = await fileComments(ours.get(conversation)!, replies.map((m) => ({
         id: m.id, author: users.get(m.author_id ?? '') ?? null, body: m.text ?? null, at: m.created_at ?? null,
       })));
+      if (n < 0) allFiled = false; else filed += n;
     }
+    /* The cursor moves only when every reply in this page was written. With
+       more than one page of mentions waiting, the next sweep reads the next. */
     const newest = mj?.meta?.newest_id;
-    if (newest) {
+    if (newest && allFiled) {
       await admin().from('social_sync_cursors').upsert({ account_id: conn.accountId, platform: 'x', since_id: String(newest),
         updated_at: new Date().toISOString() }, { onConflict: 'account_id,platform' });
     }

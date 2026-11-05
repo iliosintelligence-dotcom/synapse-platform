@@ -1432,16 +1432,25 @@ async function dispatchedPlatforms(admin: ReturnType<typeof createClient>): Prom
 
 /** Hands one claimed post to social-<platform>, which settles the row itself.
  *  Waits at most 100 s: a video can take minutes, and the platform function
- *  saves the outcome whether or not anybody is still waiting. If the platform
- *  function could not run at all, the row is put back on the retry ladder here
- *  -- but only while it is still 'publishing', so a post the platform
- *  function already settled is never sent again. */
+ *  saves the outcome whether or not anybody is still waiting.
+ *
+ *  PUT BACK ONLY WHEN SENDING PROVABLY NEVER STARTED. A refusal at the door
+ *  (400/401/403/404: the function is missing, or refused the caller before
+ *  touching the post) means nothing went out, so the row goes back on the
+ *  retry ladder. Anything else -- a dropped connection, a 5xx, a timeout --
+ *  may have happened after the post went out. That row is left 'publishing',
+ *  and drain_social_queue settles it after twenty minutes as "check the
+ *  channel": a person decides, and the post is never sent twice on its own. */
 async function dispatchToPlatform(
   admin: ReturnType<typeof createClient>,
   post: QueuedPost,
   supabaseUrl: string,
   serviceKey: string,
 ): Promise<Record<string, unknown>> {
+  const uncertain = (why: string) => ({
+    id: post.id, platform: post.platform, leg: post.leg, status: 'publishing',
+    note: why + ' The outcome is saved on the post if it finishes; otherwise it is marked for checking after twenty minutes.',
+  });
   const call = fetch(supabaseUrl + '/functions/v1/social-' + post.platform, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + serviceKey, apikey: serviceKey, 'Content-Type': 'application/json' },
@@ -1449,9 +1458,11 @@ async function dispatchToPlatform(
   }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.ok) return j as Record<string, unknown>;
-    throw new Error('HTTP ' + r.status + (j?.error ? ': ' + String(j.error).slice(0, 200) : ''));
-  }).catch(async (e) => {
-    const why = 'The ' + post.platform + ' publisher could not run: ' + (e instanceof Error ? e.message : String(e));
+    if (![400, 401, 403, 404].includes(r.status)) {
+      return uncertain('The ' + post.platform + ' publisher answered HTTP ' + r.status + '.');
+    }
+    const why = 'The ' + post.platform + ' publisher could not start (HTTP ' + r.status + ')'
+      + (j?.error ? ': ' + String(j.error).slice(0, 200) : '.');
     const exhausted = post.attempts >= post.max_attempts;
     const delayMinutes = Math.pow(5, Math.max(0, post.attempts - 1));
     await admin.from('social_posts').update(exhausted
@@ -1460,11 +1471,10 @@ async function dispatchToPlatform(
           scheduled_at: new Date(Date.now() + delayMinutes * 60_000).toISOString() })
       .eq('id', post.id).eq('status', 'publishing');
     return { id: post.id, platform: post.platform, leg: post.leg, status: exhausted ? 'failed' : 'scheduled', error: why };
-  });
-  const waited = new Promise<Record<string, unknown>>((res) => setTimeout(() => res({
-    id: post.id, platform: post.platform, leg: post.leg, status: 'publishing',
-    note: 'Still being processed by ' + post.platform + '; the outcome is saved on the post when it finishes.',
-  }), 100_000));
+  }).catch((e) => uncertain('The connection to the ' + post.platform + ' publisher was lost ('
+    + (e instanceof Error ? e.message : String(e)).slice(0, 120) + ').'));
+  const waited = new Promise<Record<string, unknown>>((res) =>
+    setTimeout(() => res(uncertain('Still being processed by ' + post.platform + '.')), 100_000));
   return await Promise.race([call, waited]);
 }
 

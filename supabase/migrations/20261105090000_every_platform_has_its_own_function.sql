@@ -18,6 +18,9 @@
 --      studio connects (meta_page_id). They filtered on a Telegram chat or a
 --      TryPost account, so since TryPost was retired on 24 October they have
 --      fed Telegram only. Bodies otherwise reproduced exactly.
+--   7. A short lease on an account while its token is renewed, so two
+--      callers never renew the same account at once (X retires the old
+--      refresh token on every renewal; the loser would fail its post).
 --   6. Two scheduled jobs: tokens renewed before they end whether or not a
 --      post is due (refresh-social-tokens, hourly), and engagement read back
 --      for X, YouTube and LinkedIn (sweep-social-platforms, every 30 minutes,
@@ -479,3 +482,28 @@ insert into public.cron_expectations (jobname, max_silence, note) values
   ('refresh-social-tokens',  interval '3 hours',    'hourly at :17'),
   ('sweep-social-platforms', interval '90 minutes', 'every 30 minutes')
 on conflict (jobname) do nothing;
+
+
+-- ── 7. one renewal per account at a time ─────────────────────────────────
+alter table public.social_accounts add column if not exists token_refresh_lease timestamptz;
+comment on column public.social_accounts.token_refresh_lease is
+  'Held while a token is being renewed (refreshGuarded in _shared/social/core.ts). Expires on its own after 60 seconds.';
+
+create or replace function public.take_token_refresh_lease(p_account_id uuid)
+returns boolean language sql security definer set search_path to 'public', 'pg_temp' as $$
+  with taken as (
+    update social_accounts set token_refresh_lease = now() + interval '60 seconds'
+     where id = p_account_id and (token_refresh_lease is null or token_refresh_lease < now())
+    returning id)
+  select exists (select 1 from taken);
+$$;
+
+create or replace function public.release_token_refresh_lease(p_account_id uuid)
+returns void language sql security definer set search_path to 'public', 'pg_temp' as $$
+  update social_accounts set token_refresh_lease = null where id = p_account_id;
+$$;
+
+revoke all on function public.take_token_refresh_lease(uuid) from public, anon, authenticated;
+revoke all on function public.release_token_refresh_lease(uuid) from public, anon, authenticated;
+grant execute on function public.take_token_refresh_lease(uuid) to service_role;
+grant execute on function public.release_token_refresh_lease(uuid) to service_role;

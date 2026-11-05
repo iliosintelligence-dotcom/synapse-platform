@@ -334,16 +334,68 @@ export async function saveAccount(a: SaveAccount): Promise<{ id: string | null; 
   return { id: typeof data === 'string' ? data : null, error: error ? error.message : null };
 }
 
-/** Writes a renewed token back, so the stored credential stays the working one. */
+/** Writes a renewed token back, so the stored credential stays the working
+ *  one. Retried, because for X the old refresh token is dead the moment the
+ *  new one is issued: a lost save means the agency must connect again. A save
+ *  that still fails is written on the account, where the portal shows it,
+ *  and reported to the caller. */
 export async function saveTokens(accountId: string, access: string, refresh: string | null,
-  expiresInSec: number | null): Promise<void> {
-  const { error } = await admin().rpc('update_social_account_tokens', {
-    p_account_id: accountId,
-    p_access_token: access,
-    p_refresh_token: refresh,
-    p_expires_at: expiresInSec ? new Date(Date.now() + expiresInSec * 1000).toISOString() : null,
-  });
-  if (error) console.error('social: token not saved for ' + accountId + ': ' + error.message);
+  expiresInSec: number | null): Promise<boolean> {
+  let last = '';
+  for (let i = 0; i < 3; i++) {
+    const { error } = await admin().rpc('update_social_account_tokens', {
+      p_account_id: accountId,
+      p_access_token: access,
+      p_refresh_token: refresh,
+      p_expires_at: expiresInSec ? new Date(Date.now() + expiresInSec * 1000).toISOString() : null,
+    });
+    if (!error) return true;
+    last = error.message;
+    await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+  }
+  console.error('social: renewed token NOT saved for ' + accountId + ': ' + last);
+  await admin().from('social_accounts').update({
+    last_error: 'A renewed sign-in could not be saved. If posts start failing, connect this account again.',
+    updated_at: new Date().toISOString(),
+  }).eq('id', accountId).then(() => null, () => null);
+  return false;
+}
+
+/**
+ * One renewal per account at a time. The scheduler, the read-back sweep and
+ * several publishing workers can all decide the same token needs renewing;
+ * on X the first renewal retires the refresh token the others are holding,
+ * and the losers would fail their posts and ask the agency to reconnect.
+ *
+ * So a renewal takes a short lease on the account first. Whoever does not
+ * get it waits for the holder, then reads back the token the holder saved.
+ */
+export async function refreshGuarded(conn: Connection, renew: (c: Connection) => Promise<string | null>): Promise<string | null> {
+  if (conn.kind !== 'agency') return renew(conn);
+  const db = admin();
+  const { data: got } = await db.rpc('take_token_refresh_lease', { p_account_id: conn.accountId });
+  if (got === true) {
+    try {
+      return await renew(conn);
+    } finally {
+      await db.rpc('release_token_refresh_lease', { p_account_id: conn.accountId }).then(() => null, () => null);
+    }
+  }
+  /* Somebody else is renewing. Wait for them (at most ~20 s), then use what they saved. */
+  const before = conn.expiresAt ? Date.parse(conn.expiresAt) : 0;
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const { data: row } = await db.from('social_accounts').select('token_expires_at, token_refresh_lease')
+      .eq('id', conn.accountId).maybeSingle();
+    const exp = row?.token_expires_at ? Date.parse(String(row.token_expires_at)) : 0;
+    const leased = row?.token_refresh_lease && Date.parse(String(row.token_refresh_lease)) > Date.now();
+    if (exp > before || !leased) {
+      if (exp <= before) return null;
+      const { data: tok } = await db.rpc('social_account_token', { p_account_id: conn.accountId });
+      return typeof tok === 'string' && tok ? tok : null;
+    }
+  }
+  return null;
 }
 
 export async function refreshTokenOf(accountId: string): Promise<string | null> {
@@ -470,14 +522,32 @@ export async function fetchMedia(url: string, maxBytes: number): Promise<{ bytes
   }
   if (!res.ok) return 'Could not download ' + url.slice(0, 80) + ' (HTTP ' + res.status + ').';
   const declared = Number(res.headers.get('content-length') ?? 0);
+  const tooBig = (n: number) => 'A file is ' + Math.round(n / 1048576) + ' MB or more, over the '
+    + Math.round(maxBytes / 1048576) + ' MB this platform takes.';
   if (declared && declared > maxBytes) {
     await res.body?.cancel();
-    return 'A file is ' + Math.round(declared / 1048576) + ' MB, over the ' + Math.round(maxBytes / 1048576) + ' MB this platform takes.';
+    return tooBig(declared);
   }
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  if (bytes.byteLength > maxBytes) {
-    return 'A file is ' + Math.round(bytes.byteLength / 1048576) + ' MB, over the ' + Math.round(maxBytes / 1048576) + ' MB this platform takes.';
+  /* Read in pieces and stop the moment the file passes the limit: a server
+     that sends no Content-Length must not be able to fill the function's
+     memory with one "photo". */
+  const reader = res.body?.getReader();
+  if (!reader) return 'Could not download ' + url.slice(0, 80) + ' (empty reply).';
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return tooBig(total);
+    }
+    parts.push(value);
   }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) { bytes.set(p, at); at += p.byteLength; }
   return { bytes, type: (res.headers.get('content-type') ?? '').split(';')[0].trim() };
 }
 
@@ -557,7 +627,8 @@ export async function settle(post: QueuedPost, result: PublishResult): Promise<s
 
 export interface CommentRow { id: string; author: string | null; body: string | null; at: string | null }
 
-/** Files comments against the post, keyed on the platform's own id so re-reading never duplicates. */
+/** Files comments against the post, keyed on the platform's own id so re-reading
+ *  never duplicates. The number filed, or -1 if the write failed. */
 export async function fileComments(post: { id: string; agency_id: string; property_id: string | null; platform: string },
   comments: CommentRow[]): Promise<number> {
   const rows = comments.filter((c) => c.id).slice(0, 50).map((c) => ({
@@ -567,7 +638,9 @@ export async function fileComments(post: { id: string; agency_id: string; proper
   }));
   if (!rows.length) return 0;
   const { error } = await admin().from('social_comments').upsert(rows, { onConflict: 'platform,platform_comment_id' });
-  if (error) { console.error('social: comments not filed for ' + post.id + ': ' + error.message); return 0; }
+  /* -1, not 0: "nothing to file" and "the write failed" must not look alike to
+     a sweep deciding whether it may move its cursor past these comments. */
+  if (error) { console.error('social: comments not filed for ' + post.id + ': ' + error.message); return -1; }
   return rows.length;
 }
 
@@ -632,7 +705,7 @@ export async function publishOne(spec: PlatformSpec, postId: string): Promise<Re
   if (spec.refresh && conn.expiresAt) {
     const left = Date.parse(conn.expiresAt) - Date.now();
     if (left < (spec.refreshWithin ?? 15 * 60 * 1000)) {
-      const fresh = await spec.refresh(conn).catch((e) => { console.error('social-' + spec.platform + ' refresh threw', e); return null; });
+      const fresh = await refreshGuarded(conn, spec.refresh).catch((e) => { console.error('social-' + spec.platform + ' refresh threw', e); return null; });
       if (fresh) conn = { ...conn, token: fresh };
       else if (left <= 0) {
         const why = 'The ' + post.platform + ' connection has expired and could not be renewed. Connect the account again.';
@@ -689,8 +762,9 @@ export function platformFunction(spec: PlatformSpec): void {
             .eq('id', id).eq('platform', spec.platform).eq('is_active', true).is('deleted_at', null).maybeSingle();
           if (!data) return json({ ok: false, error: 'No such active account' }, 404);
           const { data: tok } = await admin().rpc('social_account_token', { p_account_id: id });
-          const fresh = await spec.refresh({ accountId: id, kind: 'agency', platformAccountId: data.platform_account_id,
-            username: data.platform_username, token: String(tok ?? ''), authSource: data.auth_source, expiresAt: data.token_expires_at });
+          const fresh = await refreshGuarded({ accountId: id, kind: 'agency', platformAccountId: data.platform_account_id,
+            username: data.platform_username, token: String(tok ?? ''), authSource: data.auth_source, expiresAt: data.token_expires_at },
+          spec.refresh);
           return json({ ok: Boolean(fresh) });
         }
         if (!spec.sweep) return json({ looked_at: 0, note: 'no read-back for ' + spec.platform });

@@ -25,7 +25,7 @@
 import {
   backToPortal, buildPayload, type Connection, fail, fetchMedia, fileComments, isVideoUrl, json, markAccountError,
   platformFunction, postsToSweep, type PublishResult, type QueuedPost, refreshTokenOf, saveAccount, saveTokens,
-  type StartContext, tokenRequest, writeMetrics,
+  refreshGuarded, type StartContext, tokenRequest, writeMetrics,
 } from '../_shared/social/core.ts';
 
 const SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly'];
@@ -174,7 +174,7 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
   for (const { post, conn } of due) {
     let token = fresh.get(conn.accountId) ?? conn.token;
     if (!fresh.has(conn.accountId) && conn.expiresAt && Date.parse(conn.expiresAt) - Date.now() < 5 * 60 * 1000) {
-      token = (await refresh(conn)) ?? '';
+      token = (await refreshGuarded(conn, refresh)) ?? '';
       fresh.set(conn.accountId, token);
     }
     if (!token) continue;
@@ -191,11 +191,11 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
       const c = await fetch(YT + '/commentThreads?part=snippet&maxResults=50&order=time&videoId=' + encodeURIComponent(post.platform_post_id), { headers: auth });
       const cj = c.ok ? await c.json().catch(() => ({})) : {};
       // deno-lint-ignore no-explicit-any
-      filed += await fileComments(post, ((cj?.items ?? []) as Array<Record<string, any>>).map((t) => {
+      filed += Math.max(0, await fileComments(post, ((cj?.items ?? []) as Array<Record<string, any>>).map((t) => {
         const top = t?.snippet?.topLevelComment;
         return { id: String(top?.id ?? ''), author: top?.snippet?.authorDisplayName ?? null,
           body: top?.snippet?.textOriginal ?? null, at: top?.snippet?.publishedAt ?? null };
-      }));
+      })));
     }
   }
   return { looked_at: due.length, updated, comments_filed: filed };

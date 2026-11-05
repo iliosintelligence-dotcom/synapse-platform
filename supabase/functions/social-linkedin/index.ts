@@ -213,10 +213,16 @@ async function refresh(conn: Connection): Promise<string | null> {
 /* Engagement on company-page posts only: reading a PROFILE post's numbers
    needs a permission LinkedIn reserves for its partners. */
 async function sweep(limit: number): Promise<Record<string, unknown>> {
-  const due = (await postsToSweep('linkedin', limit)).filter((d) => d.conn.platformAccountId.startsWith('urn:li:organization:'));
+  const due = await postsToSweep('linkedin', limit);
   let updated = 0;
   let filed = 0;
   for (const { post, conn } of due) {
+    /* A profile post: marked as looked at (with nothing known) so it moves to
+       the back of the line and cannot hold company-page posts out of a batch. */
+    if (!conn.platformAccountId.startsWith('urn:li:organization:')) {
+      await writeMetrics(post.id, { likes: null, comments: null, shares: null });
+      continue;
+    }
     const urn = encodeURIComponent(post.platform_post_id);
     const s = await fetch(REST + '/socialActions/' + urn, { headers: rest(conn.token) });
     if (!s.ok) { console.error('social-linkedin: socialActions ' + s.status + ' for ' + post.id); continue; }
@@ -228,10 +234,10 @@ async function sweep(limit: number): Promise<Record<string, unknown>> {
       const c = await fetch(REST + '/socialActions/' + urn + '/comments?count=50', { headers: rest(conn.token) });
       const cj = c.ok ? await c.json().catch(() => ({})) : {};
       // deno-lint-ignore no-explicit-any
-      filed += await fileComments(post, ((cj?.elements ?? []) as Array<Record<string, any>>).map((e) => ({
+      filed += Math.max(0, await fileComments(post, ((cj?.elements ?? []) as Array<Record<string, any>>).map((e) => ({
         id: String(e?.commentUrn ?? e?.$URN ?? e?.id ?? ''), author: null,
         body: e?.message?.text ?? null, at: e?.created?.time ? new Date(Number(e.created.time)).toISOString() : null,
-      })));
+      }))));
     }
   }
   return { looked_at: due.length, updated, comments_filed: filed };
