@@ -1331,6 +1331,14 @@ Deno.serve(async (req: Request) => {
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
           /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
           tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
+          /* Connected through their own functions (2026-11-05): the portal
+             starts these at /functions/v1/<fn>?action=start, not here. */
+          x: { ready: Boolean((Deno.env.get('X_CLIENT_ID') ?? '').trim() && (Deno.env.get('X_CLIENT_SECRET') ?? '').trim()),
+               fn: 'social-x' },
+          youtube: { ready: Boolean((Deno.env.get('GOOGLE_CLIENT_ID') ?? '').trim() && (Deno.env.get('GOOGLE_CLIENT_SECRET') ?? '').trim()),
+                     fn: 'social-youtube', media: 'video' },
+          linkedin: { ready: Boolean((Deno.env.get('LINKEDIN_CLIENT_ID') ?? '').trim() && (Deno.env.get('LINKEDIN_CLIENT_SECRET') ?? '').trim()),
+                      fn: 'social-linkedin' },
         },
       });
     }
@@ -1350,7 +1358,7 @@ Deno.serve(async (req: Request) => {
       const readPick = async (pick: string) => {
         if (!/^[0-9a-f-]{36}$/i.test(pick)) return null;
         const { data: row } = await who.admin.from('social_connect_picks')
-          .select('pages, expires_at, profile_id, for_studio').eq('id', pick).maybeSingle();
+          .select('pages, expires_at, profile_id, for_studio').eq('id', pick).eq('platform', 'facebook').maybeSingle();
         if (!row || row.for_studio !== true || row.profile_id !== who.userId
             || Date.parse(row.expires_at as string) < Date.now()) return null;
         return row;
@@ -1399,7 +1407,9 @@ Deno.serve(async (req: Request) => {
       const readPick = async (pick: string) => {
         if (!/^[0-9a-f-]{36}$/i.test(pick)) return null;
         const { data: row } = await who.admin.from('social_connect_picks')
-          .select('pages, expires_at, agency_id, profile_id').eq('id', pick).maybeSingle();
+          /* Facebook holds only: LinkedIn pages are held in the same table
+             (stash_connect_pick_for) and must never be connected as Pages. */
+          .select('pages, expires_at, agency_id, profile_id').eq('id', pick).eq('platform', 'facebook').maybeSingle();
         if (!row || row.profile_id !== who.userId || row.agency_id !== who.agencyId
             || Date.parse(row.expires_at as string) < Date.now()) return null;
         return row;
@@ -2178,7 +2188,11 @@ Deno.serve(async (req: Request) => {
     let expiresAt: string | null = null;
     const longRes = await fetch(
       'https://graph.instagram.com/access_token?grant_type=ig_exchange_token'
-        + '&client_secret=' + encodeURIComponent(appSecret)
+        /* THE INSTAGRAM SECRET. This used the Facebook app's secret, which
+           Instagram rejects -- silently, because a failure here is not fatal:
+           the one-hour token was kept, no expiry was stored, and the account
+           died an hour later with nothing set to renew it (2026-11-05). */
+        + '&client_secret=' + encodeURIComponent(igAppSecret)
         + '&access_token=' + encodeURIComponent(accessToken),
     );
     const long = await longRes.json().catch(() => ({}));
