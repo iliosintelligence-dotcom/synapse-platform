@@ -214,6 +214,23 @@ async function tg(method: string, body: Record<string, unknown>) {
   return r ? await r.json().catch(() => ({ ok: false })) : { ok: false };
 }
 
+/* REACTIONS ON A CHANNEL POST (2026-11-10). Telegram tells a bot that administers a channel the running total of
+   anonymous reactions on each post (message_reaction_count; asked for in social-connect's allowed_updates). Bots get
+   no view counts, so this total is the engagement a Telegram post can show: stored as its likes, matched to the post
+   by chat and message id. A post Synapse did not publish matches nothing and is ignored. */
+async function onReactionCount(r: Json) {
+  const chatId = r?.chat?.id;
+  const messageId = r?.message_id;
+  if (chatId == null || messageId == null) return;
+  const total = (Array.isArray(r?.reactions) ? r.reactions : [])
+    .reduce((n: number, x: Json) => n + (Number(x?.total_count) || 0), 0);
+  const res = await sb('rpc/record_telegram_reactions', {
+    method: 'POST',
+    body: JSON.stringify({ p_chat_id: String(chatId), p_message_id: String(messageId), p_total: total }),
+  });
+  if (!res.ok) console.error('telegram-webhook: reactions not saved (' + res.status + ')');
+}
+
 async function onChannelPost(p: Json) {
   const text = String(p?.text ?? '').trim();
   const m = text.match(/^\/connect(?:@\w+)?\s+([A-Za-z0-9]{6,12})$/);
@@ -347,6 +364,7 @@ Deno.serve(async (req: Request) => {
     if (update?.my_chat_member) await onMembership(update.my_chat_member);
     else if (update?.channel_post) await onChannelPost(update.channel_post);
     else if (update?.message) await onMessage(update.message);
+    else if (update?.message_reaction_count) await onReactionCount(update.message_reaction_count);
   } catch (e) {
     console.error('telegram-webhook: update ' + (update?.update_id ?? '?') + ' failed', e);
   }
