@@ -1135,6 +1135,39 @@ async function refreshTikTok(
   return String(j.access_token);
 }
 
+/* A YOUTUBE (GOOGLE) ACCESS TOKEN LIVES AN HOUR. Renewed here from the stored refresh token, just before a post needs
+   it, and written back; Google usually returns no new refresh token, and update_social_account_tokens keeps the stored
+   one when none is passed. GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth client the account was connected with.
+   A renewal that fails leaves the account unusable for this batch, reported as not connected: reconnect fixes it. */
+async function refreshYouTube(
+  admin: ReturnType<typeof createClient>,
+  accountId: string,
+): Promise<string | null> {
+  const id = (Deno.env.get('GOOGLE_CLIENT_ID') ?? '').trim();
+  const secret = (Deno.env.get('GOOGLE_CLIENT_SECRET') ?? '').trim();
+  if (!id || !secret) return null;
+  const { data: rt } = await admin.rpc('social_account_refresh_token', { p_account_id: accountId });
+  if (!rt) return null;
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: id, client_secret: secret, grant_type: 'refresh_token', refresh_token: String(rt) }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) {
+    console.error('social-publish: youtube refresh failed for ' + accountId + ': ' + (j.error ?? r.status) + ' ' + (j.error_description ?? ''));
+    return null;
+  }
+  const { error } = await admin.rpc('update_social_account_tokens', {
+    p_account_id: accountId,
+    p_access_token: j.access_token,
+    p_refresh_token: j.refresh_token ?? null,
+    p_expires_at: new Date(Date.now() + (Number(j.expires_in) || 3600) * 1000).toISOString(),
+  });
+  if (error) console.error('social-publish: youtube token not saved for ' + accountId + ': ' + error.message);
+  return String(j.access_token);
+}
+
 /* INSTAGRAM LOGIN TOKENS LAST SIXTY DAYS (Greptile audit). Nothing renewed
    them, so on day sixty every scheduled post for that account failed until
    somebody reconnected, with the account still shown as connected. Instagram
@@ -1171,11 +1204,43 @@ async function refreshInstagram(
   }
 }
 
+/* -- YouTube is published by its own edge function ---------------------------------------------------------------
+   publish-youtube does the upload; this file keeps the claim, the account and its token (decrypted and renewed here),
+   the retry ladder and saving the outcome, exactly as for the other platforms. The call carries the service role key,
+   the only thing publish-youtube accepts, and the post and connection in the body. Anything that goes wrong on the way
+   -- unreachable, a failed cold start, a reply that is not a result -- comes back as a failed result, so the ladder
+   below retries it like any other refusal. */
+function remoteAdapter(slug: string): Adapter {
+  return async (post, conn) => {
+    const base = Deno.env.get('SUPABASE_URL') ?? '';
+    const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    try {
+      const res = await fetch(base + '/functions/v1/' + slug, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ post, conn }),
+      });
+      const j = await res.json().catch(() => null) as PublishResult | { error?: string } | null;
+      if (res.ok && j && typeof (j as PublishResult).ok === 'boolean') return j as PublishResult;
+      return {
+        ok: false, postId: null, provider: post.platform, payload: buildPayload(post),
+        error: slug + ' answered ' + res.status + ': ' + ((j as { error?: string } | null)?.error ?? 'no result'),
+      };
+    } catch (err) {
+      return {
+        ok: false, postId: null, provider: post.platform, payload: buildPayload(post),
+        error: slug + ' could not be reached: ' + (err instanceof Error ? err.message : String(err)),
+      };
+    }
+  };
+}
+
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
   telegram: telegramAdapter,
   tiktok: tiktokAdapter,
+  youtube: remoteAdapter('publish-youtube'),
 };
 
 const ADAPTERS: Record<string, Adapter> = {
@@ -1373,6 +1438,15 @@ async function loadConnections(
         const exp = a.token_expires_at ? Date.parse(a.token_expires_at) : 0;
         if (!exp || exp - Date.now() < 15 * 60 * 1000) {
           const fresh = await refreshTikTok(admin, a.id);
+          if (!fresh) continue;
+          token = fresh;
+        }
+      }
+      /* A YouTube token within five minutes of its hour is renewed now, not discovered dead at Google. */
+      if (a.platform === 'youtube') {
+        const expYt = a.token_expires_at ? Date.parse(a.token_expires_at) : 0;
+        if (!expYt || expYt - Date.now() < 5 * 60 * 1000) {
+          const fresh = await refreshYouTube(admin, a.id);
           if (!fresh) continue;
           token = fresh;
         }

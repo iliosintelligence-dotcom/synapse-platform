@@ -258,6 +258,85 @@ async function finishTikTok(
   return backToPortal('tiktok', name);
 }
 
+/* ── YouTube ────────────────────────────────────────────────────────────
+   Google OAuth 2.0 for web servers (read 2026-11-07), its own client (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) and
+   the same redirect as Meta and TikTok -- this function -- which must be listed exactly among the client's authorised
+   redirect URIs.
+
+   youtube.upload is what publish-youtube needs; youtube.readonly is only so the callback can ask which channel this is
+   (channels.list mine=true), and so the agent recognises the connection by the channel's own name.
+
+   access_type=offline asks for a refresh token, which publish-youtube's caller lives on: the access token lasts an
+   hour. Google returns one only on a first consent, so prompt=consent asks every time -- a reconnect without it comes
+   back with no refresh token and a connection that dies within the hour. */
+const YOUTUBE_SCOPES = [
+  'https://www.googleapis.com/auth/youtube.upload',
+  'https://www.googleapis.com/auth/youtube.readonly',
+];
+
+async function finishYouTube(
+  code: string,
+  claims: Record<string, unknown>,
+  clientId: string,
+  clientSecret: string,
+  redirectUri: string,
+): Promise<Response> {
+  const tr = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId, client_secret: clientSecret, code,
+      grant_type: 'authorization_code', redirect_uri: redirectUri,
+    }),
+  });
+  const tok = await tr.json().catch(() => ({}));
+  if (!tr.ok || !tok.access_token) {
+    console.error('social-connect: youtube token exchange rejected -- '
+      + (tok.error ?? tr.status) + ' ' + (tok.error_description ?? ''));
+    return backToPortal('error', 'Google would not issue a token'
+      + (tok.error_description ? ': ' + tok.error_description : '.'));
+  }
+  const granted = String(tok.scope ?? '').split(' ').map((x: string) => x.trim()).filter(Boolean);
+  if (!granted.includes('https://www.googleapis.com/auth/youtube.upload')) {
+    return backToPortal('error', 'YouTube connected without permission to upload videos. '
+      + 'Connect again and allow "Manage your YouTube videos".');
+  }
+  if (!tok.refresh_token) {
+    return backToPortal('error', 'Google did not return a lasting permission, so the connection would stop within the hour. '
+      + 'Remove Synapse at myaccount.google.com/permissions, then connect again.');
+  }
+
+  /* Which channel, in YouTube's own words. */
+  const cr = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
+    headers: { Authorization: 'Bearer ' + tok.access_token },
+  });
+  const c = await cr.json().catch(() => ({}));
+  const channel = (c && Array.isArray(c.items) && c.items[0]) || null;
+  if (!channel?.id) {
+    return backToPortal('error', 'This Google account has no YouTube channel. Create one in YouTube, then connect again.');
+  }
+  const name = String(channel.snippet?.title ?? '').trim() || 'YouTube channel';
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { error } = await admin.rpc('connect_social_account', {
+    p_agency_id: claims.agency_id as string,
+    p_platform: 'youtube',
+    p_account_id: String(channel.id),
+    p_username: name,
+    p_access_token: tok.access_token,
+    p_refresh_token: tok.refresh_token,
+    p_expires_at: new Date(Date.now() + (Number(tok.expires_in) || 3600) * 1000).toISOString(),
+    p_scopes: granted,
+    p_connected_by: claims.profile_id as string,
+  });
+  if (error) {
+    console.error('social-connect: could not save YouTube channel: ' + error.message);
+    return backToPortal('error', 'YouTube connected, but the channel could not be saved: ' + error.message);
+  }
+  console.log('social-connect: youtube ' + channel.id + ' connected for agency ' + claims.agency_id);
+  return backToPortal('youtube', name);
+}
+
 /**
  * Facebook Pages. Three exchanges, and the third is the one that matters:
  * posting to a Page is done with a PAGE token, not the user's own. A Page
@@ -1233,6 +1312,8 @@ Deno.serve(async (req: Request) => {
   const tgBotToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
   const ttKey = (Deno.env.get('TIKTOK_CLIENT_KEY') ?? '').trim();
   const ttSecret = (Deno.env.get('TIKTOK_CLIENT_SECRET') ?? '').trim();
+  const ytClientId = (Deno.env.get('GOOGLE_CLIENT_ID') ?? '').trim();
+  const ytClientSecret = (Deno.env.get('GOOGLE_CLIENT_SECRET') ?? '').trim();
 
   let fbConfigId = (Deno.env.get('META_FB_CONFIG_ID') ?? '').trim();
   if (!fbConfigId) fbConfigId = await settingText('meta_fb_config_id');
@@ -1331,6 +1412,8 @@ Deno.serve(async (req: Request) => {
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
           /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
           tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
+          /* `video`: YouTube takes video only; a post of photos is refused until photos become a video. */
+          youtube: { ready: Boolean(ytClientId && ytClientSecret), mode: 'video' },
         },
       });
     }
@@ -1839,6 +1922,56 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    /* ── step 1, YouTube: Google's dialog, the same checks as TikTok's ─────── */
+    if (url.searchParams.get('action') === 'start' && url.searchParams.get('platform') === 'youtube') {
+      const missingYt = [!ytClientId && 'GOOGLE_CLIENT_ID', !ytClientSecret && 'GOOGLE_CLIENT_SECRET'].filter(Boolean);
+      if (missingYt.length) {
+        return json({ error: 'YouTube is not configured on this project yet. Missing: '
+          + missingYt.join(', ') + '.', missing: missingYt }, 503);
+      }
+      const authHeader = req.headers.get('Authorization');
+      if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+      const host = Deno.env.get('SUPABASE_URL') ?? '';
+      const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: who } = await asUser.auth.getUser();
+      if (!who.user) return json({ error: 'Not authenticated' }, 401);
+      const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+      const { data: membership } = await admin
+        .from('agency_members')
+        .select('agency_id, role')
+        .eq('profile_id', who.user.id)
+        .is('deleted_at', null)
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+      if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+        return json({ error: 'Only a member of this agency can connect a social account' }, 403);
+      }
+      const ytState = await signState({
+        agency_id: membership.agency_id,
+        profile_id: who.user.id,
+        platform: 'youtube',
+        nonce: crypto.randomUUID(),
+        exp: Date.now() + STATE_TTL_MS,
+      });
+      const ytAuth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+      ytAuth.searchParams.set('client_id', ytClientId);
+      ytAuth.searchParams.set('redirect_uri', redirectUri);
+      ytAuth.searchParams.set('response_type', 'code');
+      ytAuth.searchParams.set('scope', YOUTUBE_SCOPES.join(' '));
+      ytAuth.searchParams.set('access_type', 'offline');
+      ytAuth.searchParams.set('prompt', 'consent');
+      ytAuth.searchParams.set('include_granted_scopes', 'true');
+      ytAuth.searchParams.set('state', ytState);
+      console.log('social-connect start: platform=youtube redirect=' + redirectUri);
+      return json({
+        url: ytAuth.toString(), platform: 'youtube', redirectUri,
+        scopes: YOUTUBE_SCOPES, expiresInMinutes: STATE_TTL_MS / 60000,
+      });
+    }
+
     /* ── THE META DEVELOPER APP IS SWITCHED OFF FOR THE STUDIO (Eden, 2026-10-18) ──────────────────────────────
        A new connector replaces connecting through our own Meta app. TikTok started above and Telegram above that are not
        affected. This only stops a Facebook/Instagram connection STARTING through this app; the app, its keys and everything
@@ -2137,6 +2270,10 @@ Deno.serve(async (req: Request) => {
     if (claims.platform === 'tiktok') {
       if (!ttKey || !ttSecret) return backToPortal('error', 'TikTok is not configured on this project.');
       return await finishTikTok(code, claims, ttKey, ttSecret, redirectUri);
+    }
+    if (claims.platform === 'youtube') {
+      if (!ytClientId || !ytClientSecret) return backToPortal('error', 'YouTube is not configured on this project.');
+      return await finishYouTube(code, claims, ytClientId, ytClientSecret, redirectUri);
     }
 
     /* AFTER the state is read, because the state is what says which
