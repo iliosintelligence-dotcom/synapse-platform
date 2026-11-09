@@ -145,3 +145,8 @@ verify_jwt = true
 # that is not the service role.
 [functions.lifecycle-followup]
 verify_jwt = false
+
+# YouTube is published by its own function. Only social-publish calls it, with the service role key; it refuses
+# every other caller (401 without a key, 403 with any other).
+[functions.publish-youtube]
+verify_jwt = true
