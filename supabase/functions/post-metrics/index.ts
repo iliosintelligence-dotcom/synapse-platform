@@ -363,7 +363,15 @@ async function sweepMeta(limit: number, h: Record<string, string>): Promise<Reco
           shares = num(j?.shares?.count);
           read = true;
         } else {
-          why = 'facebook ' + r.status;
+          /* FACEBOOK'S OWN REASON, not just the status (2026-11-10): a bare "facebook 400" could not tell a missing
+             permission from a Page that was swapped for another one. Graph's error code and message are kept; they
+             never contain the token, and any access_token= that might appear is blanked anyway. */
+          const e = await r.json().catch(() => ({})) as { error?: { code?: number; error_subcode?: number; message?: string } };
+          const reason = e?.error
+            ? ' #' + (e.error.code ?? '?') + (e.error.error_subcode ? '/' + e.error.error_subcode : '')
+              + ': ' + String(e.error.message ?? '').replace(/access_token=[^&\s]+/gi, 'access_token=…').slice(0, 180)
+            : '';
+          why = 'facebook ' + r.status + reason;
         }
       }
     } catch (err) {
