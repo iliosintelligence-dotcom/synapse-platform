@@ -1186,8 +1186,10 @@ async function syncTelegramProfile(token: string): Promise<Record<string, unknow
      Telegram reports deliveries being refused -- which is what a rotated
      token looks like from here, since the secret is derived from it. */
   const hook = (Deno.env.get('SUPABASE_URL') ?? '') + '/functions/v1/telegram-webhook';
-  /* channel_post: how a "/connect CODE" posted in a channel reaches us. */
-  const wantUpdates = ['message', 'my_chat_member', 'channel_post'];
+  /* channel_post: how a "/connect CODE" posted in a channel reaches us.
+     message_reaction_count: reaction totals on channel posts, the engagement Telegram gives a bot (2026-11-10). Telegram
+     sends it only to a bot that is a channel admin and only when named here; adding it re-registers the webhook once. */
+  const wantUpdates = ['message', 'my_chat_member', 'channel_post', 'message_reaction_count'];
   const info = await call('getWebhookInfo');
   const have = info.ok ? info.result ?? {} : {};
   const sameUpdates = Array.isArray(have.allowed_updates)

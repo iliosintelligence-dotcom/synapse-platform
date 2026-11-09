@@ -150,3 +150,8 @@ verify_jwt = false
 # every other caller (401 without a key, 403 with any other).
 [functions.publish-youtube]
 verify_jwt = true
+
+# Views, likes and comments for published YouTube posts. Called by refresh_youtube_metrics (pg_cron) with the service
+# key only; refuses every other caller.
+[functions.youtube-metrics]
+verify_jwt = true
