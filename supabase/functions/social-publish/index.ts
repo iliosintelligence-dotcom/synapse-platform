@@ -921,6 +921,18 @@ function tiktokPhotoUrl(u: string): string | null {
   return TT_MEDIA_BASE + u.slice(store.length);
 }
 
+/* VIDEO, 2026-11-10. /m/ is the image renderer and cannot serve a video, so a listing's video is addressed through
+   www.synapsecore.dev/mv/property-photos/, a Vercel rewrite (a proxy, not a redirect) onto the original file in the
+   listing bucket. Same verified domain, so TikTok pulls it like the photos. A video stored anywhere else is not
+   sent. */
+const TT_VIDEO_BASE = 'https://www.synapsecore.dev/mv/';
+
+function tiktokVideoUrl(u: string): string | null {
+  const store = (Deno.env.get('SUPABASE_URL') ?? '') + '/storage/v1/object/public/';
+  if (!u || !u.startsWith(store + 'property-photos/') || !isVideoUrl(u)) return null;
+  return TT_VIDEO_BASE + u.slice(store.length);
+}
+
 /* ── the Telegram Story kit ──────────────────────────────────────────────
    Telegram does not let a bot post a channel Story -- postStory exists only
    for Business accounts (Bot API reference, checked 2026-09-27). A channel
@@ -1006,11 +1018,13 @@ async function sendStoryKit(admin: ReturnType<typeof createClient>, post: Queued
 function tiktokFailReason(code: string): string {
   const c = code.toLowerCase();
   if (c.includes('pull_failed')) {
-    return 'TikTok could not download the photos from synapsecore.dev. In the TikTok developer app, '
+    return 'TikTok could not download the photos or video from synapsecore.dev. In the TikTok developer app, '
       + 'check URL properties: synapsecore.dev must show as verified (for the sandbox too). (' + code + ')';
   }
   if (c.includes('picture_size')) return 'TikTok would not take a photo’s size. (' + code + ')';
-  if (c.includes('file_format')) return 'TikTok would not take a photo’s format. (' + code + ')';
+  if (c.includes('file_format')) return 'TikTok would not take the file’s format (videos: MP4, MOV or WebM). (' + code + ')';
+  if (c.includes('duration')) return 'TikTok would not take the video’s length: it must be at least 3 seconds and within this account’s limit. (' + code + ')';
+  if (c.includes('frame_rate')) return 'TikTok would not take the video’s frame rate (23–60 frames per second). (' + code + ')';
   if (c.includes('spam_risk')) return 'TikTok’s limit is reached: at most 5 unfinished drafts in 24 hours. Finish or delete some in TikTok. (' + code + ')';
   if (c.includes('auth_removed')) return 'This TikTok account removed Synapse’s access. Reconnect it. (' + code + ')';
   if (c.includes('private') || c.includes('unaudited')) {
@@ -1023,27 +1037,32 @@ const tiktokAdapter: Adapter = async (post, conn) => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, mode: 'MEDIA_UPLOAD',
   };
-  const photos = (post.media_urls ?? [])
+  /* A listing video goes as a VIDEO; otherwise the photos, exactly as before. TikTok's video inbox upload
+     (/v2/post/publish/inbox/video/init/, Upload API) takes only the source -- no title or caption -- so the agent adds
+     the caption in TikTok; the payload's note says so. */
+  const video = (post.media_urls ?? []).map(tiktokVideoUrl).find((u): u is string => Boolean(u)) ?? null;
+  const photos = video ? [] : (post.media_urls ?? [])
     .map(tiktokPhotoUrl).filter((u): u is string => Boolean(u)).slice(0, 35);
-  if (!photos.length) {
+  if (!video && !photos.length) {
     return {
       ok: false, postId: null, provider: 'tiktok', payload,
-      error: 'No photo TikTok can take: it only pulls photos stored on Synapse. '
-        + '(Sending videos to TikTok is not built yet.)',
+      error: 'No photo or video TikTok can take: it only pulls media stored on Synapse.',
     };
   }
   const caption = (post.caption ?? '').trim();
   const title = (caption.split('\n').find((l) => l.trim()) ?? '').trim().slice(0, 90);
   try {
-    const res = await fetch(TT_API + '/v2/post/publish/content/init/', {
+    const res = await fetch(TT_API + (video ? '/v2/post/publish/inbox/video/init/' : '/v2/post/publish/content/init/'), {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json; charset=UTF-8' },
-      body: JSON.stringify({
-        post_info: { title, description: caption.slice(0, 4000) },
-        source_info: { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: photos },
-        post_mode: 'MEDIA_UPLOAD',
-        media_type: 'PHOTO',
-      }),
+      body: JSON.stringify(video
+        ? { source_info: { source: 'PULL_FROM_URL', video_url: video } }
+        : {
+          post_info: { title, description: caption.slice(0, 4000) },
+          source_info: { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: photos },
+          post_mode: 'MEDIA_UPLOAD',
+          media_type: 'PHOTO',
+        }),
     });
     const j = await res.json().catch(() => ({}));
     const code = j && j.error ? String(j.error.code ?? '') : '';
@@ -1087,11 +1106,13 @@ const tiktokAdapter: Adapter = async (post, conn) => {
     const inInbox = status === 'SEND_TO_USER_INBOX' || status === 'PUBLISH_COMPLETE';
     return {
       ok: true, postId: publishId, provider: 'tiktok', error: '',
-      payload: { ...payload, photos: photos.length, publish_id: publishId, tiktok_status: status || 'unknown',
+      payload: { ...payload, photos: photos.length, video: Boolean(video), publish_id: publishId, tiktok_status: status || 'unknown',
                  delivered: 'inbox',
                  note: inInbox
-                   ? 'In the TikTok inbox: open TikTok, tap the notification in Inbox, add a sound and post.'
-                   : 'TikTok is still fetching the photos; the draft reaches the TikTok inbox when it finishes.' },
+                   ? (video
+                     ? 'In the TikTok inbox: open TikTok, tap the notification in Inbox, paste the caption, add a sound and post.'
+                     : 'In the TikTok inbox: open TikTok, tap the notification in Inbox, add a sound and post.')
+                   : 'TikTok is still fetching the ' + (video ? 'video' : 'photos') + '; the draft reaches the TikTok inbox when it finishes.' },
     };
   } catch (err) {
     return { ok: false, postId: null, provider: 'tiktok', payload,
