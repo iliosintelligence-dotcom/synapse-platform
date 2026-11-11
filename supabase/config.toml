@@ -155,3 +155,8 @@ verify_jwt = true
 # key only; refuses every other caller.
 [functions.youtube-metrics]
 verify_jwt = true
+
+# The scheduler's TikTok panel: what TikTok says about the account a post goes to (creator_info). Signed-in agency
+# members only; off unless TIKTOK_DIRECT_POST is on.
+[functions.tiktok-creator-info]
+verify_jwt = true

@@ -198,7 +198,13 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
    cannot choose well. Direct posting needs video.publish, TikTok's audit, and
    a compliance screen in our composer; it can come later without changing
    anything stored here. */
-const TIKTOK_SCOPES = ['user.info.basic', 'video.upload'];
+/* DIRECT POSTING (2026-11-11) adds video.publish -- posting straight to the profile instead of the inbox -- but ONLY when
+   TIKTOK_DIRECT_POST is on. Asking TikTok for a scope the developer app has not been granted fails the whole sign-in, so
+   until Direct Post is enabled in the TikTok app the request stays exactly as it was. */
+const TIKTOK_DIRECT = /^(1|true|on|yes)$/i.test((Deno.env.get('TIKTOK_DIRECT_POST') ?? '').trim());
+const TIKTOK_SCOPES = TIKTOK_DIRECT
+  ? ['user.info.basic', 'video.upload', 'video.publish']
+  : ['user.info.basic', 'video.upload'];
 
 async function finishTikTok(
   code: string,
@@ -1413,7 +1419,8 @@ Deno.serve(async (req: Request) => {
              the token has every agency adding an account that is not ours. */
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
           /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
-          tiktok: { ready: Boolean(ttKey && ttSecret), mode: 'inbox' },
+          /* `direct` only when TIKTOK_DIRECT_POST is on: the scheduler then shows TikTok's required post panel. */
+          tiktok: { ready: Boolean(ttKey && ttSecret), mode: TIKTOK_DIRECT ? 'direct' : 'inbox' },
           /* `video`: YouTube takes video only; a post of photos is refused until photos become a video. */
           youtube: { ready: Boolean(ytClientId && ytClientSecret), mode: 'video' },
         },
