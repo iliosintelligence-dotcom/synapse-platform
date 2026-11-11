@@ -47,6 +47,9 @@ interface QueuedPost {
   id: string;
   agency_id: string;
   property_id: string | null;
+  /* What the portal recorded with the post (angle, and since 2026-11-11 the TikTok panel's choices under `tiktok`).
+     Rides along free with the rest of the row. */
+  payload?: Record<string, unknown> | null;
   platform: string;
   caption: string | null;
   media_urls: string[];
@@ -1033,7 +1036,151 @@ function tiktokFailReason(code: string): string {
   return 'TikTok refused the post: ' + (code || 'no reason given') + '.';
 }
 
+/* ── TikTok DIRECT POST (2026-11-11) ─────────────────────────────────────────
+   Straight to the creator's profile instead of their inbox. Used only when BOTH are true:
+     - TIKTOK_DIRECT_POST is on (the TikTok developer app has Direct Post and video.publish), and
+     - the post carries the choices the agent made in the scheduler's TikTok panel (payload.tiktok, mode 'direct'):
+       privacy (no default, one of the options TikTok returned), the interaction toggles, the commercial disclosure,
+       and that they saw the consent line.
+   Anything else -- the switch off, a post queued before the panel, a choice that does not validate -- goes to the inbox
+   exactly as before. TikTok's rules also forbid adding branding to the content, so a direct post sends the listing's
+   ORIGINAL photos, never the copies carrying the agency's mark (property_media.branded_url). */
+const TT_DIRECT_ON = () => /^(1|true|on|yes)$/i.test((Deno.env.get('TIKTOK_DIRECT_POST') ?? '').trim());
+const TT_PRIVACY = new Set(['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'FOLLOWER_OF_CREATOR', 'SELF_ONLY']);
+
+type TtDirect = {
+  privacy_level: string; disable_comment: boolean; disable_duet: boolean; disable_stitch: boolean;
+  brand_content_toggle: boolean; brand_organic_toggle: boolean; title: string | null;
+};
+
+function tiktokDirectChoice(post: QueuedPost): TtDirect | null {
+  if (!TT_DIRECT_ON()) return null;
+  const t = (post.payload && typeof post.payload === 'object' ? (post.payload as Record<string, any>).tiktok : null) as Record<string, any> | null;
+  if (!t || t.mode !== 'direct' || !t.consent_at) return null;
+  const privacy = String(t.privacy_level ?? '');
+  if (!TT_PRIVACY.has(privacy)) return null;
+  const branded = t.brand_content_toggle === true, own = t.brand_organic_toggle === true;
+  /* TikTok: branded content cannot be private. The panel already prevents it; refuse here too rather than send it. */
+  if (branded && privacy === 'SELF_ONLY') return null;
+  return {
+    privacy_level: privacy,
+    disable_comment: t.disable_comment !== false,
+    disable_duet: t.disable_duet !== false,
+    disable_stitch: t.disable_stitch !== false,
+    brand_content_toggle: branded,
+    brand_organic_toggle: own,
+    title: typeof t.title === 'string' && t.title.trim() ? t.title.trim() : null,
+  };
+}
+
+/** The listing's original files for any copy that carries the agency's mark. A lookup that fails leaves the list as it
+ *  was, and the post goes to the inbox rather than risk a branded direct post. */
+async function unbrandedMedia(post: QueuedPost): Promise<string[] | null> {
+  const urls = post.media_urls ?? [];
+  if (!post.property_id || !urls.length) return urls;
+  try {
+    const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    const { data, error } = await admin.from('property_media').select('url, branded_url').eq('property_id', post.property_id);
+    if (error) return null;
+    const orig = new Map<string, string>();
+    for (const m of (data ?? []) as Array<{ url: string; branded_url: string | null }>) {
+      if (m.branded_url) orig.set(m.branded_url.trim(), m.url);
+    }
+    return urls.map((u) => orig.get(String(u).trim()) ?? u);
+  } catch {
+    return null;
+  }
+}
+
 const tiktokAdapter: Adapter = async (post, conn) => {
+  let direct = tiktokDirectChoice(post);
+  let media = post.media_urls ?? [];
+  if (direct) {
+    const plain = await unbrandedMedia(post);
+    if (plain) media = plain; else direct = null;
+  }
+  const mediaPost = { ...post, media_urls: media };
+  if (direct) return tiktokDirectPost(mediaPost, conn, direct);
+  return tiktokInboxPost(post, conn);
+};
+
+const tiktokDirectPost = async (post: QueuedPost, conn: Connection, d: TtDirect): Promise<PublishResult> => {
+  const payload: Record<string, unknown> = {
+    ...buildPayload(post), account: conn.username, mode: 'DIRECT_POST', privacy: d.privacy_level,
+  };
+  const video = (post.media_urls ?? []).map(tiktokVideoUrl).find((u): u is string => Boolean(u)) ?? null;
+  const photos = video ? [] : (post.media_urls ?? [])
+    .map(tiktokPhotoUrl).filter((u): u is string => Boolean(u)).slice(0, 35);
+  if (!video && !photos.length) {
+    return { ok: false, postId: null, provider: 'tiktok', payload,
+             error: 'No photo or video TikTok can take: it only pulls media stored on Synapse.' };
+  }
+  const caption = (post.caption ?? '').trim();
+  const firstLine = (caption.split('\n').find((l) => l.trim()) ?? '').trim();
+  try {
+    const res = await fetch(TT_API + (video ? '/v2/post/publish/video/init/' : '/v2/post/publish/content/init/'), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify(video
+        ? {
+          post_info: {
+            title: (d.title ?? caption).slice(0, 2200), privacy_level: d.privacy_level,
+            disable_comment: d.disable_comment, disable_duet: d.disable_duet, disable_stitch: d.disable_stitch,
+            brand_content_toggle: d.brand_content_toggle, brand_organic_toggle: d.brand_organic_toggle,
+          },
+          source_info: { source: 'PULL_FROM_URL', video_url: video },
+        }
+        : {
+          post_info: {
+            title: (d.title ?? firstLine).slice(0, 90), description: caption.slice(0, 4000),
+            privacy_level: d.privacy_level, disable_comment: d.disable_comment, auto_add_music: true,
+            brand_content_toggle: d.brand_content_toggle, brand_organic_toggle: d.brand_organic_toggle,
+          },
+          source_info: { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: photos },
+          post_mode: 'DIRECT_POST',
+          media_type: 'PHOTO',
+        }),
+    });
+    const j = await res.json().catch(() => ({}));
+    const code = j && j.error ? String(j.error.code ?? '') : '';
+    if (!res.ok || code !== 'ok') {
+      return { ok: false, postId: null, provider: 'tiktok', payload,
+               error: 'TikTok refused: ' + ((j && j.error && (j.error.message || j.error.code)) || ('HTTP ' + res.status)) };
+    }
+    const publishId = j.data && j.data.publish_id ? String(j.data.publish_id) : null;
+    let st: Record<string, unknown> = {};
+    for (let i = 0; publishId && i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const sr = await fetch(TT_API + '/v2/post/publish/status/fetch/', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + conn.token, 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify({ publish_id: publishId }),
+      }).catch(() => null);
+      const sj = sr ? await sr.json().catch(() => ({})) : {};
+      st = (sj && sj.data) || {};
+      if (st.status && !String(st.status).startsWith('PROCESSING')) break;
+    }
+    const status = String(st.status ?? '');
+    if (status === 'FAILED') {
+      return { ok: false, postId: publishId, provider: 'tiktok',
+               payload: { ...payload, publish_id: publishId, tiktok_status: status, fail_reason: st.fail_reason ?? null },
+               error: tiktokFailReason(String(st.fail_reason ?? '')) };
+    }
+    return {
+      ok: true, postId: publishId, provider: 'tiktok', error: '',
+      payload: { ...payload, photos: photos.length, video: Boolean(video), publish_id: publishId,
+                 tiktok_status: status || 'unknown', delivered: 'profile',
+                 note: status === 'PUBLISH_COMPLETE'
+                   ? 'Posted on TikTok.'
+                   : 'TikTok is processing it; it can take a few minutes to appear on the profile.' },
+    };
+  } catch (err) {
+    return { ok: false, postId: null, provider: 'tiktok', payload,
+             error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+const tiktokInboxPost = async (post: QueuedPost, conn: Connection): Promise<PublishResult> => {
   const payload: Record<string, unknown> = {
     ...buildPayload(post), account: conn.username, mode: 'MEDIA_UPLOAD',
   };
