@@ -1092,8 +1092,27 @@ async function unbrandedMedia(post: QueuedPost): Promise<string[] | null> {
   }
 }
 
+/** The agency's own choice for this TikTok account (social_accounts.direct_post, default off). The account the post
+ *  names, else the agency's oldest TikTok -- the same default as everywhere else. Unknown counts as off: the inbox. */
+async function accountWantsDirect(post: QueuedPost): Promise<boolean> {
+  try {
+    const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    let q = admin.from('social_accounts').select('direct_post')
+      .eq('agency_id', post.agency_id).eq('platform', 'tiktok').eq('is_active', true).is('deleted_at', null)
+      .order('connected_at', { ascending: true }).limit(1);
+    if (post.social_account_id) q = q.eq('id', post.social_account_id);
+    const { data, error } = await q;
+    if (error) return false;
+    return Boolean((data ?? [])[0]?.direct_post);
+  } catch {
+    return false;
+  }
+}
+
 const tiktokAdapter: Adapter = async (post, conn) => {
   let direct = tiktokDirectChoice(post);
+  /* The agency switched direct posting off since this was scheduled: the inbox, as it now asks. */
+  if (direct && !(await accountWantsDirect(post))) direct = null;
   let media = post.media_urls ?? [];
   if (direct) {
     const plain = await unbrandedMedia(post);
