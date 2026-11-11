@@ -1115,7 +1115,8 @@ const tiktokDirectPost = async (post: QueuedPost, conn: Connection, d: TtDirect)
     return { ok: false, postId: null, provider: 'tiktok', payload,
              error: 'No photo or video TikTok can take: it only pulls media stored on Synapse.' };
   }
-  const caption = (post.caption ?? '').trim();
+  /* The agent's own wording from the TikTok panel (TikTok requires it to be editable), else the post's caption. */
+  const caption = (d.title ?? post.caption ?? '').trim();
   const firstLine = (caption.split('\n').find((l) => l.trim()) ?? '').trim();
   try {
     const res = await fetch(TT_API + (video ? '/v2/post/publish/video/init/' : '/v2/post/publish/content/init/'), {
@@ -1124,7 +1125,7 @@ const tiktokDirectPost = async (post: QueuedPost, conn: Connection, d: TtDirect)
       body: JSON.stringify(video
         ? {
           post_info: {
-            title: (d.title ?? caption).slice(0, 2200), privacy_level: d.privacy_level,
+            title: caption.slice(0, 2200), privacy_level: d.privacy_level,
             disable_comment: d.disable_comment, disable_duet: d.disable_duet, disable_stitch: d.disable_stitch,
             brand_content_toggle: d.brand_content_toggle, brand_organic_toggle: d.brand_organic_toggle,
           },
@@ -1132,7 +1133,7 @@ const tiktokDirectPost = async (post: QueuedPost, conn: Connection, d: TtDirect)
         }
         : {
           post_info: {
-            title: (d.title ?? firstLine).slice(0, 90), description: caption.slice(0, 4000),
+            title: firstLine.slice(0, 90), description: caption.slice(0, 4000),
             privacy_level: d.privacy_level, disable_comment: d.disable_comment, auto_add_music: true,
             brand_content_toggle: d.brand_content_toggle, brand_organic_toggle: d.brand_organic_toggle,
           },
