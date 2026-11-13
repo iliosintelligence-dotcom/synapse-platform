@@ -28,6 +28,9 @@
  * function has no identity to scope by.
  */
 
+/* PostPeer (2026-11-13): its key and API call, from postpeer-webhook's folder (see that file for why not _shared). */
+import { deliveryOf, pp, PP_NAME, ppKey } from '../postpeer-webhook/postpeer.ts';
+
 /* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
    more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
 const TRYPOST_URL = '';
@@ -83,6 +86,96 @@ function normalise(entry: Record<string, unknown>) {
 
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SB_URL = Deno.env.get('SUPABASE_URL') ?? '';
+
+/* ── PostPeer (2026-11-13) ───────────────────────────────────────────────
+   Posts published through PostPeer (provider 'postpeer', platform_post_id = PostPeer's post id).
+
+   Stats: one PostPeer analytics read per post, and each read costs a credit -- so a post is asked about once a day,
+   only once it is live, only for 30 days, at most ten a sweep. A read that fails still stamps metrics_at, so a post
+   PostPeer cannot answer for is not asked again every hour.
+
+   Delivery: the backstop for postpeer-webhook. A post still 'pending' is looked up (GET /posts/{id}) and settled to
+   live or failed the same way the webhook does. */
+async function sweepPostPeer(h: Record<string, string>): Promise<Record<string, unknown>> {
+  if (!ppKey()) return { skipped: 'not configured' };
+  const q = `${SB_URL}/rest/v1/social_posts`
+    + '?select=id,platform,platform_post_id,payload'
+    + '&deleted_at=is.null&status=eq.published&provider=eq.postpeer&platform_post_id=not.is.null'
+    + `&published_at=gt.${new Date(Date.now() - 30 * 864e5).toISOString()}`
+    + `&or=(metrics_at.is.null,metrics_at.lt.${new Date(Date.now() - 864e5).toISOString()})`
+    + '&order=metrics_at.nullsfirst&limit=10';
+  const res = await fetch(q, { headers: h });
+  if (!res.ok) return { error: `read failed ${res.status}` };
+  const rows = (await res.json()) as Array<{ id: string; platform: string; platform_post_id: string;
+    payload: Record<string, unknown> | null }>;
+  let updated = 0;
+  const results: unknown[] = [];
+  for (const row of rows ?? []) {
+    if (row.payload?.delivery !== 'live') { results.push({ id: row.id, skipped: 'not live yet' }); continue; }
+    const r = await pp('/analytics/?postId=' + encodeURIComponent(row.platform_post_id), { method: 'GET' });
+    const post = (r.body as Record<string, any>)?.post;
+    const want = PP_NAME[row.platform] ?? row.platform;
+    const m = (Array.isArray(post?.platforms) ? post.platforms : [])
+      .find((p: Record<string, any>) => p.platform === want)?.metrics ?? post?.aggregated ?? null;
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null);
+    const patch: Record<string, unknown> = { metrics_at: new Date().toISOString() };
+    if (r.status === 200 && m) {
+      Object.assign(patch, { views: n(m.views ?? m.impressions), likes: n(m.likes), comments: n(m.comments), shares: n(m.shares) });
+    }
+    const up = await fetch(`${SB_URL}/rest/v1/social_posts?id=eq.${row.id}`, {
+      method: 'PATCH', headers: { ...h, Prefer: 'return=minimal' }, body: JSON.stringify(patch),
+    });
+    if (up.ok && r.status === 200 && m) updated++;
+    results.push({ id: row.id, platform: row.platform, http: r.status, written: up.ok, ...patch });
+  }
+  return { looked_at: rows?.length ?? 0, updated, results };
+}
+
+async function confirmPostPeerDelivery(h: Record<string, string>, days: number, limit: number) {
+  if (!ppKey()) return { skipped: 'not configured' };
+  const q = `${SB_URL}/rest/v1/social_posts`
+    + '?select=id,platform,platform_post_id,payload'
+    + '&deleted_at=is.null&status=eq.published&provider=eq.postpeer&platform_post_id=not.is.null'
+    + `&published_at=gt.${new Date(Date.now() - days * 864e5).toISOString()}`
+    + `&order=published_at.asc&limit=${limit}`;
+  const res = await fetch(q, { headers: h });
+  if (!res.ok) return { error: `read failed ${res.status}` };
+  const rows = ((await res.json()) as Array<{ id: string; platform: string; platform_post_id: string;
+    payload: Record<string, unknown> | null }>)
+    .filter((r) => { const d = r.payload?.delivery; return d === undefined || d === null || d === 'pending'; });
+  let settled = 0;
+  const results: unknown[] = [];
+  for (const row of rows) {
+    const r = await pp('/posts/' + encodeURIComponent(row.platform_post_id), { method: 'GET' });
+    const post = (r.body as Record<string, any>)?.post;
+    if (r.status !== 200 || !post) { results.push({ id: row.id, http: r.status, asked: false }); continue; }
+    const want = PP_NAME[row.platform] ?? row.platform;
+    const entry = (Array.isArray(post.platforms) ? post.platforms : [])
+      .find((p: Record<string, any>) => p.platform === want) ?? (post.platforms ?? [])[0];
+    const status = String(entry?.status ?? post.status ?? '');
+    const delivery = deliveryOf(status);
+    const now = new Date().toISOString();
+    const base = { ...(row.payload ?? {}), postpeer_status: status || null, delivery_checked_at: now };
+    let patch: Record<string, unknown>;
+    if (delivery === 'live') {
+      const liveAt = entry?.publishedAt ?? null;
+      patch = { payload: { ...base, delivery: 'live', live_at: liveAt, live_url: entry?.platformPostUrl ?? null,
+                           native_post_id: entry?.platformPostId ?? null }, ...(liveAt ? { published_at: liveAt } : {}) };
+      settled++;
+    } else if (delivery === 'failed') {
+      const why = String(entry?.errorMessage ?? 'PostPeer could not publish this post.').slice(0, 500);
+      patch = { status: 'failed', failure_reason: why, payload: { ...base, delivery: 'failed', delivery_error: why } };
+      settled++;
+    } else {
+      patch = { payload: { ...base, delivery: 'pending' } };
+    }
+    const up = await fetch(`${SB_URL}/rest/v1/social_posts?id=eq.${row.id}`, {
+      method: 'PATCH', headers: { ...h, Prefer: 'return=minimal' }, body: JSON.stringify(patch),
+    });
+    results.push({ id: row.id, platform: row.platform, postpeer_status: status, delivery, written: up.ok });
+  }
+  return { looked_at: rows.length, settled, results };
+}
 
 /** Pull one labelled number out of trypost's metrics array. Labels are
  *  title-cased in their payload ('Likes', 'Comments', 'Shares') but matched
@@ -563,8 +656,10 @@ async function sweep(limit: number): Promise<Response> {
      provider asked a different way, and a trypost outage must not stop an
      agency's own numbers refreshing. */
   const meta = await sweepMeta(limit, h);
+  /* PostPeer posts, independently for the same reason (2026-11-13). */
+  const postpeer = await sweepPostPeer(h).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
   /* TryPost is disconnected: posts published straight to Meta (above) still refresh; there are no TryPost numbers to ask for. */
-  if (!TRYPOST_API_KEY) return json({ looked_at: 0, updated: 0, meta, trypost: 'disconnected' });
+  if (!TRYPOST_API_KEY) return json({ looked_at: 0, updated: 0, meta, postpeer, trypost: 'disconnected' });
 
   const res = await fetch(q, { headers: h });
   if (!res.ok) return json({ error: `read failed ${res.status}`, meta }, 502);
@@ -671,12 +766,15 @@ Deno.serve(async (req) => {
       return json({ error: 'The delivery check is for the scheduler, not for a session.' }, 403);
     }
     if (!SB_URL) return json({ error: 'Server misconfigured' }, 500);
-    if (!TRYPOST_API_KEY) return json({ checked: 0, note: 'TryPost has been disconnected; there is nothing of its to check.' });
     const limit = Math.min(Math.max(Number(body.limit) || 30, 1), 60);
     /* days widens the look-back for a one-off backfill; the schedule uses 3. */
     const days = Math.min(Math.max(Number(body.days) || 3, 1), 60);
     const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
-    return json(await confirmDelivery(limit, h, days));
+    /* PostPeer first, and whatever TryPost's state (2026-11-13). */
+    const postpeer = await confirmPostPeerDelivery(h, days, limit)
+      .catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
+    if (!TRYPOST_API_KEY) return json({ checked: 0, postpeer, note: 'TryPost has been disconnected; there is nothing of its to check.' });
+    return json({ ...(await confirmDelivery(limit, h, days)), postpeer });
   }
 
   if (!TRYPOST_API_KEY) {

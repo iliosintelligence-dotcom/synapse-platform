@@ -12,6 +12,9 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { creatorInfoFrom, TT_CREATOR_INFO } from './creator.ts';
+/* PostPeer (2026-11-13): a TikTok account connected through PostPeer is asked through PostPeer, which runs the same
+   creator_info query on its own approved app (GET /v1/tiktok/creator-info). */
+import { pp, ppKey } from '../postpeer-webhook/postpeer.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -62,7 +65,9 @@ async function tokenFor(admin: Admin, accountId: string, expiresAt: string | nul
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
-  if (!/^(1|true|on|yes)$/i.test((Deno.env.get('TIKTOK_DIRECT_POST') ?? '').trim())) return json({ enabled: false });
+  const ownDirect = /^(1|true|on|yes)$/i.test((Deno.env.get('TIKTOK_DIRECT_POST') ?? '').trim());
+  /* Exactly as before while PostPeer is not set up: off means { enabled: false }, asked of nobody. */
+  if (!ownDirect && !ppKey()) return json({ enabled: false });
 
   const url = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -84,13 +89,33 @@ Deno.serve(async (req: Request) => {
   /* The named account, else the agency's oldest TikTok -- the same default social-publish uses -- and always this
      agency's own. */
   let q = admin.from('social_accounts')
-    .select('id, token_expires_at, platform_username')
+    .select('id, token_expires_at, platform_username, auth_source, platform_account_id')
     .eq('agency_id', member.agency_id).eq('platform', 'tiktok').eq('is_active', true).is('deleted_at', null)
     .order('connected_at', { ascending: true }).limit(1);
   if (body.account_id) q = q.eq('id', String(body.account_id));
   const { data: accs } = await q;
-  const acc = (accs ?? [])[0] as { id: string; token_expires_at: string | null } | undefined;
+  const acc = (accs ?? [])[0] as {
+    id: string; token_expires_at: string | null; auth_source: string | null; platform_account_id: string;
+  } | undefined;
   if (!acc) return json({ ok: false, code: 'not_connected', reason: 'No TikTok account is connected. Connect one under Channels.' });
+
+  if (acc.auth_source === 'postpeer') {
+    if (!ppKey()) return json({ ok: false, code: 'postpeer', reason: 'PostPeer is not set up on this project.' });
+    const r = await pp('/tiktok/creator-info?accountId=' + encodeURIComponent(acc.platform_account_id), { method: 'GET' });
+    const b = r.body as Record<string, any>;
+    if (r.status === 0) return json({ ok: false, code: 'network', reason: 'Could not reach PostPeer. Try again shortly.' });
+    /* PostPeer's camelCase answer in TikTok's own words, so the same reading (and the same refusals) applies. */
+    const d = (b?.data && typeof b.data === 'object') ? b.data : {};
+    const asTikTok = b?.success === false || !b?.data
+      ? { error: { code: 'postpeer', message: String(b?.error ?? b?.message ?? ('HTTP ' + r.status)) } }
+      : { data: {
+          creator_nickname: d.creatorNickname, creator_username: d.creatorUsername, creator_avatar_url: d.creatorAvatarUrl,
+          privacy_level_options: d.privacyLevelOptions, comment_disabled: d.commentDisabled, duet_disabled: d.duetDisabled,
+          stitch_disabled: d.stitchDisabled, max_video_post_duration_sec: d.maxVideoPostDurationSec,
+        } };
+    return json({ ...creatorInfoFrom(r.status === 200 ? 200 : r.status, asTikTok), account_id: acc.id });
+  }
+  if (!ownDirect) return json({ enabled: false });
 
   const token = await tokenFor(admin, acc.id, acc.token_expires_at);
   if (!token) return json({ ok: false, code: 'token', reason: 'TikTok no longer accepts this connection. Reconnect TikTok under Channels.' });
