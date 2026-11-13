@@ -42,6 +42,8 @@
  *   The redirect is NOT a secret -- see the derivation in the handler.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+/* PostPeer's switches and API call (2026-11-13). Kept in postpeer-webhook's folder, not _shared/: see that file. */
+import { pp, ppConnectFor, ppError, PP_NAME, ppPlatforms } from '../postpeer-webhook/postpeer.ts';
 
 /* CORS is inlined rather than imported from _shared. This function is deployed
    as a single file, and social-publish already shipped with an import path
@@ -184,6 +186,167 @@ async function readState(state: string): Promise<Record<string, unknown> | null>
   } catch {
     return null;
   }
+}
+
+/* ── PostPeer (2026-11-13) ─────────────────────────────────────────────
+   For the platforms in POSTPEER_PLATFORMS, and the agencies in POSTPEER_AGENCIES, Connect goes through PostPeer's
+   already-approved apps instead of ours: PostPeer runs the platform's login and keeps the token; we keep only its
+   integration id (auth_source 'postpeer'). Anything not switched on falls through to our own flow, unchanged.
+
+   start: the agency's PostPeer profile (made once), then PostPeer's connect URL, which returns here with
+   action=postpeer-done and our signed state. done: read the profile's integrations for that platform and save the one
+   just connected. */
+const PP_STATE_TTL_MS = 30 * 60 * 1000;
+
+function selfUrl(): string {
+  return (Deno.env.get('SUPABASE_URL') ?? '') + '/functions/v1/social-connect';
+}
+
+/** The PostPeer start, or null when PostPeer is not switched on for this agency and platform (our own flow runs). */
+async function startPostPeer(req: Request, platform: string): Promise<Response | null> {
+  if (!ppPlatforms().has(platform)) return null;
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+  const host = Deno.env.get('SUPABASE_URL') ?? '';
+  const asUser = createClient(host, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: who } = await asUser.auth.getUser();
+  if (!who.user) return json({ error: 'Not authenticated' }, 401);
+  const admin = createClient(host, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const { data: membership } = await admin
+    .from('agency_members')
+    .select('agency_id, role')
+    .eq('profile_id', who.user.id)
+    .is('deleted_at', null)
+    .limit(1)
+    .maybeSingle();
+  if (!membership) return json({ error: 'You are not a member of an agency' }, 403);
+  if (!['agent', 'agency_admin', 'agency_owner'].includes(membership.role as string)) {
+    return json({ error: 'Only a member of this agency can connect a social account' }, 403);
+  }
+  if (!ppConnectFor(membership.agency_id as string, platform)) return null;
+
+  /* One PostPeer profile per agency, named by our id only: PostPeer needs no agency name to group connections. */
+  let profileId = '';
+  const { data: prof } = await admin.from('postpeer_profiles').select('profile_id')
+    .eq('agency_id', membership.agency_id).maybeSingle();
+  if (prof?.profile_id) {
+    profileId = String(prof.profile_id);
+  } else {
+    const made = await pp('/profiles/', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'synapse-' + membership.agency_id, description: 'Synapse agency' }),
+    });
+    profileId = String((made.body as Record<string, any>)?.profile?.id ?? '');
+    if (!profileId) {
+      console.error('social-connect: postpeer profile not created -- ' + ppError(made));
+      return json({ error: 'Could not start the connection (PostPeer: ' + ppError(made) + '). Try again shortly.' }, 502);
+    }
+    const { error: saveErr } = await admin.from('postpeer_profiles')
+      .insert({ agency_id: membership.agency_id, profile_id: profileId });
+    if (saveErr) {
+      /* Two clicks at once: the other one saved first. Use its profile; this one is left unused at PostPeer. */
+      const { data: again } = await admin.from('postpeer_profiles').select('profile_id')
+        .eq('agency_id', membership.agency_id).maybeSingle();
+      if (!again?.profile_id) return json({ error: 'Could not save the connection profile: ' + saveErr.message }, 500);
+      profileId = String(again.profile_id);
+    }
+  }
+
+  const state = await signState({
+    agency_id: membership.agency_id,
+    profile_id: who.user.id,
+    platform,
+    via: 'postpeer',
+    pp_profile: profileId,
+    started: Date.now(),
+    nonce: crypto.randomUUID(),
+    exp: Date.now() + PP_STATE_TTL_MS,
+  });
+  const back = selfUrl() + '?action=postpeer-done&state=' + encodeURIComponent(state);
+  const qs = new URLSearchParams({
+    profileId,
+    redirectUri: back,
+    cancelRedirectUri: back + '&cancelled=1',
+  });
+  const r = await pp('/connect/' + encodeURIComponent(PP_NAME[platform] ?? platform) + '?' + qs.toString(), { method: 'GET' });
+  const link = String((r.body as Record<string, any>)?.url ?? '');
+  if (!link) {
+    console.error('social-connect: postpeer connect url refused -- ' + ppError(r));
+    return json({ error: 'Could not start the connection (PostPeer: ' + ppError(r) + '). Try again shortly.' }, 502);
+  }
+  console.log('social-connect start: platform=' + platform + ' via postpeer, agency ' + membership.agency_id);
+  return json({ url: link, platform, via: 'postpeer', expiresInMinutes: PP_STATE_TTL_MS / 60000 });
+}
+
+/** Back from PostPeer: save the account that was just connected, then back to the portal. */
+async function finishPostPeer(url: URL): Promise<Response> {
+  const claims = await readState(url.searchParams.get('state') ?? '');
+  if (!claims || claims.via !== 'postpeer') {
+    return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+  }
+  const platform = String(claims.platform);
+  if (url.searchParams.get('cancelled')) {
+    return backToPortal('cancelled', 'The ' + platform + ' connection was cancelled.', {
+      facts: { where: 'postpeer', platform },
+    });
+  }
+  const qs = new URLSearchParams({ profileId: String(claims.pp_profile), platform: PP_NAME[platform] ?? platform, limit: '50' });
+  const r = await pp('/connect/integrations?' + qs.toString(), { method: 'GET' });
+  const list = ((r.body as Record<string, any>)?.integrations ?? []) as Array<Record<string, any>>;
+  if (r.status !== 200 || !Array.isArray(list)) {
+    return backToPortal('error', 'Connected at PostPeer, but the account could not be read back: ' + ppError(r));
+  }
+  /* The one just connected: created since this connection started. A reconnect of an account PostPeer already had
+     keeps its old date, so then it is the newest one -- never every account the profile ever held, which would
+     bring back ones the agency had removed here. */
+  const started = Number(claims.started) || 0;
+  const sorted = [...list].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? ''));
+  const fresh = sorted.filter((i) => Date.parse(i.createdAt ?? '') >= started - 60_000);
+  const picked = fresh.length ? fresh : sorted.slice(0, 1);
+  if (!picked.length) {
+    return backToPortal('error', 'PostPeer did not finish connecting ' + platform + '. Please try again.', {
+      facts: { where: 'postpeer', platform, integrations: list.length },
+    });
+  }
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const names: string[] = [];
+  for (const i of picked) {
+    const integrationId = String(i.id ?? '');
+    if (!integrationId) continue;
+    const name = String(i.username || i.displayName || platform + ' account').slice(0, 120);
+    /* TikTok through PostPeer posts directly (TikTok's audit is PostPeer's), so the account starts with direct posting
+       on: the scheduler then shows TikTok's required posting panel for it. */
+    const row = {
+      platform_username: name,
+      is_active: true,
+      last_error: null,
+      ...(platform === 'tiktok' ? { direct_post: true, scopes: ['video.upload', 'video.publish'] } : {}),
+    };
+    const { data: had } = await admin.from('social_accounts').select('id')
+      .eq('agency_id', claims.agency_id).eq('platform', platform).eq('platform_account_id', integrationId)
+      .is('deleted_at', null).maybeSingle();
+    const { error } = had?.id
+      ? await admin.from('social_accounts').update(row).eq('id', had.id)
+      : await admin.from('social_accounts').insert({
+          ...row,
+          agency_id: claims.agency_id,
+          platform,
+          platform_account_id: integrationId,
+          auth_source: 'postpeer',
+          connected_by: claims.profile_id,
+          ...(platform === 'tiktok' ? {} : { scopes: [] }),
+        });
+    if (error) {
+      console.error('social-connect: postpeer account not saved: ' + error.message);
+      return backToPortal('error', platform + ' connected, but the account could not be saved: ' + error.message);
+    }
+    names.push(name);
+  }
+  console.log('social-connect: ' + platform + ' via postpeer connected for agency ' + claims.agency_id);
+  return backToPortal(platform, names.join(', '));
 }
 
 /* ── TikTok ─────────────────────────────────────────────────────────────
@@ -1397,6 +1560,9 @@ Deno.serve(async (req: Request) => {
        is in the reply, so it needs no session. */
     if (url.searchParams.get('action') === 'status') {
       const tgBot = tgBotToken ? await telegramBotHandle(tgBotToken) : null;
+      /* PostPeer switched on for EVERY agency makes a platform connectable without our own app's keys. While it is on
+         for named agencies only, the answer stays our own app's, so no other agency is offered a button that fails. */
+      const viaPp = (p: string) => ppConnectFor('', p);
       return json({
         platforms: {
           /* `mode` is reported because ready:true is not the whole story on
@@ -1408,7 +1574,7 @@ Deno.serve(async (req: Request) => {
             ready: Boolean(appId && appSecret),
             mode: fbConfigId ? 'login-for-business' : 'classic',
           },
-          instagram: { ready: Boolean(igAppId && igAppSecret) },
+          instagram: { ready: Boolean(igAppId && igAppSecret) || viaPp('instagram') },
           /* Reported like the others so the portal can decline to offer a
              control it cannot deliver. `form` because the portal renders
              something different for it: there is no redirect to send anybody
@@ -1420,9 +1586,9 @@ Deno.serve(async (req: Request) => {
           telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
           /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
           /* `direct` only when TIKTOK_DIRECT_POST is on: the scheduler then shows TikTok's required post panel. */
-          tiktok: { ready: Boolean(ttKey && ttSecret), mode: TIKTOK_DIRECT ? 'direct' : 'inbox' },
+          tiktok: { ready: Boolean(ttKey && ttSecret) || viaPp('tiktok'), mode: TIKTOK_DIRECT ? 'direct' : 'inbox' },
           /* `video`: YouTube takes video only; a post of photos is refused until photos become a video. */
-          youtube: { ready: Boolean(ytClientId && ytClientSecret), mode: 'video' },
+          youtube: { ready: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'), mode: 'video' },
         },
       });
     }
@@ -1881,6 +2047,13 @@ Deno.serve(async (req: Request) => {
         error_description: cj.access_token ? null : (cj.error_description ?? null),
         redirect_uri: redirectUri,
       });
+    }
+
+    /* ── PostPeer, where it is switched on for this agency and platform (see startPostPeer) ── */
+    if (url.searchParams.get('action') === 'postpeer-done') return await finishPostPeer(url);
+    if (url.searchParams.get('action') === 'start') {
+      const viaPostPeer = await startPostPeer(req, (url.searchParams.get('platform') ?? 'instagram').toLowerCase());
+      if (viaPostPeer) return viaPostPeer;
     }
 
     /* ── step 1, TikTok: its own dialog and its own credentials ────────── */

@@ -25,6 +25,9 @@
  * Tokens come from social_account_token, never from the environment.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+/* PostPeer (2026-11-13): its switches and API call, from postpeer-webhook's folder (see that file for why not _shared).
+   Cross-folder imports bundle fine with `supabase functions deploy`, as the _shared imports elsewhere show. */
+import { mediaTypeOf, pp, ppError, PP_NAME, ppPublishOn } from '../postpeer-webhook/postpeer.ts';
 /* Inlined rather than imported from ../_shared. The import escapes the
    function's own directory, which the deploy flattens away -- the file simply
    is not there at runtime, and the failure is a cold-start module error rather
@@ -104,7 +107,7 @@ interface Connection {
    *  accept it. An Instagram account connected through Facebook Login holds
    *  the PAGE's token and must be addressed on graph.facebook.com;
    *  graph.instagram.com refuses it, and says only that it is invalid. */
-  authSource: 'instagram_login' | 'facebook_login';
+  authSource: 'instagram_login' | 'facebook_login' | 'postpeer';
 }
 
 type Adapter = (post: QueuedPost, conn: Connection) => Promise<PublishResult>;
@@ -1055,6 +1058,12 @@ type TtDirect = {
 
 function tiktokDirectChoice(post: QueuedPost): TtDirect | null {
   if (!TT_DIRECT_ON()) return null;
+  return tiktokPanelChoice(post);
+}
+
+/** What the scheduler's TikTok panel recorded on the post, checked -- whichever way it then goes out (our own TikTok app
+ *  behind TIKTOK_DIRECT_POST, or PostPeer). Null when the panel was not used or its choice is incomplete. */
+function tiktokPanelChoice(post: QueuedPost): TtDirect | null {
   const t = (post.payload && typeof post.payload === 'object' ? (post.payload as Record<string, any>).tiktok : null) as Record<string, any> | null;
   if (!t || t.mode !== 'direct' || !t.consent_at) return null;
   const privacy = String(t.privacy_level ?? '');
@@ -1423,6 +1432,111 @@ function remoteAdapter(slug: string): Adapter {
   };
 }
 
+/* ── PostPeer (2026-11-13) ───────────────────────────────────────────────
+   An account connected through PostPeer (auth_source 'postpeer') is published through PostPeer's API: one PostPeer
+   post per row of ours, published now (our own scheduler already decided "now"). platform_account_id is PostPeer's
+   integration id.
+
+   SENT IS NOT LIVE, as with TryPost: accepted means published with payload.delivery 'pending' (or 'live' when PostPeer
+   already finished), and postpeer-webhook / post-metrics' delivery check settle it to live or failed.
+
+   NEVER TWICE. The idempotency key is our row id, so a retry after a timeout gets PostPeer's first answer back rather
+   than a second post. When that first answer was a failure, PostPeer's own retry endpoint re-sends it. */
+function ppYoutubeTitle(caption: string): string {
+  const line = caption.split('\n').map((l) => l.trim())
+    .find((l) => l && !/^https?:\/\//i.test(l)) ?? '';
+  return line.replace(/[<>]/g, '').slice(0, 100).trim() || 'New listing';
+}
+
+const postpeerAdapter: Adapter = async (post, conn) => {
+  const platform = PP_NAME[post.platform] ?? post.platform;
+  const payload: Record<string, unknown> = {
+    ...buildPayload(post), via: 'postpeer', account: conn.username, integration_id: conn.platformAccountId,
+  };
+  const fail = (error: string) => ({ ok: false, postId: null, provider: 'postpeer', error, payload } as PublishResult);
+  if (!ppPublishOn(post.platform)) {
+    return fail('Posting to ' + post.platform + ' through PostPeer is paused (POSTPEER_PLATFORMS).');
+  }
+  if (!conn.platformAccountId) return fail('This PostPeer connection has no integration id. Connect it again.');
+
+  let media = post.media_urls ?? [];
+  const caption = post.platform === 'x' ? fitForX(post.caption ?? '') : (post.caption ?? '');
+  let specific: Record<string, unknown> = {};
+
+  if (post.platform === 'tiktok') {
+    /* TikTok's rules: the agent's own choices from the scheduler's panel, on media without our mark. No panel choice,
+       or the originals cannot be found -> a draft in the agent's TikTok inbox, as our own TikTok app does today. */
+    const choice = tiktokPanelChoice(post);
+    const plain = choice ? await unbrandedMedia(post) : null;
+    if (choice && plain) {
+      media = plain;
+      specific = {
+        privacyLevel: choice.privacy_level,
+        disableComment: choice.disable_comment,
+        disableDuet: choice.disable_duet,
+        disableStitch: choice.disable_stitch,
+        brandContentToggle: choice.brand_content_toggle,
+        brandOrganicToggle: choice.brand_organic_toggle,
+        draft: false,
+      };
+      payload.tiktok_mode = 'direct';
+    } else {
+      specific = { draft: true };
+      payload.tiktok_mode = 'draft';
+    }
+  } else if (post.platform === 'youtube') {
+    if (!media.some((u) => mediaTypeOf(u) === 'video')) {
+      return fail('YouTube takes video only. Add a video to this listing, or leave YouTube off this post.');
+    }
+    media = media.filter((u) => mediaTypeOf(u) === 'video').slice(0, 1);
+    specific = { title: ppYoutubeTitle(caption), visibility: 'public' };
+  } else if (post.platform === 'instagram') {
+    if (!media.length) return fail('Instagram needs at least one photo or video.');
+    if (post.post_format === 'story') specific = { contentType: 'story' };
+  }
+
+  const body = {
+    content: caption,
+    mediaItems: media.map((url) => ({ type: mediaTypeOf(url), url })),
+    platforms: [{
+      platform,
+      accountId: conn.platformAccountId,
+      ...(Object.keys(specific).length ? { platformSpecificData: specific } : {}),
+    }],
+    publishNow: true,
+    idempotencyKey: 'synapse-' + post.id,
+  };
+  Object.assign(payload, { postpeer_request: { ...body, content: undefined } });
+
+  let r = await pp('/posts/', { method: 'POST', body: JSON.stringify(body) }, 60000);
+  let b = r.body as Record<string, any>;
+  /* The key replayed an earlier failed attempt: ask PostPeer to send that one again. */
+  if ((r.status === 200 || r.status === 202) && b?.status === 'failed' && b?.postId && post.attempts > 1) {
+    r = await pp('/posts/' + encodeURIComponent(String(b.postId)) + '/retry', { method: 'POST' }, 60000);
+    b = r.body as Record<string, any>;
+    payload.postpeer_retried = true;
+  }
+  if (r.status === 402) return fail('PostPeer credits are used up. Add credits at postpeer.dev, then this post retries.');
+  if (r.status === 0) return fail('Could not reach PostPeer: ' + ppError(r));
+  if (r.status !== 200 && r.status !== 202) return fail('PostPeer refused the post: ' + ppError(r));
+
+  const entry = (Array.isArray(b?.platforms) ? b.platforms : [])[0] as Record<string, any> | undefined;
+  const status = String(b?.status ?? '');
+  const ppPostId = String(b?.postId ?? '');
+  payload.postpeer_post_id = ppPostId || null;
+  payload.postpeer_status = status || null;
+  if (status === 'failed' || entry?.success === false) {
+    return fail((entry?.error ? String(entry.error) : 'PostPeer could not publish this post.').slice(0, 500));
+  }
+  if (!ppPostId) return fail('PostPeer accepted the post but returned no id.');
+  if (status === 'published') {
+    Object.assign(payload, { delivery: 'live', live_at: new Date().toISOString(), live_url: entry?.platformPostUrl ?? null });
+  } else {
+    payload.delivery = 'pending';
+  }
+  return { ok: true, postId: ppPostId, provider: 'postpeer', error: '', payload };
+};
+
 const NATIVE_ADAPTERS: Record<string, Adapter> = {
   instagram: instagramAdapter,
   facebook: facebookAdapter,
@@ -1448,7 +1562,7 @@ function notConnected(platform: string): string {
  *  Order after that: our own adapter, then trypost, then an honest refusal.
  *  Native first is the point -- trypost is the fallback for what we have not
  *  written, never a replacement for what works. */
-function adapterFor(post: QueuedPost, live: boolean): Adapter {
+function adapterFor(post: QueuedPost, live: boolean, conn?: Connection): Adapter {
   if (post.dry_run || !live) return ADAPTERS.mock;
 
   /* THE LEG IS ASKED FIRST, because it answers whose account this is and the
@@ -1473,6 +1587,10 @@ function adapterFor(post: QueuedPost, live: boolean): Adapter {
     }
     return trypostAdapter;
   }
+
+  /* The agency's account says how it was connected: one connected through PostPeer is published through PostPeer,
+     whatever our own app for that platform can do. */
+  if (conn?.authSource === 'postpeer') return postpeerAdapter;
 
   const native = NATIVE_ADAPTERS[post.platform];
   if (native) return native;
@@ -1616,7 +1734,8 @@ async function loadConnections(
        return nothing and skip the row, which is how these would have looked
        "not connected" forever. */
     let token = '';
-    if (!viaTrypost(a.platform)) {
+    /* A PostPeer account has no token here either: PostPeer holds the login (auth_source 'postpeer'). */
+    if (!viaTrypost(a.platform) && a.auth_source !== 'postpeer') {
       const { data } = await admin.rpc('social_account_token', { p_account_id: a.id });
       if (!data) continue;  // connected but revoked: treated as not connected
       token = data as unknown as string;
@@ -1650,7 +1769,8 @@ async function loadConnections(
       accountId: a.id,
       /* Anything that is not explicitly facebook_login is the standalone
          flow, which is what every row predating the column is. */
-      authSource: a.auth_source === 'facebook_login' ? 'facebook_login' : 'instagram_login',
+      authSource: a.auth_source === 'facebook_login' ? 'facebook_login'
+        : a.auth_source === 'postpeer' ? 'postpeer' : 'instagram_login',
       platformAccountId: a.platform_account_id,
       username: a.platform_username,
       token,
@@ -1869,7 +1989,7 @@ Deno.serve(async (req: Request) => {
               : notConnected(post.platform),
             payload: buildPayload(post),
           }
-        : await adapterFor(post, live)(post, conn ?? NO_CONNECTION);
+        : await adapterFor(post, live, conn)(post, conn ?? NO_CONNECTION);
       if (post.dry_run || !live) dryRun++;
 
       if (result.ok) {

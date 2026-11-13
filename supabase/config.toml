@@ -45,6 +45,11 @@ verify_jwt = false
 [functions.paystack-webhook]
 verify_jwt = false
 
+# PostPeer calls it, with no Supabase session. It authenticates every
+# delivery by the X-PostPeer-Signature HMAC (POSTPEER_WEBHOOK_SECRET) instead.
+[functions.postpeer-webhook]
+verify_jwt = false
+
 [functions.push-key]
 verify_jwt = false
 
