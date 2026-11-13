@@ -107,6 +107,20 @@ export async function ppSignatureOk(
   return diff === 0;
 }
 
+/** The PostPeer return address social-connect gave as redirectUri: the state in the PATH (/postpeer-done/<state>,
+ *  /postpeer-cancel/<state>) so PostPeer's own query parameters can never corrupt it; or, for a link issued before
+ *  2026-11-13, the query (?action=postpeer-done&state=...), cut at the first character a state never has, in case a
+ *  "?" was appended into it. Null when the URL is not a PostPeer return. */
+export function postPeerReturn(url: URL): { state: string; cancelled: boolean } | null {
+  const m = url.pathname.match(/\/postpeer-(done|cancel)\/([A-Za-z0-9_.-]+)\/?$/);
+  if (m) return { state: m[2], cancelled: m[1] === 'cancel' };
+  if (url.searchParams.get('action') === 'postpeer-done') {
+    const raw = (url.searchParams.get('state') ?? '').split(/[^A-Za-z0-9_.-]/)[0];
+    return { state: raw, cancelled: Boolean(url.searchParams.get('cancelled')) };
+  }
+  return null;
+}
+
 /* ── X and LinkedIn (2026-11-13) ─────────────────────────────────────────── */
 
 /** Whose account a post goes out on (social-publish's onSynapseAccount). A Synapse-leg post: Synapse's. A platform in

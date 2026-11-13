@@ -1,8 +1,22 @@
 import { assertEquals } from 'jsr:@std/assert@1';
 import {
-  cleanupVerdict, deliveryOf, fitForLinkedIn, goesOnSynapseAccount, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk,
-  statsDays, statsDue,
+  cleanupVerdict, deliveryOf, fitForLinkedIn, goesOnSynapseAccount, mediaTypeOf, postPeerReturn, ppConnectFor, ppPublishOn,
+  ppSignatureOk, statsDays, statsDue,
 } from './postpeer.ts';
+
+Deno.test('return link: the state comes from the path, whatever PostPeer appends to the query', () => {
+  const st = 'eyJhIjoxfQ.SiG_-sig123';
+  const base = 'https://x.supabase.co/functions/v1/social-connect';
+  assertEquals(postPeerReturn(new URL(base + '/postpeer-done/' + st)), { state: st, cancelled: false });
+  assertEquals(postPeerReturn(new URL(base + '/postpeer-done/' + st + '?status=selection_required&platform=facebook&selectionToken=abc')),
+    { state: st, cancelled: false });
+  assertEquals(postPeerReturn(new URL(base + '/postpeer-cancel/' + st + '?error=access_denied')), { state: st, cancelled: true });
+  // an old query-style link with "?x=y" appended into the state still yields the clean state
+  assertEquals(postPeerReturn(new URL(base + '?action=postpeer-done&state=' + st + '?status=ok')), { state: st, cancelled: false });
+  assertEquals(postPeerReturn(new URL(base + '?action=postpeer-done&state=' + st + '&cancelled=1')), { state: st, cancelled: true });
+  assertEquals(postPeerReturn(new URL(base + '?action=status')), null);
+  assertEquals(postPeerReturn(new URL(base + '/postpeer-done/bad%20state')), null);
+});
 
 Deno.test('X: an agency with its own X posts there; without one it stays on Synapse\'s X, as before', () => {
   const only = new Set(['x']);
