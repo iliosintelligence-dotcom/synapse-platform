@@ -1,5 +1,30 @@
 import { assertEquals } from 'jsr:@std/assert@1';
-import { cleanupVerdict, deliveryOf, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk, statsDays, statsDue } from './postpeer.ts';
+import {
+  cleanupVerdict, deliveryOf, fitForLinkedIn, goesOnSynapseAccount, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk,
+  statsDays, statsDue,
+} from './postpeer.ts';
+
+Deno.test('X: an agency with its own X posts there; without one it stays on Synapse\'s X, as before', () => {
+  const only = new Set(['x']);
+  assertEquals(goesOnSynapseAccount('agency', 'x', null, false, only), true);    // no own X: Synapse's X (unchanged)
+  assertEquals(goesOnSynapseAccount('agency', 'x', null, true, only), false);    // own X connected: the agency's
+  assertEquals(goesOnSynapseAccount('synapse', 'x', null, true, only), true);    // a Synapse twin is always ours
+  assertEquals(goesOnSynapseAccount('agency', 'linkedin', null, false, only), false); // LinkedIn is always the agency's
+  assertEquals(goesOnSynapseAccount('agency', 'instagram', null, false, only), false);
+  assertEquals(goesOnSynapseAccount('agency', 'x', 'city-1', false, only), false);
+});
+
+Deno.test('LinkedIn: a caption within 3,000 is untouched; a longer one is cut at a word and keeps the link whole', () => {
+  const link = 'https://synapsecore.dev/s/AbC123';
+  assertEquals(fitForLinkedIn('Short post\n\n' + link), 'Short post\n\n' + link);
+  const long = 'word '.repeat(900) + '\n\n' + link;                         // ~4,500 characters
+  const out = fitForLinkedIn(long);
+  assertEquals(out.length <= 3000, true);
+  assertEquals(out.endsWith('\n\n' + link), true);
+  assertEquals(out.includes('…'), true);
+  assertEquals(/wor…|wo…|w…/.test(out), false);                             // never mid-word
+  assertEquals(fitForLinkedIn('x'.repeat(3500)).length <= 3000, true);       // no link: still within
+});
 
 const D = 864e5, T0 = Date.parse('2026-11-01T12:00:00Z');
 const at = (days: number) => new Date(T0 + days * D).toISOString();

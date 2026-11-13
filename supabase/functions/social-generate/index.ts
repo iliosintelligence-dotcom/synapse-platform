@@ -60,7 +60,8 @@ function json(body: unknown, status = 200): Response {
    ever been offered the chance to write. The twin reworded the caption meant
    for somewhere else, on the one platform where length is the whole craft.
    Adding it here is what lets the composer offer it. */
-const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp', 'x', 'telegram'] as const;
+/* LINKEDIN (2026-11-13): agencies can connect it (through PostPeer), so the composer offers it and this writes it. */
+const CHANNELS = ['instagram', 'tiktok', 'youtube', 'facebook', 'whatsapp', 'x', 'telegram', 'linkedin'] as const;
 type Channel = typeof CHANNELS[number];
 
 /* ── THE ANGLES ────────────────────────────────────────────────────────────
@@ -181,6 +182,9 @@ const AFFINITY: Record<Channel, string[]> = {
      in the feed, so the numbers lead: what it costs, what it is worth, what
      is in it. */
   telegram: ['cost', 'value', 'space', 'location', 'amenity', 'fit', 'trust', 'process', 'objection', 'moment', 'question'],
+  /* A professional reader -- investors, relocating staff, other agents -- who weighs value, process and trust before
+     the room count. */
+  linkedin: ['value', 'trust', 'process', 'location', 'cost', 'objection', 'fit', 'amenity', 'space', 'moment', 'question'],
 };
 
 /**
@@ -259,6 +263,11 @@ const VOICE: Record<Channel, string> = {
     + 'specs, the price and the charges, the next step. A "View this home" button '
     + 'sits under the post, so never write "link in bio", "DM us" or "click the '
     + 'link". No hashtags -- a channel is followed, not searched.',
+  /* LinkedIn shows about three lines before "see more", and its readers are buying a decision, not a mood. */
+  linkedin: 'professional and factual, UNDER 1,300 characters: a first line that '
+    + 'states the opportunity plainly (what, where, price), then the specs and charges '
+    + 'as short lines, then one sentence on why it is worth a look, then the next step. '
+    + 'No emoji beyond the line markers, at most three hashtags at the end.',
 };
 
 /* THE FORM THE MARKET ACTUALLY USES.
