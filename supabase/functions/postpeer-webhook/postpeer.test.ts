@@ -1,5 +1,35 @@
 import { assertEquals } from 'jsr:@std/assert@1';
-import { cleanupVerdict, deliveryOf, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk } from './postpeer.ts';
+import { cleanupVerdict, deliveryOf, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk, statsDays, statsDue } from './postpeer.ts';
+
+const D = 864e5, T0 = Date.parse('2026-11-01T12:00:00Z');
+const at = (days: number) => new Date(T0 + days * D).toISOString();
+
+Deno.test('stats default: one read, at 7 days (2 credits per post in all)', () => {
+  Deno.env.delete('POSTPEER_STATS_DAYS');
+  assertEquals(statsDays(), [7]);
+  assertEquals(statsDue(at(0), null, T0 + 6.9 * D), false);          // not yet
+  assertEquals(statsDue(at(0), null, T0 + 7 * D), true);             // day 7 reached, never read
+  assertEquals(statsDue(at(0), at(7.01), T0 + 8 * D), false);        // read after day 7: done
+  assertEquals(statsDue(at(0), at(7.01), T0 + 59 * D), false);       // and never again
+  assertEquals(statsDue(at(0), null, T0 + 61 * D), false);           // nothing after 60 days
+});
+
+Deno.test('stats on chosen days: each day read once, a missed day caught up once', () => {
+  Deno.env.set('POSTPEER_STATS_DAYS', '30, 1,7,3, 7');
+  assertEquals(statsDays(), [1, 3, 7, 30]);
+  assertEquals(statsDue(at(0), null, T0 + 1 * D), true);
+  assertEquals(statsDue(at(0), at(1.1), T0 + 2 * D), false);
+  assertEquals(statsDue(at(0), at(1.1), T0 + 3 * D), true);
+  assertEquals(statsDue(at(0), at(1.1), T0 + 8 * D), true);           // missed day 3, now past day 7: one read
+  assertEquals(statsDue(at(0), at(8), T0 + 9 * D), false);
+  Deno.env.set('POSTPEER_STATS_DAYS', 'none');
+  assertEquals(statsDays(), []);
+  assertEquals(statsDue(at(0), null, T0 + 10 * D), false);
+  Deno.env.set('POSTPEER_STATS_DAYS', 'rubbish');
+  assertEquals(statsDays(), [7]);                                    // unreadable: the safe default
+  Deno.env.delete('POSTPEER_STATS_DAYS');
+  assertEquals(statsDue(null, null, T0), false);
+});
 
 Deno.test('cleanup: an account connected again here is never removed at PostPeer', () => {
   assertEquals(cleanupVerdict(true, null, ''), { done: true, outcome: 'kept: connected again here', error: null });

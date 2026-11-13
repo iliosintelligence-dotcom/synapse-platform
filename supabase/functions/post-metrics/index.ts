@@ -29,7 +29,7 @@
  */
 
 /* PostPeer (2026-11-13): its key and API call, from postpeer-webhook's folder (see that file for why not _shared). */
-import { cleanupVerdict, deliveryOf, pp, ppError, PP_NAME, ppKey } from '../postpeer-webhook/postpeer.ts';
+import { cleanupVerdict, deliveryOf, pp, ppError, PP_NAME, ppKey, statsDays, statsDue } from '../postpeer-webhook/postpeer.ts';
 
 /* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
    more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
@@ -90,45 +90,58 @@ const SB_URL = Deno.env.get('SUPABASE_URL') ?? '';
 /* ── PostPeer (2026-11-13) ───────────────────────────────────────────────
    Posts published through PostPeer (provider 'postpeer', platform_post_id = PostPeer's post id).
 
-   Stats: one PostPeer analytics read per post, and each read costs a credit -- so a post is asked about once a day,
-   only once it is live, only for 30 days, at most ten a sweep. A read that fails still stamps metrics_at, so a post
-   PostPeer cannot answer for is not asked again every hour.
+   Stats: each PostPeer read costs a credit, so a live post is read only on the days POSTPEER_STATS_DAYS names after it
+   went live (default 7: one read; statsDue), at most ten a sweep. Only numbers PostPeer actually gave are
+   written: a figure it leaves out keeps the last one we had. A read that reached PostPeer marks that point done even
+   if it had no numbers (so it is not paid for again every hour); one that never reached PostPeer, or was refused for
+   lack of credits, is tried again next sweep.
 
    Delivery: the backstop for postpeer-webhook. A post still 'pending' is looked up (GET /posts/{id}) and settled to
    live or failed the same way the webhook does. */
 async function sweepPostPeer(h: Record<string, string>): Promise<Record<string, unknown>> {
   if (!ppKey()) return { skipped: 'not configured' };
+  if (!statsDays().length) return { skipped: 'stats switched off (POSTPEER_STATS_DAYS=none)' };
+  const now = Date.now();
+  /* Candidates: live PostPeer posts between 1 and 60 days old. Which of them are due is statsDue's call. */
   const q = `${SB_URL}/rest/v1/social_posts`
-    + '?select=id,platform,platform_post_id,payload'
+    + '?select=id,platform,platform_post_id,published_at,metrics_at'
     + '&deleted_at=is.null&status=eq.published&provider=eq.postpeer&platform_post_id=not.is.null'
-    + `&published_at=gt.${new Date(Date.now() - 30 * 864e5).toISOString()}`
-    + `&or=(metrics_at.is.null,metrics_at.lt.${new Date(Date.now() - 864e5).toISOString()})`
-    + '&order=metrics_at.nullsfirst&limit=10';
+    + '&payload->>delivery=eq.live'
+    + `&published_at=gt.${new Date(now - 60 * 864e5).toISOString()}`
+    + `&published_at=lt.${new Date(now - 864e5).toISOString()}`
+    + '&order=published_at.asc&limit=500';
   const res = await fetch(q, { headers: h });
   if (!res.ok) return { error: `read failed ${res.status}` };
-  const rows = (await res.json()) as Array<{ id: string; platform: string; platform_post_id: string;
-    payload: Record<string, unknown> | null }>;
+  const all = (await res.json()) as Array<{ id: string; platform: string; platform_post_id: string;
+    published_at: string | null; metrics_at: string | null }>;
+  const rows = (all ?? []).filter((r) => statsDue(r.published_at, r.metrics_at, now)).slice(0, 10);
   let updated = 0;
   const results: unknown[] = [];
-  for (const row of rows ?? []) {
-    if (row.payload?.delivery !== 'live') { results.push({ id: row.id, skipped: 'not live yet' }); continue; }
+  for (const row of rows) {
     const r = await pp('/analytics/?postId=' + encodeURIComponent(row.platform_post_id), { method: 'GET' });
+    if (r.status === 0 || r.status === 402 || r.status === 429 || r.status >= 500) {
+      /* Never reached PostPeer, out of credits, or PostPeer is struggling: leave it due, ask again next sweep. */
+      results.push({ id: row.id, platform: row.platform, http: r.status, retry: true });
+      if (r.status === 402) break;   // no credits: the rest would be refused too
+      continue;
+    }
     const post = (r.body as Record<string, any>)?.post;
     const want = PP_NAME[row.platform] ?? row.platform;
     const m = (Array.isArray(post?.platforms) ? post.platforms : [])
       .find((p: Record<string, any>) => p.platform === want)?.metrics ?? post?.aggregated ?? null;
-    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null);
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : undefined);
     const patch: Record<string, unknown> = { metrics_at: new Date().toISOString() };
     if (r.status === 200 && m) {
-      Object.assign(patch, { views: n(m.views ?? m.impressions), likes: n(m.likes), comments: n(m.comments), shares: n(m.shares) });
+      const figures = { views: n(m.views ?? m.impressions), likes: n(m.likes), comments: n(m.comments), shares: n(m.shares) };
+      for (const [k, v] of Object.entries(figures)) if (v !== undefined) patch[k] = v;
     }
     const up = await fetch(`${SB_URL}/rest/v1/social_posts?id=eq.${row.id}`, {
       method: 'PATCH', headers: { ...h, Prefer: 'return=minimal' }, body: JSON.stringify(patch),
     });
-    if (up.ok && r.status === 200 && m) updated++;
+    if (up.ok && Object.keys(patch).length > 1) updated++;
     results.push({ id: row.id, platform: row.platform, http: r.status, written: up.ok, ...patch });
   }
-  return { looked_at: rows?.length ?? 0, updated, results };
+  return { candidates: all?.length ?? 0, due: rows.length, updated, results };
 }
 
 /* ── PostPeer: remove a disconnected account's login at PostPeer (2026-11-13) ──

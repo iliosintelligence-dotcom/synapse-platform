@@ -102,7 +102,33 @@ export async function ppSignatureOk(
   return diff === 0;
 }
 
-export type CleanupVerdict = { done: boolean; outcome: string | null; error: string | null };
+/* ── views and likes: when a PostPeer post is asked about ──────────────────
+   Posting costs 1 credit; every stats read costs 1 more. So a post is read only at the days in POSTPEER_STATS_DAYS
+   after it went live -- default "7": one read, 2 credits per post in all. "1,3,7,30" reads four times; "none" never
+   (views and likes then stay empty for PostPeer posts). Each day is read once: the post is due when the latest day it
+   has reached is later than its last read. Nothing after 60 days. A secret, so it changes without a deploy. */
+const DAY_MS = 864e5;
+
+export function statsDays(): number[] {
+  const raw = (Deno.env.get('POSTPEER_STATS_DAYS') ?? '7').trim().toLowerCase();
+  if (raw === 'none' || raw === '0') return [];
+  const days = raw.split(',').map((s) => Number(s.trim())).filter((d) => Number.isFinite(d) && d >= 1 && d <= 60);
+  return days.length ? [...new Set(days)].sort((a, b) => a - b) : [7];
+}
+
+export function statsDue(publishedAt: string | null, metricsAt: string | null, now = Date.now(), days = statsDays()): boolean {
+  const pub = Date.parse(publishedAt ?? '');
+  if (!Number.isFinite(pub)) return false;
+  const age = now - pub;
+  if (age > 60 * DAY_MS) return false;
+  const reached = days.filter((d) => age >= d * DAY_MS);
+  if (!reached.length) return false;
+  const point = pub + reached[reached.length - 1] * DAY_MS;
+  const read = metricsAt ? Date.parse(metricsAt) : NaN;
+  return !Number.isFinite(read) || read < point;
+}
+
+export type CleanupVerdict ={ done: boolean; outcome: string | null; error: string | null };
 
 /** What removing a disconnected account at PostPeer came to (post-metrics, action postpeer-cleanup). Connected again
  *  here: left alone. Removed, or already gone: done. Anything else: try again later, with the reason. */
