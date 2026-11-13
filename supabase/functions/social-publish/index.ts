@@ -1493,6 +1493,11 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   } else if (post.platform === 'instagram') {
     if (!media.length) return fail('Instagram needs at least one photo or video.');
     if (post.post_format === 'story') specific = { contentType: 'story' };
+  } else if (post.platform === 'facebook' && post.post_format === 'story') {
+    /* A Facebook Page Story takes exactly one photo or video. */
+    if (!media.length) return fail('A Facebook Story needs a photo or video.');
+    media = media.slice(0, 1);
+    specific = { contentType: 'story' };
   }
 
   const body = {
