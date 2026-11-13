@@ -1589,6 +1589,9 @@ Deno.serve(async (req: Request) => {
           tiktok: { ready: Boolean(ttKey && ttSecret) || viaPp('tiktok'), mode: TIKTOK_DIRECT ? 'direct' : 'inbox' },
           /* `video`: YouTube takes video only; a post of photos is refused until photos become a video. */
           youtube: { ready: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'), mode: 'video' },
+          /* Through PostPeer only (2026-11-13): ready exactly when POSTPEER_PLATFORMS names them for every agency. */
+          x: { ready: viaPp('x') },
+          linkedin: { ready: viaPp('linkedin') },
         },
       });
     }

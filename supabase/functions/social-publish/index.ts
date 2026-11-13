@@ -27,7 +27,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer (2026-11-13): its switches and API call, from postpeer-webhook's folder (see that file for why not _shared).
    Cross-folder imports bundle fine with `supabase functions deploy`, as the _shared imports elsewhere show. */
-import { mediaTypeOf, pp, ppError, PP_NAME, ppPublishOn } from '../postpeer-webhook/postpeer.ts';
+import {
+  fitForLinkedIn, goesOnSynapseAccount, mediaTypeOf, pp, ppError, PP_NAME, ppPublishOn,
+} from '../postpeer-webhook/postpeer.ts';
 /* Inlined rather than imported from ../_shared. The import escapes the
    function's own directory, which the deploy flattens away -- the file simply
    is not there at runtime, and the failure is a cold-start module error rather
@@ -594,10 +596,16 @@ const TRYPOST_CONTENT_TYPE: Record<string, string> = {
    picks X in the composer is published on Synapse's X through trypost, while
    the row stays the agency's: its short link, and so every tap and enquiry it
    brings, is still credited to them. When agencies can connect X, take it out
-   of this set. */
+   of this set.
+
+   AGENCIES CAN NOW CONNECT X (2026-11-13, through PostPeer). An agency that has its own X connected is published there;
+   one that has not still goes to Synapse's X, exactly as before. A post that names an X account no longer connected
+   stays the agency's and fails as "not connected" -- never quietly onto Synapse's X instead. */
 const SYNAPSE_ACCOUNT_ONLY = new Set(['x']);
-function onSynapseAccount(p: QueuedPost): boolean {
-  return p.leg === 'synapse' || (SYNAPSE_ACCOUNT_ONLY.has(p.platform) && !p.city_channel_id);
+function onSynapseAccount(p: QueuedPost, agencyConns?: Record<string, Connection>): boolean {
+  /* loadConnections keys the agency's first active account on each platform under the platform's name. */
+  return goesOnSynapseAccount(p.leg, p.platform, p.city_channel_id ?? null,
+    Boolean(agencyConns && agencyConns[p.platform]), SYNAPSE_ACCOUNT_ONLY);
 }
 
 /** True when this platform should go out through trypost ON THE AGENCY LEG:
@@ -1460,7 +1468,8 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   if (!conn.platformAccountId) return fail('This PostPeer connection has no integration id. Connect it again.');
 
   let media = post.media_urls ?? [];
-  const caption = post.platform === 'x' ? fitForX(post.caption ?? '') : (post.caption ?? '');
+  const caption = post.platform === 'x' ? fitForX(post.caption ?? '')
+    : post.platform === 'linkedin' ? fitForLinkedIn(post.caption ?? '') : (post.caption ?? '');
   let specific: Record<string, unknown> = {};
 
   if (post.platform === 'tiktok') {
@@ -1493,6 +1502,17 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   } else if (post.platform === 'instagram') {
     if (!media.length) return fail('Instagram needs at least one photo or video.');
     if (post.post_format === 'story') specific = { contentType: 'story' };
+  } else if (post.platform === 'x' || post.platform === 'linkedin') {
+    /* One video, or photos only: X takes 4 photos, LinkedIn 9 (PostPeer's platform pages, read 2026-11-13). */
+    const vids = media.filter((u) => mediaTypeOf(u) === 'video');
+    media = vids.length ? vids.slice(0, 1) : media.slice(0, post.platform === 'x' ? 4 : 9);
+    if (post.platform === 'linkedin') {
+      specific = { visibility: 'PUBLIC' };
+      /* LinkedIn does not turn a link in the text into a preview; with no photo or video, the listing link becomes
+         the post's link card instead. */
+      const link = (caption.match(/https?:\/\/[^\s]+/g) ?? []).find((u) => /synapsecore\.dev\/s\//.test(u));
+      if (!media.length && link) specific.articleUrl = link;
+    }
   } else if (post.platform === 'facebook' && post.post_format === 'story') {
     /* A Facebook Page Story takes exactly one photo or video. */
     if (!media.length) return fail('A Facebook Story needs a photo or video.');
@@ -1557,8 +1577,9 @@ const ADAPTERS: Record<string, Adapter> = {
 
 /** No connection for this platform. Distinct from "not implemented": the
  *  adapter exists and works, nobody has connected an account to it. */
+const PLATFORM_NAME: Record<string, string> = { x: 'X', linkedin: 'LinkedIn', youtube: 'YouTube', tiktok: 'TikTok' };
 function notConnected(platform: string): string {
-  return 'No ' + platform + ' account is connected to this agency. Connect one in the portal, then publish.';
+  return 'No ' + (PLATFORM_NAME[platform] ?? platform) + ' account is connected to this agency. Connect one in the portal, then publish.';
 }
 
 /** A dry run always goes to the mock, whatever the platform -- that is what
@@ -1567,7 +1588,7 @@ function notConnected(platform: string): string {
  *  Order after that: our own adapter, then trypost, then an honest refusal.
  *  Native first is the point -- trypost is the fallback for what we have not
  *  written, never a replacement for what works. */
-function adapterFor(post: QueuedPost, live: boolean, conn?: Connection): Adapter {
+function adapterFor(post: QueuedPost, live: boolean, conn?: Connection, ours = onSynapseAccount(post)): Adapter {
   if (post.dry_run || !live) return ADAPTERS.mock;
 
   /* THE LEG IS ASKED FIRST, because it answers whose account this is and the
@@ -1577,8 +1598,8 @@ function adapterFor(post: QueuedPost, live: boolean, conn?: Connection): Adapter
      synapse-leg Instagram post to the Meta adapter, which would then look for
      an OAuth token in social_accounts that does not and should not exist.
      onSynapseAccount also brings an agency's X post here: see
-     SYNAPSE_ACCOUNT_ONLY. */
-  if (onSynapseAccount(post)) {
+     SYNAPSE_ACCOUNT_ONLY. `ours` is decided by the caller, which knows the agency's own connections. */
+  if (ours) {
     /* Synapse on Telegram is our own bot, not trypost: a city channel is a
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
@@ -1935,7 +1956,7 @@ Deno.serve(async (req: Request) => {
        Synapse's channels are global, so this is not keyed by agency -- but a
        batch of nothing but agency posts should still not read the table. */
     let synapseChannels: Record<string, Connection> = {};
-    if (live && rows.some((r) => !r.dry_run && onSynapseAccount(r) && !r.city_channel_id)) {
+    if (live && rows.some((r) => !r.dry_run && onSynapseAccount(r, connByAgency[r.agency_id]) && !r.city_channel_id)) {
       synapseChannels = await loadSynapseChannels(admin);
     }
     let cityChannels: Record<string, Connection> = {};
@@ -1964,9 +1985,11 @@ Deno.serve(async (req: Request) => {
          drops into the no-connection branch below -- deliberately. Quietly
          publishing to a DIFFERENT account because the chosen one was
          disconnected is the one outcome nobody asked for. */
+      /* Whose account, decided once with the agency's own connections in view (an agency's own X: SYNAPSE_ACCOUNT_ONLY). */
+      const ours = onSynapseAccount(post, connByAgency[post.agency_id]);
       const conn = rehearsal
         ? NO_CONNECTION
-        : onSynapseAccount(post)
+        : ours
           ? (post.city_channel_id ? cityChannels[post.city_channel_id] : synapseChannels[post.platform])
           : (connByAgency[post.agency_id] ?? {})[post.social_account_id || post.platform];
 
@@ -1975,16 +1998,18 @@ Deno.serve(async (req: Request) => {
          is reported without an attempt, so a missing connection never burns a
          retry or waits out a backoff. viaTrypost and the synapse leg are
          included for the same reason. */
-      const needsAccount = onSynapseAccount(post)
+      const needsAccount = ours
         || Boolean(NATIVE_ADAPTERS[post.platform])
-        || viaTrypost(post.platform);
+        || viaTrypost(post.platform)
+        /* A platform only PostPeer reaches (LinkedIn, an agency's own X): no account means "connect one", not "unsupported". */
+        || ppPublishOn(post.platform);
       const result: PublishResult = (!rehearsal && !conn && needsAccount)
         ? {
             ok: false, postId: null, provider: post.platform,
             /* A missing Synapse channel is OUR configuration problem, not the
                agency's. Telling them to go and connect an account they do not
                own would be a dead end and would read as their fault. */
-            error: onSynapseAccount(post)
+            error: ours
               ? (post.city_channel_id
                   ? 'This Synapse city channel is not active: the bot is not a posting '
                     + 'admin of it, or it has no chat id yet (city_channels).'
@@ -1994,7 +2019,7 @@ Deno.serve(async (req: Request) => {
               : notConnected(post.platform),
             payload: buildPayload(post),
           }
-        : await adapterFor(post, live, conn)(post, conn ?? NO_CONNECTION);
+        : await adapterFor(post, live, conn, ours)(post, conn ?? NO_CONNECTION);
       if (post.dry_run || !live) dryRun++;
 
       if (result.ok) {

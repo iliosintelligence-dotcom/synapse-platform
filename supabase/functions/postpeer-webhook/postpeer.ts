@@ -107,6 +107,31 @@ export async function ppSignatureOk(
   return diff === 0;
 }
 
+/* ── X and LinkedIn (2026-11-13) ─────────────────────────────────────────── */
+
+/** Whose account a post goes out on (social-publish's onSynapseAccount). A Synapse-leg post: Synapse's. A platform in
+ *  `synapseOnly` (X): Synapse's -- unless the agency has its own account on it connected, then the agency's. */
+export function goesOnSynapseAccount(
+  leg: string, platform: string, cityChannelId: string | null, agencyHasOwn: boolean, synapseOnly: Set<string>,
+): boolean {
+  if (leg === 'synapse') return true;
+  if (!synapseOnly.has(platform) || cityChannelId) return false;
+  return !agencyHasOwn;
+}
+
+/** LinkedIn takes 3,000 characters. A longer caption is cut at a word, and the listing link is kept whole at the end. */
+export function fitForLinkedIn(caption: string, max = 3000): string {
+  const text = (caption ?? '').trim();
+  if (text.length <= max) return text;
+  const link = (text.match(/https?:\/\/[^\s]+/g) ?? []).find((u) => /synapsecore\.dev\/s\//.test(u)) ?? '';
+  const body = link ? text.split(link).join(' ').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim() : text;
+  const room = max - (link ? link.length + 2 : 0) - 1;
+  let cut = body.slice(0, room);
+  const space = cut.lastIndexOf(' ');
+  if (space > room * 0.8) cut = cut.slice(0, space);
+  return (cut.trim() + '…' + (link ? '\n\n' + link : '')).trim();
+}
+
 /* ── views and likes: when a PostPeer post is asked about ──────────────────
    Posting costs 1 credit; every stats read costs 1 more. So a post is read only at the days in POSTPEER_STATS_DAYS
    after it went live -- default "7": one read, 2 credits per post in all. "1,3,7,30" reads four times; "none" never
