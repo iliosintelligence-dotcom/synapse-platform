@@ -146,7 +146,8 @@ async function sweepPostPeer(h: Record<string, string>): Promise<Record<string, 
 
 /* ── PostPeer: remove a disconnected account's login at PostPeer (2026-11-13) ──
    postpeer_cleanup is filled by a trigger when a PostPeer account is disconnected, switched off or deleted here. Each
-   entry is removed at PostPeer (DELETE /connect/integrations/{id}, no credits) -- unless the same integration is
+   entry is removed at PostPeer (DELETE /connect/integrations/{id}, no credits, sent without a body or JSON
+   Content-Type, which PostPeer refuses on a DELETE) -- unless the same integration is
    connected again here meanwhile, which is then left alone. Already gone at PostPeer counts as done. Any other
    answer is retried on the next run, five times at most, with the reason kept. */
 async function cleanupPostPeer(h: Record<string, string>, limit: number) {

@@ -60,7 +60,12 @@ export async function pp(path: string, init: RequestInit = {}, timeoutMs = 25000
     const r = await fetch(PP_API + path, {
       ...init,
       signal: ctl.signal,
-      headers: { 'x-access-key': ppKey(), 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+      /* Content-Type only with a body: PostPeer refuses a bodiless DELETE that claims to carry JSON (HTTP 400). */
+      headers: {
+        'x-access-key': ppKey(),
+        ...(init.body != null ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers ?? {}),
+      },
     });
     const body = await r.json().catch(() => ({}));
     return { status: r.status, body: (body && typeof body === 'object') ? body as Record<string, unknown> : {} };
