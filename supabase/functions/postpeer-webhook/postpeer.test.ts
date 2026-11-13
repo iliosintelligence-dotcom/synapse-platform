@@ -1,5 +1,20 @@
 import { assertEquals } from 'jsr:@std/assert@1';
-import { deliveryOf, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk } from './postpeer.ts';
+import { cleanupVerdict, deliveryOf, mediaTypeOf, ppConnectFor, ppPublishOn, ppSignatureOk } from './postpeer.ts';
+
+Deno.test('cleanup: an account connected again here is never removed at PostPeer', () => {
+  assertEquals(cleanupVerdict(true, null, ''), { done: true, outcome: 'kept: connected again here', error: null });
+  assertEquals(cleanupVerdict(true, 500, 'x').done, true);
+});
+
+Deno.test('cleanup: removed or already gone is done; anything else is retried with the reason', () => {
+  assertEquals(cleanupVerdict(false, 200, '').outcome, 'removed at PostPeer');
+  assertEquals(cleanupVerdict(false, 204, '').outcome, 'removed at PostPeer');
+  assertEquals(cleanupVerdict(false, 404, 'Not found').outcome, 'already gone at PostPeer');
+  assertEquals(cleanupVerdict(false, 500, 'boom'), { done: false, outcome: null, error: 'HTTP 500: boom' });
+  assertEquals(cleanupVerdict(false, 401, 'bad key').done, false);
+  assertEquals(cleanupVerdict(false, null, 'could not reach PostPeer'),
+    { done: false, outcome: null, error: 'could not reach PostPeer' });
+});
 
 const enc = new TextEncoder();
 async function sign(secret: string, ts: string, raw: string): Promise<string> {

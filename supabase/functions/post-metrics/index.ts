@@ -29,7 +29,7 @@
  */
 
 /* PostPeer (2026-11-13): its key and API call, from postpeer-webhook's folder (see that file for why not _shared). */
-import { deliveryOf, pp, PP_NAME, ppKey } from '../postpeer-webhook/postpeer.ts';
+import { cleanupVerdict, deliveryOf, pp, ppError, PP_NAME, ppKey } from '../postpeer-webhook/postpeer.ts';
 
 /* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
    more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
@@ -129,6 +129,46 @@ async function sweepPostPeer(h: Record<string, string>): Promise<Record<string, 
     results.push({ id: row.id, platform: row.platform, http: r.status, written: up.ok, ...patch });
   }
   return { looked_at: rows?.length ?? 0, updated, results };
+}
+
+/* ── PostPeer: remove a disconnected account's login at PostPeer (2026-11-13) ──
+   postpeer_cleanup is filled by a trigger when a PostPeer account is disconnected, switched off or deleted here. Each
+   entry is removed at PostPeer (DELETE /connect/integrations/{id}, no credits) -- unless the same integration is
+   connected again here meanwhile, which is then left alone. Already gone at PostPeer counts as done. Any other
+   answer is retried on the next run, five times at most, with the reason kept. */
+async function cleanupPostPeer(h: Record<string, string>, limit: number) {
+  if (!ppKey()) return { skipped: 'not configured' };
+  const res = await fetch(`${SB_URL}/rest/v1/postpeer_cleanup`
+    + `?select=id,integration_id,attempts&done_at=is.null&attempts=lt.5&order=created_at.asc&limit=${limit}`,
+    { headers: h });
+  if (!res.ok) return { error: `read failed ${res.status}` };
+  const rows = (await res.json()) as Array<{ id: number; integration_id: string; attempts: number }>;
+  const results: unknown[] = [];
+  for (const row of rows ?? []) {
+    /* Connected again here since it was queued (same PostPeer integration, live row): removing it would cut the new
+       connection. */
+    const live = await fetch(`${SB_URL}/rest/v1/social_accounts?select=id&auth_source=eq.postpeer`
+      + `&platform_account_id=eq.${encodeURIComponent(row.integration_id)}&deleted_at=is.null&is_active=is.true&limit=1`,
+      { headers: h });
+    if (!live.ok) { results.push({ id: row.id, skipped: 'could not check' }); continue; }
+    const stillConnected = ((await live.json()) as unknown[]).length > 0;
+    let status: number | null = null;
+    let said = '';
+    if (!stillConnected) {
+      const r = await pp('/connect/integrations/' + encodeURIComponent(row.integration_id), { method: 'DELETE' });
+      status = r.status || null;
+      said = r.status === 0 ? 'could not reach PostPeer' : ppError(r);
+    }
+    const v = cleanupVerdict(stillConnected, status, said);
+    const patch = v.done
+      ? { done_at: new Date().toISOString(), outcome: v.outcome, last_error: null }
+      : { attempts: row.attempts + 1, last_error: (v.error ?? '').slice(0, 300) };
+    const up = await fetch(`${SB_URL}/rest/v1/postpeer_cleanup?id=eq.${row.id}`, {
+      method: 'PATCH', headers: { ...h, Prefer: 'return=minimal' }, body: JSON.stringify(patch),
+    });
+    results.push({ id: row.id, http: status, ...patch, written: up.ok });
+  }
+  return { looked_at: rows?.length ?? 0, results };
 }
 
 async function confirmPostPeerDelivery(h: Record<string, string>, days: number, limit: number) {
@@ -756,6 +796,19 @@ Deno.serve(async (req) => {
     }
     const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 50);
     return await sweep(limit);
+  }
+
+  /* Remove disconnected PostPeer logins at PostPeer (drain_postpeer_cleanup). Scheduler only: it reads and writes
+     across agencies. */
+  if (body.action === 'postpeer-cleanup') {
+    const bearer = auth.replace(/^Bearer\s+/i, '').trim();
+    if (!SERVICE_KEY || bearer !== SERVICE_KEY) {
+      return json({ error: 'The cleanup is for the scheduler, not for a session.' }, 403);
+    }
+    if (!SB_URL) return json({ error: 'Server misconfigured' }, 500);
+    const limit = Math.min(Math.max(Number(body.limit) || 20, 1), 50);
+    const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
+    return json(await cleanupPostPeer(h, limit));
   }
 
   /* Whether what trypost accepted has actually gone live. Scheduler only,

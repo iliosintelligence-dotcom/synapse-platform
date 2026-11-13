@@ -102,6 +102,17 @@ export async function ppSignatureOk(
   return diff === 0;
 }
 
+export type CleanupVerdict = { done: boolean; outcome: string | null; error: string | null };
+
+/** What removing a disconnected account at PostPeer came to (post-metrics, action postpeer-cleanup). Connected again
+ *  here: left alone. Removed, or already gone: done. Anything else: try again later, with the reason. */
+export function cleanupVerdict(stillConnectedHere: boolean, status: number | null, said: string): CleanupVerdict {
+  if (stillConnectedHere) return { done: true, outcome: 'kept: connected again here', error: null };
+  if (status === 200 || status === 204) return { done: true, outcome: 'removed at PostPeer', error: null };
+  if (status === 404) return { done: true, outcome: 'already gone at PostPeer', error: null };
+  return { done: false, outcome: null, error: (status ? 'HTTP ' + status + ': ' : '') + said };
+}
+
 /** What one PostPeer platform result means for our row: live, failed, or still going. */
 export function deliveryOf(status: string): 'live' | 'failed' | 'pending' {
   const s = String(status ?? '').toLowerCase();
