@@ -43,7 +43,7 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer's switches and API call (2026-11-13). Kept in postpeer-webhook's folder, not _shared/: see that file. */
-import { pp, ppConnectFor, ppError, PP_NAME, ppPlatforms } from '../postpeer-webhook/postpeer.ts';
+import { postPeerReturn, pp, ppConnectFor, ppError, PP_NAME, ppPlatforms } from '../postpeer-webhook/postpeer.ts';
 
 /* CORS is inlined rather than imported from _shared. This function is deployed
    as a single file, and social-publish already shipped with an import path
@@ -264,12 +264,18 @@ async function startPostPeer(req: Request, platform: string): Promise<Response |
     nonce: crypto.randomUUID(),
     exp: Date.now() + PP_STATE_TTL_MS,
   });
-  const back = selfUrl() + '?action=postpeer-done&state=' + encodeURIComponent(state);
+  /* THE STATE RIDES IN THE PATH, NOT THE QUERY (2026-11-13). PostPeer adds its own query parameters to this address
+     (status, selectionToken); with ours in the query too, a "?" appended twice corrupted the state and the person got
+     "invalid or expired". The state is base64url and a dot, safe in a path as it is. */
+  const back = selfUrl() + '/postpeer-done/' + state;
   const qs = new URLSearchParams({
     profileId,
     redirectUri: back,
-    cancelRedirectUri: back + '&cancelled=1',
+    cancelRedirectUri: selfUrl() + '/postpeer-cancel/' + state,
   });
+  /* FACEBOOK: Synapse shows the Page choice itself (the same screen as our own Meta flow), so nobody is ever left on
+     PostPeer's hosted picker. PostPeer then sends back a short-lived selectionToken instead. */
+  if (platform === 'facebook') qs.set('headless', 'true');
   const r = await pp('/connect/' + encodeURIComponent(PP_NAME[platform] ?? platform) + '?' + qs.toString(), { method: 'GET' });
   const link = String((r.body as Record<string, any>)?.url ?? '');
   if (!link) {
@@ -280,18 +286,110 @@ async function startPostPeer(req: Request, platform: string): Promise<Response |
   return json({ url: link, platform, via: 'postpeer', expiresInMinutes: PP_STATE_TTL_MS / 60000 });
 }
 
-/** Back from PostPeer: save the account that was just connected, then back to the portal. */
-async function finishPostPeer(url: URL): Promise<Response> {
-  const claims = await readState(url.searchParams.get('state') ?? '');
+/** Save PostPeer integrations as this agency's accounts (auth_source 'postpeer'); returns the names saved. */
+async function savePostPeerAccounts(
+  /* Untyped on purpose: there are no generated database types in this repo, and the typed client reads every table
+     as `never` (tiktok-creator-info does the same). */
+  // deno-lint-ignore no-explicit-any
+  admin: any, agencyId: string, profileId: string, platform: string,
+  integrations: Array<Record<string, any>>,
+): Promise<{ names: string[]; error: string | null }> {
+  const names: string[] = [];
+  for (const i of integrations) {
+    const integrationId = String(i.id ?? '');
+    if (!integrationId) continue;
+    const name = String(i.username || i.displayName || platform + ' account').slice(0, 120);
+    /* TikTok through PostPeer posts directly (TikTok's audit is PostPeer's), so the account starts with direct posting
+       on: the scheduler then shows TikTok's required posting panel for it. */
+    const row = {
+      platform_username: name,
+      is_active: true,
+      last_error: null,
+      ...(platform === 'tiktok' ? { direct_post: true, scopes: ['video.upload', 'video.publish'] } : {}),
+    };
+    const { data: had } = await admin.from('social_accounts').select('id')
+      .eq('agency_id', agencyId).eq('platform', platform).eq('platform_account_id', integrationId)
+      .is('deleted_at', null).maybeSingle();
+    const { error } = had?.id
+      ? await admin.from('social_accounts').update(row).eq('id', had.id)
+      : await admin.from('social_accounts').insert({
+          ...row,
+          agency_id: agencyId,
+          platform,
+          platform_account_id: integrationId,
+          auth_source: 'postpeer',
+          connected_by: profileId,
+          ...(platform === 'tiktok' ? {} : { scopes: [] }),
+        });
+    if (error) {
+      console.error('social-connect: postpeer account not saved: ' + error.message);
+      return { names, error: error.message };
+    }
+    names.push(name);
+  }
+  return { names, error: null };
+}
+
+/** The sealed slot in a social_connect_picks row that marks a PostPeer Page choice and holds its selectionToken. */
+const PP_PICK_TOKEN = '__postpeer_selection';
+
+/** Back from PostPeer: save the account that was just connected, then back to Social studio. */
+async function finishPostPeer(url: URL, ret: { state: string; cancelled: boolean }): Promise<Response> {
+  const claims = await readState(ret.state);
   if (!claims || claims.via !== 'postpeer') {
-    return backToPortal('error', 'That connection link was invalid or has expired. Please start again.');
+    return backToPortal('error', 'That connection link was invalid or has expired. Please start again.', {
+      facts: { where: 'postpeer-return', path: url.pathname.slice(0, 60) },
+    });
   }
   const platform = String(claims.platform);
-  if (url.searchParams.get('cancelled')) {
+  if (ret.cancelled) {
     return backToPortal('cancelled', 'The ' + platform + ' connection was cancelled.', {
       facts: { where: 'postpeer', platform },
     });
   }
+  const status = url.searchParams.get('status') ?? '';
+  /* Only a real failure counts: an error parameter, or a status that says so. A success may carry a message too. */
+  const failedStatus = /^(error|failed|failure|denied|cancel)/i.test(status);
+  const ppSaid = url.searchParams.get('error')
+    ?? (failedStatus ? (url.searchParams.get('message') ?? status) : '');
+  if (ppSaid && status !== 'selection_required') {
+    return backToPortal('error', platform + ' did not connect: ' + ppSaid.slice(0, 140), {
+      facts: { where: 'postpeer', platform, status: status.slice(0, 40) || null },
+    });
+  }
+
+  /* FACEBOOK, SEVERAL PAGES: PostPeer hands back a selectionToken (headless). The Pages are held in a pick -- the
+     token sealed in Vault like a Meta token -- and the person chooses on Synapse's own Page screen, which then saves
+     the choice through facebook-pick. */
+  const selection = url.searchParams.get('selectionToken') ?? '';
+  if (status === 'selection_required' && selection) {
+    const g = await pp('/connect/facebook/selection/' + encodeURIComponent(selection), { method: 'GET' });
+    const accounts = ((g.body as Record<string, any>)?.accounts ?? []) as Array<Record<string, any>>;
+    if (g.status !== 200 || !Array.isArray(accounts) || !accounts.length) {
+      return backToPortal('error', 'Facebook shared no Page Synapse can post to. Connect again and tick the agency’s Page.', {
+        reason: 'no_pages', facts: { where: 'postpeer-selection', http: g.status },
+      });
+    }
+    const pages = accounts.map((a) => ({
+      id: String(a.id), name: String(a.displayName || a.username || a.id).slice(0, 120), ig_id: null, ig_username: null,
+    }));
+    const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    const { data: pickId, error: stashErr } = await admin.rpc('stash_connect_pick', {
+      p_agency_id: claims.agency_id as string,
+      p_profile_id: claims.profile_id as string,
+      p_pages: pages,
+      p_tokens: { [PP_PICK_TOKEN]: selection },
+      p_scopes: ['postpeer'],
+    });
+    if (stashErr || typeof pickId !== 'string') {
+      console.error('social-connect: could not hold the PostPeer Pages: ' + (stashErr?.message ?? 'no id'));
+      return backToPortal('error', 'Facebook shared ' + pages.length + ' Page(s), but Synapse could not hold them while you '
+        + 'choose. Please try again.');
+    }
+    console.log('social-connect: ' + pages.length + ' Page(s) via postpeer, waiting for a choice');
+    return backToPortal('choose', pickId);
+  }
+
   const qs = new URLSearchParams({ profileId: String(claims.pp_profile), platform: PP_NAME[platform] ?? platform, limit: '50' });
   const r = await pp('/connect/integrations?' + qs.toString(), { method: 'GET' });
   const list = ((r.body as Record<string, any>)?.integrations ?? []) as Array<Record<string, any>>;
@@ -312,41 +410,12 @@ async function finishPostPeer(url: URL): Promise<Response> {
   }
 
   const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
-  const names: string[] = [];
-  for (const i of picked) {
-    const integrationId = String(i.id ?? '');
-    if (!integrationId) continue;
-    const name = String(i.username || i.displayName || platform + ' account').slice(0, 120);
-    /* TikTok through PostPeer posts directly (TikTok's audit is PostPeer's), so the account starts with direct posting
-       on: the scheduler then shows TikTok's required posting panel for it. */
-    const row = {
-      platform_username: name,
-      is_active: true,
-      last_error: null,
-      ...(platform === 'tiktok' ? { direct_post: true, scopes: ['video.upload', 'video.publish'] } : {}),
-    };
-    const { data: had } = await admin.from('social_accounts').select('id')
-      .eq('agency_id', claims.agency_id).eq('platform', platform).eq('platform_account_id', integrationId)
-      .is('deleted_at', null).maybeSingle();
-    const { error } = had?.id
-      ? await admin.from('social_accounts').update(row).eq('id', had.id)
-      : await admin.from('social_accounts').insert({
-          ...row,
-          agency_id: claims.agency_id,
-          platform,
-          platform_account_id: integrationId,
-          auth_source: 'postpeer',
-          connected_by: claims.profile_id,
-          ...(platform === 'tiktok' ? {} : { scopes: [] }),
-        });
-    if (error) {
-      console.error('social-connect: postpeer account not saved: ' + error.message);
-      return backToPortal('error', platform + ' connected, but the account could not be saved: ' + error.message);
-    }
-    names.push(name);
+  const saved = await savePostPeerAccounts(admin, claims.agency_id as string, claims.profile_id as string, platform, picked);
+  if (saved.error) {
+    return backToPortal('error', platform + ' connected, but the account could not be saved: ' + saved.error);
   }
   console.log('social-connect: ' + platform + ' via postpeer connected for agency ' + claims.agency_id);
-  return backToPortal(platform, names.join(', '));
+  return backToPortal(platform, saved.names.join(', '));
 }
 
 /* ── TikTok ─────────────────────────────────────────────────────────────
@@ -1707,6 +1776,25 @@ Deno.serve(async (req: Request) => {
         const { data: got, error: takeErr } = await who.admin.rpc('take_connect_pick', { p_id: pick });
         if (takeErr || !got) return expired();
         const taken = got as { pages: SharedPage[]; tokens: Record<string, string>; scopes: string[] };
+        /* A PostPeer Page choice (finishPostPeer, headless Facebook): the chosen Pages go to PostPeer, which creates
+           one integration per Page, and those are saved as this agency's PostPeer accounts. */
+        const ppToken = (taken.tokens ?? {})[PP_PICK_TOKEN];
+        if (ppToken) {
+          const known = new Set((taken.pages ?? []).map((p) => p.id));
+          const chosenIds = ids.filter((id) => known.has(id));
+          if (!chosenIds.length) return json({ error: 'Tick at least one of the Pages Facebook shared.' }, 400);
+          const sel = await pp('/connect/facebook/selection/' + encodeURIComponent(ppToken), {
+            method: 'POST', body: JSON.stringify({ selectedAccountIds: chosenIds }),
+          });
+          const integrations = ((sel.body as Record<string, any>)?.integrations ?? []) as Array<Record<string, any>>;
+          if (sel.status !== 200 || !integrations.length) {
+            return json({ error: 'PostPeer could not connect those Pages (' + ppError(sel) + '). Connect Facebook again.' }, 502);
+          }
+          const saved = await savePostPeerAccounts(who.admin, who.agencyId, who.userId, 'facebook', integrations);
+          if (saved.error && !saved.names.length) return json({ error: 'Nothing could be saved: ' + saved.error }, 500);
+          console.log('social-connect: ' + saved.names.length + ' Facebook Page(s) via postpeer connected by choice');
+          return json({ agency: agencyName, connected: saved.names, problems: saved.error ? [saved.error] : [] });
+        }
         const chosen = (taken.pages ?? []).filter((p) => ids.includes(p.id));
         const res = await connectFacebookPages(who.admin, who.agencyId, who.userId, chosen,
           taken.tokens ?? {}, taken.scopes ?? []);
@@ -2053,7 +2141,8 @@ Deno.serve(async (req: Request) => {
     }
 
     /* ── PostPeer, where it is switched on for this agency and platform (see startPostPeer) ── */
-    if (url.searchParams.get('action') === 'postpeer-done') return await finishPostPeer(url);
+    const ppReturn = postPeerReturn(url);
+    if (ppReturn) return await finishPostPeer(url, ppReturn);
     if (url.searchParams.get('action') === 'start') {
       const viaPostPeer = await startPostPeer(req, (url.searchParams.get('platform') ?? 'instagram').toLowerCase());
       if (viaPostPeer) return viaPostPeer;
