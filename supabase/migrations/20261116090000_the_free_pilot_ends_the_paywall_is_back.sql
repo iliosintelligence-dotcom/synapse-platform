@@ -1,0 +1,22 @@
+-- The free pilot ends; the paywall is back on, with no grace period.
+--
+-- DECISION (the client, 2026-11-16): "remove the free pilot and put back the previous paywall that was already
+-- in place" -- confirmed explicitly as immediate, no grace period for existing agencies.
+--
+-- That is exactly the state 20261003220000_paywall_on_no_grace.sql put live: agency_free_until() already returns
+-- null unconditionally (unchanged since that migration -- nobody has ever had a grace period), so the only thing
+-- actually off is the one switch 20261005135000_paywall_off_for_now.sql turned off two days later, in the exact
+-- words it left for whoever turned it back on: "which is `select set_paywall(true);`".
+--
+-- What this makes real again, immediately, for every agency not on a paid plan (enforce_listing_limit,
+-- enforce_seat_limit, enforce_syndication_plan -- all already live, all already checking paywall_applies()):
+--   - capped at 20 active listings and 2 team seats
+--   - cannot publish to their own connected social accounts (Instagram, Facebook, TikTok, YouTube, LinkedIn, X);
+--     their listings still go out on Synapse's own channels at no cost
+--   - AI-written captions (social-generate calls agency_can(..., 'ai_captions')) refuse with the plan's message
+-- Nothing already over a limit is touched or removed -- enforcement only stops adding more. Accelerate
+-- (NGN25,000/mo) and above are unaffected. The CAC-certificate gate before listing is separate and unchanged.
+--
+-- Undo: select set_paywall(false);
+
+select set_paywall(true);
