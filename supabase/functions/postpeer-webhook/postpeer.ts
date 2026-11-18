@@ -203,8 +203,9 @@ export function studioCanConnect(platform: string, agencyReady: boolean, publish
 }
 
 /** One studio post as PostPeer's request, or why it cannot go. The caption arrives already fitted for X; LinkedIn is
- *  fitted here. TikTok goes to the account's inbox as a draft (no posting panel in the studio), as an agency's does
- *  without one. Same media rules as social-publish's PostPeer adapter. */
+ *  fitted here. TikTok posts directly (2026-11-18: "for tiktok, it is meant to post directly"): public, with comments,
+ *  duets and stitches on, and no branded-content declaration -- Synapse posting its own listings. Same media rules as
+ *  social-publish's PostPeer adapter. */
 export function studioPostBody(
   platform: string, caption: string, mediaIn: string[], accountId: string, postId: string,
 ): { body: Record<string, unknown> } | { error: string } {
@@ -213,7 +214,10 @@ export function studioPostBody(
   let specific: Record<string, unknown> = {};
   if (platform === 'tiktok') {
     if (!media.length) return { error: 'TikTok needs a photo or video.' };
-    specific = { draft: true };
+    specific = {
+      privacyLevel: 'PUBLIC_TO_EVERYONE', disableComment: false, disableDuet: false, disableStitch: false,
+      brandContentToggle: false, brandOrganicToggle: false, draft: false,
+    };
   } else if (platform === 'youtube') {
     const vid = media.find((u) => mediaTypeOf(u) === 'video');
     if (!vid) return { error: 'YouTube takes video only. Add a video, or leave YouTube off this post.' };
