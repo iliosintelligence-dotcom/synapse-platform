@@ -29,7 +29,9 @@ Deno.test('studio post body: media rules', () => {
   assertEquals(spec.title, 'Duplex in Lekki');
   const tt = studioPostBody('tiktok', 'x', ['https://a/1.jpg'], 'i', 'p');
   if (!('body' in tt)) throw new Error(tt.error);
-  assertEquals(((tt.body.platforms as Array<Record<string, any>>)[0]).platformSpecificData.draft, true);
+  const ttSpec = ((tt.body.platforms as Array<Record<string, any>>)[0]).platformSpecificData;
+  assertEquals(ttSpec.draft, false);                      // posts directly, not to the TikTok inbox
+  assertEquals(ttSpec.privacyLevel, 'PUBLIC_TO_EVERYONE');
   const xs = studioPostBody('x', 'x', ['1.jpg', '2.jpg', '3.jpg', '4.jpg', '5.jpg'], 'i', 'p');
   if (!('body' in xs)) throw new Error(xs.error);
   assertEquals((xs.body.mediaItems as unknown[]).length, 4);

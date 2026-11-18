@@ -1475,9 +1475,19 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   if (post.platform === 'tiktok') {
     /* TikTok's rules: the agent's own choices from the scheduler's panel, on media without our mark. No panel choice,
        or the originals cannot be found -> a draft in the agent's TikTok inbox, as our own TikTok app does today. */
-    const choice = tiktokPanelChoice(post);
+    /* A Synapse Studio channel (2026-11-18: "for tiktok, it is meant to post directly"): Synapse posting its own listings
+       on its own account goes out directly, public, with comments, duets and stitches on, on the post's own media. An
+       agency's post still needs the agency's own choices from the scheduler's panel. */
+    const studio = !!post.city_channel_id;
+    const choice = studio ? null : tiktokPanelChoice(post);
     const plain = choice ? await unbrandedMedia(post) : null;
-    if (choice && plain) {
+    if (studio && media.length) {
+      specific = {
+        privacyLevel: 'PUBLIC_TO_EVERYONE', disableComment: false, disableDuet: false, disableStitch: false,
+        brandContentToggle: false, brandOrganicToggle: false, draft: false,
+      };
+      payload.tiktok_mode = 'direct';
+    } else if (choice && plain) {
       media = plain;
       specific = {
         privacyLevel: choice.privacy_level,
