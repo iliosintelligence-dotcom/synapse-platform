@@ -190,3 +190,54 @@ export function deliveryOf(status: string): 'live' | 'failed' | 'pending' {
   if (s === 'failed') return 'failed';
   return 'pending';
 }
+
+/* ── Synapse Studio (2026-11-18) ──────────────────────────────────────────── */
+
+/** Platforms the studio connects through PostPeer. Facebook (our own Page login) and Telegram (our bot) stay as they were. */
+export const STUDIO_PP_PLATFORMS = ['instagram', 'tiktok', 'youtube', 'x', 'linkedin'];
+
+/** Whether the studio offers a platform: only one the agency studio offers too (`agencyReady`, social-connect's status),
+ *  and only while posting to it through PostPeer is switched on (`publishOn`, ppPublishOn). */
+export function studioCanConnect(platform: string, agencyReady: boolean, publishOn: boolean): boolean {
+  return STUDIO_PP_PLATFORMS.includes(platform) && agencyReady && publishOn;
+}
+
+/** One studio post as PostPeer's request, or why it cannot go. The caption arrives already fitted for X; LinkedIn is
+ *  fitted here. TikTok goes to the account's inbox as a draft (no posting panel in the studio), as an agency's does
+ *  without one. Same media rules as social-publish's PostPeer adapter. */
+export function studioPostBody(
+  platform: string, caption: string, mediaIn: string[], accountId: string, postId: string,
+): { body: Record<string, unknown> } | { error: string } {
+  let media = mediaIn.slice();
+  const content = platform === 'linkedin' ? fitForLinkedIn(caption) : caption;
+  let specific: Record<string, unknown> = {};
+  if (platform === 'tiktok') {
+    if (!media.length) return { error: 'TikTok needs a photo or video.' };
+    specific = { draft: true };
+  } else if (platform === 'youtube') {
+    const vid = media.find((u) => mediaTypeOf(u) === 'video');
+    if (!vid) return { error: 'YouTube takes video only. Add a video, or leave YouTube off this post.' };
+    media = [vid];
+    const title = content.split('\n').map((l) => l.trim()).find((l) => l && !/^https?:\/\//i.test(l)) ?? '';
+    specific = { title: title.replace(/[<>]/g, '').slice(0, 100).trim() || 'New listing', visibility: 'public' };
+  } else if (platform === 'instagram') {
+    if (!media.length) return { error: 'Instagram needs at least one photo or video.' };
+    media = media.slice(0, 10);
+  } else if (platform === 'x' || platform === 'linkedin') {
+    const vids = media.filter((u) => mediaTypeOf(u) === 'video');
+    media = vids.length ? vids.slice(0, 1) : media.slice(0, platform === 'x' ? 4 : 9);
+    if (platform === 'linkedin') specific = { visibility: 'PUBLIC' };
+  } else {
+    return { error: 'The studio does not post to ' + platform + ' through PostPeer.' };
+  }
+  return {
+    body: {
+      content,
+      mediaItems: media.map((url) => ({ type: mediaTypeOf(url), url })),
+      platforms: [{ platform: PP_NAME[platform] ?? platform, accountId, ...(Object.keys(specific).length ? { platformSpecificData: specific } : {}) }],
+      publishNow: true,
+      /* A retry after a lost reply gets PostPeer's first answer back, never a second post. */
+      idempotencyKey: 'synapse-studio-' + postId,
+    },
+  };
+}

@@ -43,7 +43,9 @@
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer's switches and API call (2026-11-13). Kept in postpeer-webhook's folder, not _shared/: see that file. */
-import { postPeerReturn, pp, ppConnectFor, ppError, PP_NAME, ppPlatforms } from '../postpeer-webhook/postpeer.ts';
+import {
+  postPeerReturn, pp, ppConnectFor, ppError, PP_NAME, ppPlatforms, ppPublishOn, studioCanConnect,
+} from '../postpeer-webhook/postpeer.ts';
 
 /* CORS is inlined rather than imported from _shared. This function is deployed
    as a single file, and social-publish already shipped with an import path
@@ -286,6 +288,116 @@ async function startPostPeer(req: Request, platform: string): Promise<Response |
   return json({ url: link, platform, via: 'postpeer', expiresInMinutes: PP_STATE_TTL_MS / 60000 });
 }
 
+/* ── Synapse Studio through PostPeer (2026-11-18) ─────────────────────────
+   The studio connects Synapse's own accounts on Synapse's own PostPeer profile (one, kept in platform_settings), started
+   by Synapse staff only. It returns through the same postpeer-done address, marked studio in the signed state, and each
+   account becomes a studio channel (city_channels.postpeer_integration_id) -- quiet until switched on, like a Page. */
+const STUDIO_PP_KEY = 'studio_postpeer_profile';
+
+async function startStudioPostPeer(req: Request, platform: string, allowed: boolean): Promise<Response> {
+  const who = await staffCaller(req);
+  if (who instanceof Response) return who;
+  if (!allowed) {
+    return json({ error: 'That platform cannot be connected to the studio: the studio offers only what the agency studio offers.' }, 400);
+  }
+  /* Untyped on purpose: no generated database types in this repo. */
+  // deno-lint-ignore no-explicit-any
+  const admin: any = who.admin;
+  const readProfile = async () => {
+    const { data } = await admin.from('platform_settings').select('value').eq('key', STUDIO_PP_KEY).maybeSingle();
+    return String(data?.value?.profile_id ?? '');
+  };
+  let profileId = await readProfile();
+  if (!profileId) {
+    const made = await pp('/profiles/', {
+      method: 'POST', body: JSON.stringify({ name: 'synapse-studio', description: 'Synapse Studio' }),
+    });
+    profileId = String((made.body as Record<string, any>)?.profile?.id ?? '');
+    if (!profileId) {
+      console.error('social-connect: studio postpeer profile not created -- ' + ppError(made));
+      return json({ error: 'Could not start the connection (PostPeer: ' + ppError(made) + '). Try again shortly.' }, 502);
+    }
+    const { error: saveErr } = await admin.from('platform_settings').insert({
+      key: STUDIO_PP_KEY, value: { profile_id: profileId },
+      note: 'Synapse Studio PostPeer profile (2026-11-18): its accounts are studio channels. Made by social-connect.',
+    });
+    if (saveErr) {
+      /* Two clicks at once: the other one saved first. Use its profile; this one is left unused at PostPeer. */
+      profileId = await readProfile();
+      if (!profileId) return json({ error: 'Could not save the connection profile: ' + saveErr.message }, 500);
+    }
+  }
+  const state = await signState({
+    studio: true, via: 'postpeer', profile_id: who.userId, platform, pp_profile: profileId,
+    started: Date.now(), nonce: crypto.randomUUID(), exp: Date.now() + PP_STATE_TTL_MS,
+  });
+  const qs = new URLSearchParams({
+    profileId,
+    redirectUri: selfUrl() + '/postpeer-done/' + state,
+    cancelRedirectUri: selfUrl() + '/postpeer-cancel/' + state,
+  });
+  const r = await pp('/connect/' + encodeURIComponent(PP_NAME[platform] ?? platform) + '?' + qs.toString(), { method: 'GET' });
+  const link = String((r.body as Record<string, any>)?.url ?? '');
+  if (!link) {
+    console.error('social-connect: studio postpeer connect url refused -- ' + ppError(r));
+    return json({ error: 'Could not start the connection (PostPeer: ' + ppError(r) + '). Try again shortly.' }, 502);
+  }
+  console.log('social-connect start: studio ' + platform + ' via postpeer');
+  return json({ url: link, platform, via: 'postpeer', studio: true, expiresInMinutes: PP_STATE_TTL_MS / 60000 });
+}
+
+/** Back from PostPeer for the studio: each account just connected becomes (or refreshes) a studio channel. */
+async function finishStudioPostPeer(
+  url: URL, ret: { state: string; cancelled: boolean }, claims: Record<string, unknown>,
+): Promise<Response> {
+  const platform = String(claims.platform);
+  if (ret.cancelled) return backToPortal('cancelled', 'The ' + platform + ' connection was cancelled.');
+  const status = url.searchParams.get('status') ?? '';
+  const failedStatus = /^(error|failed|failure|denied|cancel)/i.test(status);
+  const ppSaid = url.searchParams.get('error') ?? (failedStatus ? (url.searchParams.get('message') ?? status) : '');
+  if (ppSaid) return backToPortal('error', platform + ' did not connect: ' + ppSaid.slice(0, 140));
+
+  const qs = new URLSearchParams({ profileId: String(claims.pp_profile), platform: PP_NAME[platform] ?? platform, limit: '50' });
+  const r = await pp('/connect/integrations?' + qs.toString(), { method: 'GET' });
+  const list = ((r.body as Record<string, any>)?.integrations ?? []) as Array<Record<string, any>>;
+  if (r.status !== 200 || !Array.isArray(list)) {
+    return backToPortal('error', 'Connected at PostPeer, but the account could not be read back: ' + ppError(r));
+  }
+  /* The one just connected, as for an agency: created since this connection started, else the newest. */
+  const started = Number(claims.started) || 0;
+  const sorted = [...list].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? ''));
+  const fresh = sorted.filter((i) => Date.parse(i.createdAt ?? '') >= started - 60_000);
+  const picked = fresh.length ? fresh : sorted.slice(0, 1);
+  if (!picked.length) return backToPortal('error', 'PostPeer did not finish connecting ' + platform + '. Please try again.');
+
+  // deno-lint-ignore no-explicit-any
+  const admin: any = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  const names: string[] = [];
+  for (const i of picked) {
+    const integrationId = String(i.id ?? '');
+    if (!integrationId) continue;
+    const name = String(i.username || i.displayName || platform + ' account').slice(0, 80);
+    const handle = i.username ? String(i.username).slice(0, 80) : null;
+    const { data: had } = await admin.from('city_channels').select('id').eq('postpeer_integration_id', integrationId).maybeSingle();
+    /* A new channel starts quiet: connected, but neither posting on its own nor receiving agencies' posts until the
+       manager switches those on. A reconnect only refreshes the name and switches it back on. */
+    const { error } = had?.id
+      ? await admin.from('city_channels').update({ handle, is_active: true, updated_at: new Date().toISOString() }).eq('id', had.id)
+      : await admin.from('city_channels').insert({
+          platform, postpeer_integration_id: integrationId, label: name, handle, title: name,
+          is_active: true, autopilot: false, mirror_agency_posts: false, added_by: String(claims.profile_id),
+          daily_cap: 3, min_gap: '3 hours', window_start: 9, window_end: 20,
+        });
+    if (error) {
+      console.error('social-connect: studio channel not saved: ' + error.message);
+      return backToPortal('error', platform + ' connected, but the channel could not be saved: ' + error.message);
+    }
+    names.push(name);
+  }
+  console.log('social-connect: studio ' + platform + ' via postpeer: ' + names.length + ' channel(s)');
+  return backToPortal(platform, names.join(', '));
+}
+
 /** Save PostPeer integrations as this agency's accounts (auth_source 'postpeer'); returns the names saved. */
 async function savePostPeerAccounts(
   /* Untyped on purpose: there are no generated database types in this repo, and the typed client reads every table
@@ -341,6 +453,8 @@ async function finishPostPeer(url: URL, ret: { state: string; cancelled: boolean
       facts: { where: 'postpeer-return', path: url.pathname.slice(0, 60) },
     });
   }
+  /* The studio's own connection (2026-11-18) ends in the studio, as a studio channel. */
+  if (claims.studio === true) return toStudio(await finishStudioPostPeer(url, ret, claims));
   const platform = String(claims.platform);
   if (ret.cancelled) {
     return backToPortal('cancelled', 'The ' + platform + ' connection was cancelled.', {
@@ -1627,11 +1741,21 @@ Deno.serve(async (req: Request) => {
        are, and it is the same thing anyone learns by pressing the button and
        reading the answer. No agency is named in the question and no user data
        is in the reply, so it needs no session. */
+    /* PostPeer switched on for EVERY agency makes a platform connectable without our own app's keys. While it is on
+       for named agencies only, the answer stays our own app's, so no other agency is offered a button that fails. */
+    const viaPp = (p: string) => ppConnectFor('', p);
+    /* What the agency studio offers, for the platforms Synapse Studio may reach through PostPeer (2026-11-18): the studio
+       offers exactly these and nothing more ("only the channels that are allowed on social studio"). */
+    const agencyReady: Record<string, boolean> = {
+      instagram: Boolean(igAppId && igAppSecret) || viaPp('instagram'),
+      tiktok: Boolean(ttKey && ttSecret) || viaPp('tiktok'),
+      youtube: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'),
+      x: viaPp('x'),
+      linkedin: viaPp('linkedin'),
+    };
+    const studioPp = (p: string) => studioCanConnect(p, agencyReady[p] === true, ppPublishOn(p));
     if (url.searchParams.get('action') === 'status') {
       const tgBot = tgBotToken ? await telegramBotHandle(tgBotToken) : null;
-      /* PostPeer switched on for EVERY agency makes a platform connectable without our own app's keys. While it is on
-         for named agencies only, the answer stays our own app's, so no other agency is offered a button that fails. */
-      const viaPp = (p: string) => ppConnectFor('', p);
       return json({
         platforms: {
           /* `mode` is reported because ready:true is not the whole story on
@@ -1639,11 +1763,14 @@ Deno.serve(async (req: Request) => {
              and without one this opens the classic dialog -- which is the
              difference between a connection and an error page, and is
              invisible from the portal either way. */
+          /* studio: whether Synapse Studio offers it too (2026-11-18). Facebook and Telegram: the studio's own Page
+             login and our bot, as before. The rest: through PostPeer, and only where agencies are offered it. */
           facebook: {
             ready: Boolean(appId && appSecret),
             mode: fbConfigId ? 'login-for-business' : 'classic',
+            studio: Boolean(appId && appSecret),
           },
-          instagram: { ready: Boolean(igAppId && igAppSecret) || viaPp('instagram') },
+          instagram: { ready: agencyReady.instagram, studio: studioPp('instagram') },
           /* Reported like the others so the portal can decline to offer a
              control it cannot deliver. `form` because the portal renders
              something different for it: there is no redirect to send anybody
@@ -1652,15 +1779,15 @@ Deno.serve(async (req: Request) => {
              of Telegram rather than written into the portal: the portal
              named a bot before one existed, and a handle that drifts from
              the token has every agency adding an account that is not ours. */
-          telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot },
+          telegram: { ready: Boolean(tgBotToken), mode: 'form', bot: tgBot, studio: Boolean(tgBotToken) },
           /* `inbox`: posts arrive as drafts in the agent's TikTok app. */
           /* `direct` only when TIKTOK_DIRECT_POST is on: the scheduler then shows TikTok's required post panel. */
-          tiktok: { ready: Boolean(ttKey && ttSecret) || viaPp('tiktok'), mode: TIKTOK_DIRECT ? 'direct' : 'inbox' },
+          tiktok: { ready: agencyReady.tiktok, mode: TIKTOK_DIRECT ? 'direct' : 'inbox', studio: studioPp('tiktok') },
           /* `video`: YouTube takes video only; a post of photos is refused until photos become a video. */
-          youtube: { ready: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'), mode: 'video' },
+          youtube: { ready: agencyReady.youtube, mode: 'video', studio: studioPp('youtube') },
           /* Through PostPeer only (2026-11-13): ready exactly when POSTPEER_PLATFORMS names them for every agency. */
-          x: { ready: viaPp('x') },
-          linkedin: { ready: viaPp('linkedin') },
+          x: { ready: agencyReady.x, studio: studioPp('x') },
+          linkedin: { ready: agencyReady.linkedin, studio: studioPp('linkedin') },
         },
       });
     }
@@ -2144,8 +2271,15 @@ Deno.serve(async (req: Request) => {
     const ppReturn = postPeerReturn(url);
     if (ppReturn) return await finishPostPeer(url, ppReturn);
     if (url.searchParams.get('action') === 'start') {
-      const viaPostPeer = await startPostPeer(req, (url.searchParams.get('platform') ?? 'instagram').toLowerCase());
-      if (viaPostPeer) return viaPostPeer;
+      const startPlatform = (url.searchParams.get('platform') ?? 'instagram').toLowerCase();
+      if (url.searchParams.get('for') === 'studio') {
+        /* Synapse Studio (2026-11-18): Facebook keeps the studio's own Page login below; every other platform the
+           studio offers goes through Synapse's own PostPeer profile. Never the agency path: staff belong to no agency. */
+        if (startPlatform !== 'facebook') return await startStudioPostPeer(req, startPlatform, studioPp(startPlatform));
+      } else {
+        const viaPostPeer = await startPostPeer(req, startPlatform);
+        if (viaPostPeer) return viaPostPeer;
+      }
     }
 
     /* ── step 1, TikTok: its own dialog and its own credentials ────────── */

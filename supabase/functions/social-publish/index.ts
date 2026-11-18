@@ -1600,6 +1600,9 @@ function adapterFor(post: QueuedPost, live: boolean, conn?: Connection, ours = o
      onSynapseAccount also brings an agency's X post here: see
      SYNAPSE_ACCOUNT_ONLY. `ours` is decided by the caller, which knows the agency's own connections. */
   if (ours) {
+    /* A studio channel connected through PostPeer (2026-11-18): published like an agency's PostPeer account, with the
+       channel's own PostPeer integration (loadCityChannels). */
+    if (conn?.authSource === 'postpeer') return postpeerAdapter;
     /* Synapse on Telegram is our own bot, not trypost: a city channel is a
        chat the bot administers, and the adapter posts there directly. */
     if (post.platform === 'telegram') return telegramAdapter;
@@ -1693,11 +1696,19 @@ async function loadCityChannels(
   if (!ids.length) return out;
   const { data } = await admin
     .from('city_channels')
-    .select('id, platform, chat_id, trypost_account_id, meta_page_id, handle')
+    .select('id, platform, chat_id, trypost_account_id, meta_page_id, postpeer_integration_id, handle')
     .in('id', ids)
     .eq('is_active', true);
   const botToken = (Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '').trim();
   for (const c of (data ?? []) as Array<Record<string, string>>) {
+    /* An account the studio connected through PostPeer (2026-11-18): PostPeer holds the token; we hold its integration id. */
+    if (c.postpeer_integration_id) {
+      out[c.id] = {
+        accountId: c.id, platformAccountId: c.postpeer_integration_id, username: c.handle ?? 'synapse',
+        token: '', authSource: 'postpeer',
+      };
+      continue;
+    }
     /* A Facebook Page the studio connected itself (2026-10-23): its own Page token, posted by the native adapter. */
     if (c.platform === 'facebook' && c.meta_page_id) {
       const { data: tok } = await admin.rpc('city_channel_token', { p_id: c.id });

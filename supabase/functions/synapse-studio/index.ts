@@ -26,6 +26,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, json } from '../_shared/cors.ts';
 import { fastLlm } from '../_shared/llm.ts';
 import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit.ts';
+/* PostPeer (2026-11-18): the studio's own accounts, connected in social-connect (for=studio). */
+import { deliveryOf, pp, ppError, PP_NAME, ppKey, ppPublishOn, studioPostBody } from '../postpeer-webhook/postpeer.ts';
 
 type Admin = ReturnType<typeof createClient>;
 type Row = Record<string, unknown>;
@@ -128,10 +130,12 @@ async function overview(admin: Admin) {
   const o = (await rpc(admin, 'synapse_overview')) as Row;
   /* DIRECT: a channel Synapse posts to itself, with no TryPost: a Facebook Page the studio connected (meta_page_id) or a
      Telegram channel our bot administers (chat_id). */
-  const { data: direct } = await admin.from('city_channels').select('id, platform, meta_page_id, chat_id');
+  const { data: direct } = await admin.from('city_channels').select('id, platform, meta_page_id, chat_id, postpeer_integration_id');
   const isDirect: Record<string, boolean> = {};
   for (const c of (direct ?? []) as Row[]) {
-    isDirect[String(c.id)] = (c.platform === 'facebook' && !!c.meta_page_id) || (c.platform === 'telegram' && !!c.chat_id);
+    /* ... or an account the studio connected through PostPeer (2026-11-18). */
+    isDirect[String(c.id)] = (c.platform === 'facebook' && !!c.meta_page_id) || (c.platform === 'telegram' && !!c.chat_id)
+      || !!c.postpeer_integration_id;
   }
   const channels = ((o.channels ?? []) as Row[]).map((c) => ({ ...c, direct: isDirect[String(c.id)] === true }));
   return { ...o, channels, trypost_configured: trypostOn() };
@@ -640,7 +644,10 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     return false;
   };
 
-  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, chat_id, meta_page_id, is_active').eq('id', p.channel_id).maybeSingle();
+  const { data: ch } = await admin.from('city_channels').select('trypost_account_id, chat_id, meta_page_id, postpeer_integration_id, is_active').eq('id', p.channel_id).maybeSingle();
+  if (ch && (ch as Row).is_active === true && (ch as Row).postpeer_integration_id) {
+    return await sendPostPeer(settle, retry, p, String((ch as Row).postpeer_integration_id));
+  }
   if (ch && (ch as Row).is_active === true && platform === 'telegram') return await sendTelegram(settle, retry, p, String((ch as Row).chat_id ?? ''));
   if (ch && (ch as Row).is_active === true && platform === 'facebook' && (ch as Row).meta_page_id) {
     return await sendFacebook(admin, settle, retry, p, String(p.channel_id), String((ch as Row).meta_page_id));
@@ -709,6 +716,90 @@ async function sendOne(admin: Admin, p: Row): Promise<boolean> {
     payload: { ...(p.payload as Row ?? {}), delivery: 'pending' },
   });
   return true;
+}
+
+/* An account the studio connected through PostPeer (2026-11-18). Accepted is not live: the post is 'sent' with delivery
+   pending, and confirm_delivery asks PostPeer what became of it. Never twice: the idempotency key is our row id, so a
+   retry after a lost reply gets PostPeer's first answer back. */
+async function sendPostPeer(settle: (patch: Row) => unknown, retry: (why: string) => Promise<boolean>, p: Row, integrationId: string): Promise<boolean> {
+  const platform = String(p.platform);
+  const name = LABEL[platform] ?? platform;
+  if (!ppPublishOn(platform)) {
+    await settle({ status: 'failed', failure_reason: 'Posting to ' + name + ' through PostPeer is switched off for now.' });
+    return false;
+  }
+  const caption = platform === 'x' ? fitForX(String(p.caption ?? '')) : String(p.caption ?? '');
+  const built = studioPostBody(platform, caption, (p.media_urls as string[]) ?? [], integrationId, String(p.id));
+  if ('error' in built) { await settle({ status: 'failed', failure_reason: built.error }); return false; }
+
+  const r = await pp('/posts/', { method: 'POST', body: JSON.stringify(built.body) }, 60000);
+  const b = (r.body ?? {}) as Row;
+  if (r.status === 0) return await retry('Could not reach PostPeer: ' + ppError(r));
+  if (r.status === 402) { await settle({ status: 'failed', failure_reason: 'PostPeer credits are used up. Add credits at postpeer.dev, then send it again.' }); return false; }
+  if (r.status >= 500) return await retry('PostPeer had a problem (HTTP ' + r.status + '): ' + ppError(r));
+  if (r.status !== 200 && r.status !== 202) { await settle({ status: 'failed', failure_reason: 'PostPeer refused the post: ' + ppError(r) }); return false; }
+
+  const entry = (Array.isArray(b.platforms) ? b.platforms : [])[0] as Row | undefined;
+  const ppStatus = String(b.status ?? '');
+  const ppPostId = String(b.postId ?? '');
+  if (ppStatus === 'failed' || entry?.success === false) {
+    await settle({ status: 'failed', failure_reason: String(entry?.error ?? 'PostPeer could not publish this post.').slice(0, 500) });
+    return false;
+  }
+  if (!ppPostId) { await settle({ status: 'failed', failure_reason: 'PostPeer accepted the post but returned no id.' }); return false; }
+  const base = { ...(p.payload as Row ?? {}), via: 'postpeer', postpeer_post_id: ppPostId, postpeer_status: ppStatus || null };
+  const now = new Date().toISOString();
+  if (ppStatus === 'published') {
+    await settle({ status: 'live', sent_at: now, published_at: now, failure_reason: null,
+      payload: { ...base, delivery: 'live', live_url: entry?.platformPostUrl ?? null } });
+  } else {
+    await settle({ status: 'sent', sent_at: now, failure_reason: null, payload: { ...base, delivery: 'pending' } });
+  }
+  return true;
+}
+
+/* What PostPeer did with the studio's sent posts: live, failed, or ask again next time. Thirty days, like TryPost's. */
+async function confirmPostPeer(typed: Admin): Promise<{ checked: number; settled: number }> {
+  if (!ppKey()) return { checked: 0, settled: 0 };
+  /* Untyped on purpose: no generated database types in this repo. */
+  // deno-lint-ignore no-explicit-any
+  const admin: any = typed;
+  const since = new Date(Date.now() - 30 * 86400e3).toISOString();
+  await admin.from('synapse_posts').update({
+    status: 'failed', updated_at: new Date().toISOString(),
+    failure_reason: 'PostPeer never confirmed this one. Check it at postpeer.dev.',
+  }).eq('status', 'sent').not('payload->>postpeer_post_id', 'is', null).lt('sent_at', since);
+  const { data } = await admin.from('synapse_posts').select('id, platform, payload')
+    .eq('status', 'sent').not('payload->>postpeer_post_id', 'is', null).gt('sent_at', since)
+    .order('checked_at', { ascending: true, nullsFirst: true }).limit(25);
+  let settled = 0;
+  for (const r of (data ?? []) as Row[]) {
+    const payload = (r.payload ?? {}) as Row;
+    const res = await pp('/posts/' + encodeURIComponent(String(payload.postpeer_post_id)), { method: 'GET' });
+    await admin.from('synapse_posts').update({ checked_at: new Date().toISOString() }).eq('id', r.id);
+    const post = (res.body as Row | undefined)?.post as Row | undefined;
+    if (res.status !== 200 || !post) continue;
+    const want = PP_NAME[String(r.platform)] ?? String(r.platform);
+    const list = (Array.isArray(post.platforms) ? post.platforms : []) as Row[];
+    const entry = list.find((x) => x.platform === want) ?? list[0];
+    const status = String(entry?.status ?? post.status ?? '');
+    const delivery = deliveryOf(status);
+    const base = { ...payload, postpeer_status: status || null, delivery_checked_at: new Date().toISOString() };
+    if (delivery === 'live') {
+      await admin.from('synapse_posts').update({
+        status: 'live', published_at: String(entry?.publishedAt ?? new Date().toISOString()), updated_at: new Date().toISOString(),
+        payload: { ...base, delivery: 'live', live_url: entry?.platformPostUrl ?? null },
+      }).eq('id', r.id);
+      settled++;
+    } else if (delivery === 'failed') {
+      const why = String(entry?.errorMessage ?? 'PostPeer could not publish this post.').slice(0, 500);
+      await admin.from('synapse_posts').update({
+        status: 'failed', failure_reason: why, updated_at: new Date().toISOString(), payload: { ...base, delivery: 'failed' },
+      }).eq('id', r.id);
+      settled++;
+    }
+  }
+  return { checked: (data ?? []).length, settled };
 }
 
 /* Facebook through the Page the studio connected itself (social-connect ?for=studio): one photo is a photo post, several are
@@ -798,7 +889,8 @@ function pick(o: Row | null | undefined, ...keys: string[]): unknown {
 
 /** "Sent" means TryPost accepted it. This asks whether it went live. */
 async function confirmDelivery(admin: Admin) {
-  if (!trypostOn()) return { settled: 0, note: 'TryPost has been disconnected; nothing to check.' };
+  const viaPostPeer = await confirmPostPeer(admin);
+  if (!trypostOn()) return { settled: viaPostPeer.settled, postpeer: viaPostPeer, note: 'TryPost has been disconnected; nothing to check there.' };
   /* Thirty days is as long as we keep asking. A post still unsettled then is
      closed as unconfirmed, so it does not sit as 'sent' for ever. */
   await admin.from('synapse_posts').update({
