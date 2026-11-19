@@ -32,6 +32,8 @@ Keys (all optional):
  agency_fee: number; legal_fee: number
  min_investment: number; investment_term_months: integer; stated_return_pct: number
  address: the street address or estate, exactly as written, if one is given
+ city: the town or city the property is in, as written (e.g. "Ibadan", "Lagos", "Abuja", "Port Harcourt")
+ state: the Nigerian state, ONLY if the text names it (e.g. "Oyo", "Lagos", "FCT"); leave it out otherwise
  amenities: array of short lowercase phrases actually listed (e.g. "borehole", "24hr power", "gated estate", "fitted kitchen")`;
 
 /** The fields out of a model's answer, whatever wraps them: {"fields": {...}}, a bare {...}, or text around it. */
@@ -64,6 +66,9 @@ export function clean(f: Record<string, unknown>): Record<string, unknown> {
   for (const k of NUMS) { const n = Number(f[k]); if (f[k] != null && isFinite(n) && n >= 0) o[k] = n; }
   if (typeof f.handover_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.handover_date)) o.handover_date = f.handover_date;
   if (typeof f.address === 'string' && f.address.trim()) o.address = f.address.trim().slice(0, 200);
+  /* 2026-11-19: the place too, so an Ibadan listing does not keep the form's default state. The form checks both. */
+  if (typeof f.city === 'string' && f.city.trim()) o.city = f.city.trim().slice(0, 60);
+  if (typeof f.state === 'string' && f.state.trim()) o.state = f.state.trim().slice(0, 40);
   if (Array.isArray(f.amenities)) o.amenities = f.amenities.filter((a) => typeof a === 'string').map((a) => (a as string).trim().slice(0, 40)).filter(Boolean).slice(0, 20);
   return o;
 }
