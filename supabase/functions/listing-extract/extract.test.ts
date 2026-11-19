@@ -24,3 +24,9 @@ Deno.test('only known keys and shapes reach the form', () => {
 Deno.test('the instructions still ask for the fields object', () => {
   assertEquals(PROMPT.includes('{"fields": {...}}'), true);
 });
+
+Deno.test('the place: city and state come through, trimmed', () => {
+  assertEquals(parseFields('{"fields":{"address":"Bodija, Ibadan","city":" Ibadan ","state":"Oyo"}}'),
+    { address: 'Bodija, Ibadan', city: 'Ibadan', state: 'Oyo' });
+  assertEquals(parseFields('{"fields":{"city":"","state":7}}'), {});
+});
