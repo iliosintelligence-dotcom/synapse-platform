@@ -799,7 +799,10 @@ async function sendPostPeer(settle: (patch: Row) => unknown, retry: (why: string
      images to share the same aspect ratio"). */
   const media = platform === 'instagram' ? await instagramSafeMedia(mediaIn.slice(0, 10))
     : platform === 'tiktok' ? await tiktokSafeMedia(mediaIn) : mediaIn;
-  const built = studioPostBody(platform, caption, media, integrationId, String(p.id));
+  /* payload.pp_key_gen gives a post a fresh PostPeer key when PostPeer already holds a refusal for the old one that must
+     not be replayed (26 Nov: two TikToks refused for picture size, re-sent after the fix). */
+  const gen = Number(((p.payload ?? {}) as Row).pp_key_gen) || 1;
+  const built = studioPostBody(platform, caption, media, integrationId, String(p.id) + (gen > 1 ? '-k' + gen : ''));
   if ('error' in built) { await settle({ status: 'failed', failure_reason: built.error }); return false; }
 
   /* 45 s, inside the run's time budget: a slower answer is retried on the same key, which PostPeer replays. */
