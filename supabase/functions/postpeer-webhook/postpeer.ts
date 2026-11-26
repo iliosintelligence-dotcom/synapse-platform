@@ -230,7 +230,7 @@ export function studioPostBody(
     specific = { title: title.replace(/[<>]/g, '').slice(0, 100).trim() || 'New listing', visibility: 'public' };
   } else if (platform === 'instagram') {
     if (!media.length) return { error: 'Instagram needs at least one photo or video.' };
-    media = media.slice(0, 10);
+    media = oneKindOfMedia('instagram', media).slice(0, 10);
   } else if (platform === 'x' || platform === 'linkedin') {
     const vids = media.filter((u) => mediaTypeOf(u) === 'video');
     media = vids.length ? vids.slice(0, 1) : media.slice(0, platform === 'x' ? 4 : 9);
@@ -259,9 +259,11 @@ export function studioPostBody(
    YouTube upload limit reached (5 per day). Resets at midnight Pacific." A listing's gallery is photos and videos
    together, and phone photos are tall, so each of these is the ordinary case, not an edge case. */
 
-/** Facebook and TikTok take one kind of media per post: the first video alone when there is one, else the photos. */
+/** Facebook, TikTok and Instagram take one kind of media per post: the first video alone when there is one, else the
+ *  photos. Instagram's carousel must keep one aspect ratio throughout (PostPeer's Instagram guide), and a 9:16 video
+ *  beside photos never does, so the listing's video goes out as a Reel on its own (2026-11-26). */
 export function oneKindOfMedia(platform: string, media: string[]): string[] {
-  if (platform !== 'facebook' && platform !== 'tiktok') return media;
+  if (platform !== 'facebook' && platform !== 'tiktok' && platform !== 'instagram') return media;
   const vids = media.filter((u) => mediaTypeOf(u) === 'video');
   return vids.length ? vids.slice(0, 1) : media;
 }
@@ -273,6 +275,15 @@ export function igCropSize(w: number, h: number): { width: number; height: numbe
   const r = w / h;
   if (r >= 0.8 && r <= 1.91) return null;
   return r < 0.8 ? { width: w, height: Math.floor(w / 0.8) } : { width: Math.floor(h * 1.91), height: h };
+}
+
+/** The largest exact 4:5 crop inside a photo, for an Instagram carousel (one aspect ratio throughout). Rounded so the
+ *  result is never narrower than 4:5. Null when the photo already is 4:5. */
+export function ig45Size(w: number, h: number): { width: number; height: number } | null {
+  if (!(w > 0 && h > 0)) return null;
+  /* Already 4:5, or a hair wider: left alone. Never a hair narrower, which is below Instagram's minimum (Greptile). */
+  if (w / h >= 0.8 && w / h - 0.8 < 0.005) return null;
+  return w / h > 0.8 ? { width: Math.min(w, Math.ceil(h * 0.8)), height: h } : { width: w, height: Math.floor(w / 0.8) };
 }
 
 /** A public Supabase Storage URL, cropped by Storage's own image renderer. Null for any other host. The crop must fit
@@ -322,9 +333,11 @@ function isOwnStorage(url: string): boolean {
   }
 }
 
-/** Each Instagram feed photo made a shape Instagram takes. A photo whose size cannot be read, or that is not in
- *  Supabase Storage, is sent as it was -- never dropped. Videos are left alone. */
+/** Each Instagram feed photo made a shape Instagram takes: one photo, the largest crop inside 4:5..1.91:1; several
+ *  (a carousel, one aspect ratio throughout), each cropped to exactly 4:5. A photo whose size cannot be read, or that
+ *  is not in our own Storage, is sent as it was -- never dropped. Videos are left alone. */
 export async function instagramSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
+  const carousel = media.filter((u) => mediaTypeOf(u) === 'image').length > 1;
   return await Promise.all(media.map(async (url) => {
     if (mediaTypeOf(url) !== 'image') return url;
     /* Only our own Storage is read: an address typed into a listing is never fetched from here (Greptile on #50). */
@@ -333,13 +346,42 @@ export async function instagramSafeMedia(media: string[], fetcher: typeof fetch 
       const r = await fetcher(url, { headers: { Range: 'bytes=0-131071' }, signal: AbortSignal.timeout(10000) });
       if (!r.ok && r.status !== 206) return url;
       const size = imageSizeFromBytes(new Uint8Array(await r.arrayBuffer()));
-      const crop = size ? igCropSize(size.w, size.h) : null;
+      const crop = size ? (carousel ? ig45Size(size.w, size.h) : igCropSize(size.w, size.h)) : null;
       return (crop && storageCropUrl(url, crop)) || url;
     } catch {
       return url;
     }
   }));
 }
+
+/** A video's length in seconds from the first bytes of an MP4/MOV whose index (moov) is at the front, as Instagram
+ *  also requires. Null when it cannot tell. */
+export function mp4Seconds(d: Uint8Array): number | null {
+  for (let i = 4; i + 32 < d.length; i++) {
+    if (d[i] !== 0x6d || d[i + 1] !== 0x76 || d[i + 2] !== 0x68 || d[i + 3] !== 0x64) continue;   // 'mvhd'
+    const v = d[i + 4], b = i + 8;
+    const u32 = (k: number) => ((d[k] << 24) >>> 0) + (d[k + 1] << 16) + (d[k + 2] << 8) + d[k + 3];
+    const scale = v === 1 ? u32(b + 16) : u32(b + 8);
+    const dur = v === 1 ? u32(b + 20) * 2 ** 32 + u32(b + 24) : u32(b + 12);
+    return scale ? dur / scale : null;
+  }
+  return null;
+}
+
+/** How long a video in our own Storage runs, or null (another host is never fetched; unreadable is unknown). */
+export async function videoSeconds(url: string, fetcher: typeof fetch = fetch): Promise<number | null> {
+  if (mediaTypeOf(url) !== 'video' || !storageCropUrl(url, { width: 1, height: 1 }) || !isOwnStorage(url)) return null;
+  try {
+    const r = await fetcher(url, { headers: { Range: 'bytes=0-262143' }, signal: AbortSignal.timeout(10000) });
+    if (!r.ok && r.status !== 206) return null;
+    return mp4Seconds(new Uint8Array(await r.arrayBuffer()));
+  } catch {
+    return null;
+  }
+}
+
+/** X takes videos up to 2 minutes 20 seconds on a standard account (X's media upload rules). */
+export const X_MAX_VIDEO_SEC = 140;
 
 /** YouTube takes 5 uploads per channel per day, and the day ends at midnight Pacific. */
 export const YOUTUBE_DAILY_UPLOADS = 5;
