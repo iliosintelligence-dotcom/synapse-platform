@@ -30,7 +30,7 @@ import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit
 /* Redeployed with postpeer.ts: the deploy workflow rebuilds only folders a change touches (26 Nov: Instagram's one kind
    of media and 4:5 carousels, X's video length). */
 import {
-  deliveryOf, instagramSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioComposeProblem, studioPostBody,
+  deliveryOf, instagramSafeMedia, tiktokSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioComposeProblem, studioPostBody,
 } from '../postpeer-webhook/postpeer.ts';
 
 type Admin = ReturnType<typeof createClient>;
@@ -641,14 +641,59 @@ function fitForX(caption: string): string {
 }
 
 async function publishDue(admin: Admin) {
+  /* Untyped on purpose: no generated database types in this repo. */
+  // deno-lint-ignore no-explicit-any
+  const db: any = admin;
+  /* STUCK MID-SEND, BEFORE THE CLAIM'S OWN RULE MARKS IT FAILED (2026-11-26). A post on a PostPeer channel is safe to send
+     again: its key (synapse-studio-<id>) makes PostPeer replay the first answer, so it can never go out twice. Any other
+     channel keeps the claim's rule ("Not confirmed ... may have gone out"). */
+  const { data: stuck } = await db.from('synapse_posts').select('id, attempts, channel:city_channels(postpeer_integration_id)')
+    .eq('status', 'publishing').lt('updated_at', new Date(Date.now() - 10 * 60_000).toISOString()).limit(50);
+  for (const r of (stuck ?? []) as Row[]) {
+    if (!(r.channel as Row | null)?.postpeer_integration_id) continue;
+    await db.from('synapse_posts').update({ status: 'scheduled', attempts: Math.max(0, Number(r.attempts) - 1),
+      scheduled_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      failure_reason: 'Sending was cut off; sent again (it cannot go out twice).' }).eq('id', r.id).eq('status', 'publishing');
+  }
+
   const { data: claimed, error } = await admin.rpc('claim_synapse_posts', { p_limit: 10 });
   if (error) return { error: error.message, sent: 0 };
-  let sent = 0, failed = 0;
+  /* SIDE BY SIDE, NOT ONE BY ONE (2026-11-26). The 3pm batch: each PostPeer send takes ~45 s, so six posts sent one after
+     another ran into the function's time limit at ~2.5 min and the last two were cut off mid-send, then marked failed.
+     Now: one lane per channel (a channel's posts still in order), up to four at once; nothing new starts after 75 s, and a
+     post not started goes back to the queue for the next minute, uncounted. */
+  const startedAt = Date.now();
+  let sent = 0, failed = 0, later = 0;
+  const lanes = new Map<string, Row[]>();
   for (const p of (claimed ?? []) as Row[]) {
-    const r = await sendOne(admin, p);
-    if (r) sent++; else failed++;
+    const k = String(p.channel_id);
+    if (!lanes.has(k)) lanes.set(k, []);
+    (lanes.get(k) as Row[]).push(p);
   }
-  return { sent, failed };
+  const waiting = [...lanes.values()];
+  const notStarted: Row[] = [];
+  await Promise.all(Array.from({ length: Math.min(4, waiting.length) }, async () => {
+    while (waiting.length) {
+      for (const p of waiting.shift() as Row[]) {
+        if (Date.now() - startedAt > 75_000) { notStarted.push(p); continue; }
+        try {
+          if (await sendOne(admin, p)) sent++; else failed++;
+        } catch (e) {
+          failed++;
+          await db.from('synapse_posts').update({ status: 'scheduled', updated_at: new Date().toISOString(),
+            scheduled_at: new Date(Date.now() + 2 * 60_000).toISOString(),
+            failure_reason: 'Sending stopped on an error and will be tried again: ' + (e instanceof Error ? e.message : String(e)).slice(0, 200) })
+            .eq('id', p.id);
+        }
+      }
+    }
+  }));
+  for (const p of notStarted) {
+    later++;
+    await db.from('synapse_posts').update({ status: 'scheduled', attempts: Math.max(0, Number(p.attempts ?? 1) - 1),
+      updated_at: new Date().toISOString() }).eq('id', p.id);
+  }
+  return { sent, failed, next_run: later };
 }
 
 async function sendOne(admin: Admin, p: Row): Promise<boolean> {
@@ -750,11 +795,15 @@ async function sendPostPeer(settle: (patch: Row) => unknown, retry: (why: string
   const caption = platform === 'x' ? fitForX(String(p.caption ?? '')) : String(p.caption ?? '');
   /* Instagram refuses a photo outside 4:5 to 1.91:1, and studio uploads are phone photos (26 Nov): cropped first. */
   const mediaIn = (p.media_urls as string[]) ?? [];
-  const media = platform === 'instagram' ? await instagramSafeMedia(mediaIn.slice(0, 10)) : mediaIn;
+  /* TikTok photos too: each in range, and a carousel all one shape (26 Nov 3pm: "TikTok photo carousels require all
+     images to share the same aspect ratio"). */
+  const media = platform === 'instagram' ? await instagramSafeMedia(mediaIn.slice(0, 10))
+    : platform === 'tiktok' ? await tiktokSafeMedia(mediaIn) : mediaIn;
   const built = studioPostBody(platform, caption, media, integrationId, String(p.id));
   if ('error' in built) { await settle({ status: 'failed', failure_reason: built.error }); return false; }
 
-  const r = await pp('/posts/', { method: 'POST', body: JSON.stringify(built.body) }, 60000);
+  /* 45 s, inside the run's time budget: a slower answer is retried on the same key, which PostPeer replays. */
+  const r = await pp('/posts/', { method: 'POST', body: JSON.stringify(built.body) }, 45000);
   const b = (r.body ?? {}) as Row;
   if (r.status === 0) return await retry('Could not reach PostPeer: ' + ppError(r));
   /* Our plan's limits, in words: out of credits or too fast is tried again; not allowed is said plainly. */
