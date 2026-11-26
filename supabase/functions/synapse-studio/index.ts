@@ -57,7 +57,8 @@ const CONTENT_TYPE: Record<string, string> = {
   /* A video: vertical, up to 3 minutes, MP4 or MOV (TryPost's YouTube Shorts type). */
   youtube: 'youtube_short',
 };
-const VIDEO_URL = /\.(mp4|mov)(\?|#|$)/i;
+/* The same formats postpeer.ts mediaTypeOf and the studio page treat as video (2026-11-26: m4v and qt were photos here). */
+const VIDEO_URL = /\.(mp4|mov|m4v|qt)(\?|#|$)/i;
 const NEEDS_MEDIA = new Set(['instagram', 'tiktok']);
 const LABEL: Record<string, string> = {
   instagram: 'Instagram', facebook: 'Facebook', tiktok: 'TikTok', linkedin: 'LinkedIn', x: 'X', telegram: 'Telegram', youtube: 'YouTube',
