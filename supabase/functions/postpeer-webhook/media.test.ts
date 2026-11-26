@@ -3,12 +3,12 @@ import {
   igCropSize, imageSizeFromBytes, instagramSafeMedia, isDailyUploadLimit, oneKindOfMedia, pacificDay, storageCropUrl,
 } from './postpeer.ts';
 
-Deno.test('facebook and tiktok get one kind of media; others keep the gallery', () => {
+Deno.test('facebook, tiktok and instagram get one kind of media; others keep the gallery', () => {
   const mixed = ['a.jpg', 'b.mp4', 'c.jpg', 'd.mov'];
   assertEquals(oneKindOfMedia('facebook', mixed), ['b.mp4']);
   assertEquals(oneKindOfMedia('tiktok', mixed), ['b.mp4']);
   assertEquals(oneKindOfMedia('facebook', ['a.jpg', 'c.jpg']), ['a.jpg', 'c.jpg']);
-  assertEquals(oneKindOfMedia('instagram', mixed), mixed);
+  assertEquals(oneKindOfMedia('linkedin', mixed), mixed);   // Instagram joined Facebook and TikTok on 26 Nov
 });
 
 Deno.test('instagram crop: the photos PostPeer refused on 26 Nov come out inside 0.8 to 1.91', () => {
@@ -104,4 +104,44 @@ Deno.test('pacific day on both daylight-saving change days', () => {
   const spring = pacificDay(new Date('2026-03-08T20:00:00Z'));   // 8 Mar: PST until 02:00, PDT after
   assertEquals(spring.start.toISOString(), '2026-03-08T08:00:00.000Z');
   assertEquals(spring.next.toISOString(), '2026-03-09T07:00:00.000Z');
+});
+
+import { ig45Size, mp4Seconds, videoSeconds } from './postpeer.ts';
+
+Deno.test('instagram takes one kind of media: a mixed gallery goes out as its video alone', () => {
+  assertEquals(oneKindOfMedia('instagram', ['a.jpg', 'v.mp4', 'b.jpg']), ['v.mp4']);
+  assertEquals(oneKindOfMedia('instagram', ['a.jpg', 'b.jpg']), ['a.jpg', 'b.jpg']);
+});
+
+Deno.test('instagram carousel: every photo cropped to exactly 4:5, never narrower', () => {
+  for (const [w, h] of [[1280, 591], [591, 1280], [1080, 1080], [1200, 1600], [1600, 1200], [1131, 1600]]) {
+    const c = ig45Size(w, h);
+    const r = c ? c.width / c.height : w / h;
+    assertEquals(r >= 0.8 && r < 0.805 && (!c || (c.width <= w && c.height <= h)), true, `${w}x${h}`);
+  }
+});
+
+Deno.test('instagramSafeMedia crops a carousel uniformly to 4:5', async () => {
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
+  const jpeg = (w: number, h: number) => new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 0, 0, 0, 0, 0, 0]);
+  const fake = ((url: string) => Promise.resolve(new Response(url.includes('wide') ? jpeg(1280, 591) : jpeg(1080, 1080), { status: 206 }))) as unknown as typeof fetch;
+  const base = 'https://x.supabase.co/storage/v1/object/public/p/';
+  const out = await instagramSafeMedia([base + 'wide.jpg', base + 'square.jpg'], fake);
+  assertEquals(out[0].includes('width=473&height=591'), true, out[0]);
+  assertEquals(out[1].includes('width=864&height=1080'), true, out[1]);
+});
+
+Deno.test('mp4Seconds reads mvhd (version 0 and 1); videoSeconds never reads another host', async () => {
+  const v0 = new Uint8Array(64); v0.set([0, 0, 0, 108, 0x6d, 0x76, 0x68, 0x64, 0, 0, 0, 0], 4);
+  v0.set([0, 0, 3, 232], 4 + 8 + 12); v0.set([0, 4, 247, 162], 4 + 8 + 16);         // timescale 1000, duration 325538
+  assertEquals(mp4Seconds(v0), 325.538);
+  const v1 = new Uint8Array(80); v1.set([0x6d, 0x76, 0x68, 0x64, 1, 0, 0, 0], 8);
+  v1.set([0, 0, 0, 30], 8 + 8 + 16); v1.set([0, 0, 0, 0, 0, 0, 6, 64], 8 + 8 + 20);   // timescale 30, duration 1600
+  assertEquals(Math.round(mp4Seconds(v1)! * 100) / 100, 53.33);
+  assertEquals(mp4Seconds(new Uint8Array(10)), null);
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
+  let called = false;
+  const spy = (() => { called = true; return Promise.resolve(new Response('')); }) as unknown as typeof fetch;
+  assertEquals(await videoSeconds('https://evil.example/v.mp4', spy), null);
+  assertEquals(called, false);
 });

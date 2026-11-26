@@ -28,7 +28,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer (2026-11-13): its switches and API call, from postpeer-webhook's folder (see that file for why not _shared).
    Cross-folder imports bundle fine with `supabase functions deploy`, as the _shared imports elsewhere show. */
 import {
-  allowanceOf, fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, ppKey, ppLimitOf, type PpLimit, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
+  allowanceOf, videoSeconds, X_MAX_VIDEO_SEC, fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, ppKey, ppLimitOf, type PpLimit, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
   pp, ppError, PP_NAME, ppPublishOn, YOUTUBE_DAILY_UPLOADS,
 } from '../postpeer-webhook/postpeer.ts';
 /* Inlined rather than imported from ../_shared. The import escapes the
@@ -1520,14 +1520,28 @@ const postpeerAdapter: Adapter = async (post, conn) => {
     specific = { title: ppYoutubeTitle(caption), visibility: 'public' };
   } else if (post.platform === 'instagram') {
     if (!media.length) return fail('Instagram needs at least one photo or video.');
-    if (post.post_format === 'story') specific = { contentType: 'story' };
-    /* A feed photo outside 4:5 to 1.91:1 is refused ("The aspect ratio is not supported", 26 Nov): phone photos are
-       9:16. Cropped by Storage to the largest shape inside the photo that Instagram takes. A Story is 9:16 already. */
-    else media = await instagramSafeMedia(media.slice(0, 10));
+    /* A Story takes exactly one photo or video (PostPeer's Instagram guide). */
+    if (post.post_format === 'story') { specific = { contentType: 'story' }; media = media.slice(0, 1); }
+    /* A feed post: the listing's video alone as a Reel when it has one (a carousel keeps one aspect ratio throughout,
+       and a 9:16 video beside photos never does), else the photos, cropped by Storage to shapes Instagram takes
+       ("The aspect ratio is not supported", 26 Nov) -- one photo to fit 4:5..1.91:1, a carousel all to exactly 4:5. */
+    else media = await instagramSafeMedia(oneKindOfMedia('instagram', media).slice(0, 10));
   } else if (post.platform === 'x' || post.platform === 'linkedin') {
     /* One video, or photos only: X takes 4 photos, LinkedIn 9 (PostPeer's platform pages, read 2026-11-13). */
     const vids = media.filter((u) => mediaTypeOf(u) === 'video');
+    const photos = media.filter((u) => mediaTypeOf(u) !== 'video');
     media = vids.length ? vids.slice(0, 1) : media.slice(0, post.platform === 'x' ? 4 : 9);
+    /* X takes videos up to 2 min 20 s on a standard account. A longer one: the listing's photos instead, or a reason. */
+    if (post.platform === 'x' && vids.length) {
+      const secs = await videoSeconds(vids[0]);
+      if (secs !== null && secs > X_MAX_VIDEO_SEC) {
+        if (photos.length) media = photos.slice(0, 4);
+        else {
+          const mmss = Math.floor(secs / 60) + ':' + String(Math.round(secs % 60)).padStart(2, '0');
+          return fail('X takes videos up to 2:20 and this one is ' + mmss + '. Add photos to the listing, or leave X off this post.');
+        }
+      }
+    }
     if (post.platform === 'linkedin') {
       specific = { visibility: 'PUBLIC' };
       /* LinkedIn does not turn a link in the text into a preview; with no photo or video, the listing link becomes
