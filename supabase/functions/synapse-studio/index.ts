@@ -30,7 +30,7 @@ import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit
 /* Redeployed with postpeer.ts: the deploy workflow rebuilds only folders a change touches (26 Nov: Instagram's one kind
    of media and 4:5 carousels, X's video length). */
 import {
-  deliveryOf, instagramSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioPostBody,
+  deliveryOf, instagramSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioComposeProblem, studioPostBody,
 } from '../postpeer-webhook/postpeer.ts';
 
 type Admin = ReturnType<typeof createClient>;
@@ -358,7 +358,7 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
   const at = uniq[0];
 
   const { data: chans } = await admin.from('city_channels')
-    .select('id, platform, label, handle, trypost_account_id, meta_page_id, chat_id, is_active').in('id', ids);
+    .select('id, platform, label, handle, trypost_account_id, meta_page_id, chat_id, postpeer_integration_id, is_active').in('id', ids);
   const found = (chans ?? []) as Row[];
   const group = crypto.randomUUID();
   const rows: Row[] = [];
@@ -367,6 +367,20 @@ async function compose(admin: Admin, uid: string, b: Row): Promise<Response> {
     const name = c ? String(c.label ?? c.handle ?? c.platform) : 'that channel';
     if (!c || c.is_active !== true) return json({ error: `${name} is switched off.` }, 400);
     const p = String(c.platform);
+    /* A channel connected through PostPeer (2026-11-18) is checked by the sender's own rules (studioPostBody). Saving
+       used to accept only a Page, Telegram or TryPost, so every PostPeer channel -- both Instagram, both TikTok, a
+       Facebook Page connected the new way -- answered "cannot take studio posts yet" (found 26 Nov). */
+    if (c.postpeer_integration_id) {
+      const why = studioComposeProblem(p, name, caption, media, ppPublishOn(p));
+      if (why) return json({ error: why }, 400);
+      for (const when of uniq) {
+        rows.push({
+          group_id: group, channel_id: id, platform: p, caption, media_urls: media,
+          status: 'scheduled', scheduled_at: when.toISOString(), created_by: uid,
+        });
+      }
+      continue;
+    }
     const direct = (p === 'facebook' && !!c.meta_page_id) || (p === 'telegram' && !!c.chat_id);
     if (!direct && (!trypostOn() || !c.trypost_account_id || !CONTENT_TYPE[p])) return json({ error: `${name} cannot take studio posts yet.` }, 400);
     const hasVideo = media.some((u) => VIDEO_URL.test(u));
