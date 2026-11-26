@@ -1552,7 +1552,10 @@ const postpeerAdapter: Adapter = async (post, conn) => {
       ...(Object.keys(specific).length ? { platformSpecificData: specific } : {}),
     }],
     publishNow: true,
-    idempotencyKey: 'synapse-' + post.id,
+    /* payload.pp_key_gen gives a row a fresh key when PostPeer already holds an answer for the old one that must not be
+       replayed (26 Nov: a test run sent queued posts early; they were deleted, and their rows go out on their own dates). */
+    idempotencyKey: 'synapse-' + post.id
+      + (Number(post.payload?.pp_key_gen) > 1 ? '-k' + Number(post.payload?.pp_key_gen) : ''),
   };
   Object.assign(payload, { postpeer_request: { ...body, content: undefined } });
 
