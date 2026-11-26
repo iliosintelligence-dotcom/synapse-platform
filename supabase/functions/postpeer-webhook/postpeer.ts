@@ -281,7 +281,8 @@ export function igCropSize(w: number, h: number): { width: number; height: numbe
  *  result is never narrower than 4:5. Null when the photo already is 4:5. */
 export function ig45Size(w: number, h: number): { width: number; height: number } | null {
   if (!(w > 0 && h > 0)) return null;
-  if (Math.abs(w / h - 0.8) < 0.005) return null;
+  /* Already 4:5, or a hair wider: left alone. Never a hair narrower, which is below Instagram's minimum (Greptile). */
+  if (w / h >= 0.8 && w / h - 0.8 < 0.005) return null;
   return w / h > 0.8 ? { width: Math.min(w, Math.ceil(h * 0.8)), height: h } : { width: w, height: Math.floor(w / 0.8) };
 }
 

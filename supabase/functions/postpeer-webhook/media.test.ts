@@ -114,7 +114,7 @@ Deno.test('instagram takes one kind of media: a mixed gallery goes out as its vi
 });
 
 Deno.test('instagram carousel: every photo cropped to exactly 4:5, never narrower', () => {
-  for (const [w, h] of [[1280, 591], [591, 1280], [1080, 1080], [1200, 1600], [1600, 1200], [1131, 1600]]) {
+  for (const [w, h] of [[1280, 591], [591, 1280], [1080, 1080], [1200, 1600], [1600, 1200], [1131, 1600], [1279, 1600]]) {
     const c = ig45Size(w, h);
     const r = c ? c.width / c.height : w / h;
     assertEquals(r >= 0.8 && r < 0.805 && (!c || (c.width <= w && c.height <= h)), true, `${w}x${h}`);

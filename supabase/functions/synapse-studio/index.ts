@@ -27,6 +27,8 @@ import { corsHeaders, json } from '../_shared/cors.ts';
 import { fastLlm } from '../_shared/llm.ts';
 import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit.ts';
 /* PostPeer (2026-11-18): the studio's own accounts, connected in social-connect (for=studio). */
+/* Redeployed with postpeer.ts: the deploy workflow rebuilds only folders a change touches (26 Nov: Instagram's one kind
+   of media and 4:5 carousels, X's video length). */
 import {
   deliveryOf, instagramSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioPostBody,
 } from '../postpeer-webhook/postpeer.ts';
