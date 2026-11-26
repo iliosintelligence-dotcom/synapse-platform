@@ -366,8 +366,9 @@ export function ppLimitOf(r: PpResult): PpLimit | null {
 
 /** The allowance in one answer, read from PostPeer's usage (free to read). */
 export function allowanceOf(r: PpResult): { remaining: number | null; resetsAt: string | null; paused: boolean } {
-  const b = r.body as Record<string, any>;
-  if (r.status !== 200 || !b?.balance) return { remaining: null, resetsAt: null, paused: false };
-  const left = Number(b.balance?.monthly?.remaining ?? 0) + Number(b.balance?.purchased?.remaining ?? 0);
-  return { remaining: left, resetsAt: b.balance?.monthly?.cycleEnd ?? null, paused: left <= 0 };
+  type Pot = { remaining?: number; cycleEnd?: string };
+  const bal = (r.body as { balance?: { monthly?: Pot; purchased?: Pot } }).balance;
+  if (r.status !== 200 || !bal) return { remaining: null, resetsAt: null, paused: false };
+  const left = Number(bal.monthly?.remaining ?? 0) + Number(bal.purchased?.remaining ?? 0);
+  return { remaining: left, resetsAt: bal.monthly?.cycleEnd ?? null, paused: left <= 0 };
 }
