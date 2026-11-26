@@ -11,7 +11,7 @@
  * none adds to one.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { deliveryOf, PP_NAME, ppSignatureOk } from './postpeer.ts';
+import { deliveryOf, isDailyUploadLimit, pacificDay, PP_NAME, ppSignatureOk } from './postpeer.ts';
 
 const reply = (status: number, body: unknown = { ok: status < 300 }) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -41,7 +41,7 @@ Deno.serve(async (req) => {
     const acc = ev.data?.account ?? {};
     if (!acc.id) return reply(200, { ok: true, ignored: 'no account id' });
     const patch: Record<string, unknown> = type === 'account.disconnected'
-      ? { is_active: false, last_error: 'Disconnected at PostPeer. Connect it again under Channels.' }
+      ? { is_active: false, last_error: 'This account was disconnected. Connect it again under Channels.' }
       : { last_error: 'This account needs logging in again. Connect it again under Channels.'
           + (acc.reason ? ' (' + String(acc.reason).slice(0, 60) + ')' : '') };
     const { error } = await admin.from('social_accounts').update(patch)
@@ -78,8 +78,17 @@ Deno.serve(async (req) => {
                    warning: entry?.warningMessage ?? null },
         ...(liveAt ? { published_at: liveAt } : {}),
       };
+    } else if (delivery === 'failed' && row.platform === 'youtube' && isDailyUploadLimit(entry?.errorMessage ?? '')) {
+      /* YouTube's 5 a day, learnt late: not a failure. Back in the queue for just after midnight Pacific; social-publish
+         re-sends it through PostPeer's retry (same idempotency key, so never a second upload). */
+      /* attempts back to 0, or a post on its last try would never be claimed again (claims need attempts <
+         max_attempts); a fresh key, or PostPeer would replay this refusal (Greptile on #50). */
+      patch = { status: 'scheduled', scheduled_at: new Date(pacificDay().next.getTime() + 5 * 60000).toISOString(),
+                failure_reason: 'YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.',
+                attempts: 0,
+                payload: { ...base, delivery: 'waiting', pp_key_gen: Math.max(1, Number((row.payload ?? {}).pp_key_gen) || 1) + 1 } };
     } else if (delivery === 'failed') {
-      const why = (entry?.errorMessage ?? 'PostPeer could not publish this post.').slice(0, 500);
+      const why = (entry?.errorMessage ?? 'This post could not be published.').slice(0, 500);
       patch = { status: 'failed', failure_reason: why, payload: { ...base, delivery: 'failed', delivery_error: why } };
     } else {
       patch = { payload: { ...base, delivery: 'pending' } };

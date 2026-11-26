@@ -243,7 +243,7 @@ async function startPostPeer(req: Request, platform: string): Promise<Response |
     profileId = String((made.body as Record<string, any>)?.profile?.id ?? '');
     if (!profileId) {
       console.error('social-connect: postpeer profile not created -- ' + ppError(made));
-      return json({ error: 'Could not start the connection (PostPeer: ' + ppError(made) + '). Try again shortly.' }, 502);
+      return json({ error: 'Could not start the connection (' + ppError(made) + '). Try again shortly.' }, 502);
     }
     const { error: saveErr } = await admin.from('postpeer_profiles')
       .insert({ agency_id: membership.agency_id, profile_id: profileId });
@@ -282,7 +282,7 @@ async function startPostPeer(req: Request, platform: string): Promise<Response |
   const link = String((r.body as Record<string, any>)?.url ?? '');
   if (!link) {
     console.error('social-connect: postpeer connect url refused -- ' + ppError(r));
-    return json({ error: 'Could not start the connection (PostPeer: ' + ppError(r) + '). Try again shortly.' }, 502);
+    return json({ error: 'Could not start the connection (' + ppError(r) + '). Try again shortly.' }, 502);
   }
   console.log('social-connect start: platform=' + platform + ' via postpeer, agency ' + membership.agency_id);
   return json({ url: link, platform, via: 'postpeer', expiresInMinutes: PP_STATE_TTL_MS / 60000 });
@@ -315,7 +315,7 @@ async function startStudioPostPeer(req: Request, platform: string, allowed: bool
     profileId = String((made.body as Record<string, any>)?.profile?.id ?? '');
     if (!profileId) {
       console.error('social-connect: studio postpeer profile not created -- ' + ppError(made));
-      return json({ error: 'Could not start the connection (PostPeer: ' + ppError(made) + '). Try again shortly.' }, 502);
+      return json({ error: 'Could not start the connection (' + ppError(made) + '). Try again shortly.' }, 502);
     }
     const { error: saveErr } = await admin.from('platform_settings').insert({
       key: STUDIO_PP_KEY, value: { profile_id: profileId },
@@ -340,7 +340,7 @@ async function startStudioPostPeer(req: Request, platform: string, allowed: bool
   const link = String((r.body as Record<string, any>)?.url ?? '');
   if (!link) {
     console.error('social-connect: studio postpeer connect url refused -- ' + ppError(r));
-    return json({ error: 'Could not start the connection (PostPeer: ' + ppError(r) + '). Try again shortly.' }, 502);
+    return json({ error: 'Could not start the connection (' + ppError(r) + '). Try again shortly.' }, 502);
   }
   console.log('social-connect start: studio ' + platform + ' via postpeer');
   return json({ url: link, platform, via: 'postpeer', studio: true, expiresInMinutes: PP_STATE_TTL_MS / 60000 });
@@ -368,7 +368,7 @@ async function finishStudioPostPeer(
   const sorted = [...list].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? ''));
   const fresh = sorted.filter((i) => Date.parse(i.createdAt ?? '') >= started - 60_000);
   const picked = fresh.length ? fresh : sorted.slice(0, 1);
-  if (!picked.length) return backToPortal('error', 'PostPeer did not finish connecting ' + platform + '. Please try again.');
+  if (!picked.length) return backToPortal('error', 'Connecting ' + platform + ' did not finish. Please try again.');
 
   // deno-lint-ignore no-explicit-any
   const admin: any = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
@@ -518,7 +518,7 @@ async function finishPostPeer(url: URL, ret: { state: string; cancelled: boolean
   const fresh = sorted.filter((i) => Date.parse(i.createdAt ?? '') >= started - 60_000);
   const picked = fresh.length ? fresh : sorted.slice(0, 1);
   if (!picked.length) {
-    return backToPortal('error', 'PostPeer did not finish connecting ' + platform + '. Please try again.', {
+    return backToPortal('error', 'Connecting ' + platform + ' did not finish. Please try again.', {
       facts: { where: 'postpeer', platform, integrations: list.length },
     });
   }
@@ -1752,6 +1752,7 @@ Deno.serve(async (req: Request) => {
       youtube: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'),
       x: viaPp('x'),
       linkedin: viaPp('linkedin'),
+      facebook: viaPp('facebook'),
     };
     const studioPp = (p: string) => studioCanConnect(p, agencyReady[p] === true, ppPublishOn(p));
     if (url.searchParams.get('action') === 'status') {
@@ -1768,7 +1769,7 @@ Deno.serve(async (req: Request) => {
           facebook: {
             ready: Boolean(appId && appSecret),
             mode: fbConfigId ? 'login-for-business' : 'classic',
-            studio: Boolean(appId && appSecret),
+            studio: Boolean(appId && appSecret) || studioPp('facebook'),
           },
           instagram: { ready: agencyReady.instagram, studio: studioPp('instagram') },
           /* Reported like the others so the portal can decline to offer a
@@ -1915,7 +1916,7 @@ Deno.serve(async (req: Request) => {
           });
           const integrations = ((sel.body as Record<string, any>)?.integrations ?? []) as Array<Record<string, any>>;
           if (sel.status !== 200 || !integrations.length) {
-            return json({ error: 'PostPeer could not connect those Pages (' + ppError(sel) + '). Connect Facebook again.' }, 502);
+            return json({ error: 'Those Pages could not be connected (' + ppError(sel) + '). Connect Facebook again.' }, 502);
           }
           const saved = await savePostPeerAccounts(who.admin, who.agencyId, who.userId, 'facebook', integrations);
           if (saved.error && !saved.names.length) return json({ error: 'Nothing could be saved: ' + saved.error }, 500);
@@ -2273,9 +2274,13 @@ Deno.serve(async (req: Request) => {
     if (url.searchParams.get('action') === 'start') {
       const startPlatform = (url.searchParams.get('platform') ?? 'instagram').toLowerCase();
       if (url.searchParams.get('for') === 'studio') {
-        /* Synapse Studio (2026-11-18): Facebook keeps the studio's own Page login below; every other platform the
-           studio offers goes through Synapse's own PostPeer profile. Never the agency path: staff belong to no agency. */
-        if (startPlatform !== 'facebook') return await startStudioPostPeer(req, startPlatform, studioPp(startPlatform));
+        /* Synapse Studio (2026-11-18): every platform the studio offers goes through Synapse's own PostPeer profile.
+           Facebook too since 2026-11-26 (PostPeer hosts the Page choice): our own Page login below showed staff without
+           a role on our Meta app "Feature Unavailable". It is still used if PostPeer is off for Facebook. Never the
+           agency path: staff belong to no agency. */
+        if (startPlatform !== 'facebook' || studioPp('facebook')) {
+          return await startStudioPostPeer(req, startPlatform, studioPp(startPlatform));
+        }
       } else {
         const viaPostPeer = await startPostPeer(req, startPlatform);
         if (viaPostPeer) return viaPostPeer;

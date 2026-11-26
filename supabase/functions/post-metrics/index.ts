@@ -29,7 +29,9 @@
  */
 
 /* PostPeer (2026-11-13): its key and API call, from postpeer-webhook's folder (see that file for why not _shared). */
-import { cleanupVerdict, deliveryOf, pp, ppError, PP_NAME, ppKey, statsDays, statsDue } from '../postpeer-webhook/postpeer.ts';
+import {
+  cleanupVerdict, deliveryOf, isDailyUploadLimit, pacificDay, pp, ppError, PP_NAME, ppKey, statsDays, statsDue,
+} from '../postpeer-webhook/postpeer.ts';
 
 /* TRYPOST IS DISCONNECTED (Eden, 2026-10-23: "we already have a backend, disconnect TryPost"). Nothing in this function calls it any
    more, whatever secrets are still set. The code paths are kept, dormant, so nothing else in the workflow changes shape. */
@@ -216,8 +218,16 @@ async function confirmPostPeerDelivery(h: Record<string, string>, days: number, 
       patch = { payload: { ...base, delivery: 'live', live_at: liveAt, live_url: entry?.platformPostUrl ?? null,
                            native_post_id: entry?.platformPostId ?? null }, ...(liveAt ? { published_at: liveAt } : {}) };
       settled++;
+    } else if (delivery === 'failed' && row.platform === 'youtube' && isDailyUploadLimit(String(entry?.errorMessage ?? ''))) {
+      /* YouTube's 5 a day: waits for midnight Pacific instead of failing (the same rule as postpeer-webhook). */
+      patch = { status: 'scheduled', scheduled_at: new Date(pacificDay().next.getTime() + 5 * 60000).toISOString(),
+                failure_reason: 'YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.',
+                /* attempts back to 0 and a fresh key, as in postpeer-webhook (Greptile on #50). */
+                attempts: 0,
+                payload: { ...base, delivery: 'waiting', pp_key_gen: Math.max(1, Number((row.payload ?? {}).pp_key_gen) || 1) + 1 } };
+      settled++;
     } else if (delivery === 'failed') {
-      const why = String(entry?.errorMessage ?? 'PostPeer could not publish this post.').slice(0, 500);
+      const why = String(entry?.errorMessage ?? 'This post could not be published.').slice(0, 500);
       patch = { status: 'failed', failure_reason: why, payload: { ...base, delivery: 'failed', delivery_error: why } };
       settled++;
     } else {

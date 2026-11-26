@@ -27,7 +27,9 @@ import { corsHeaders, json } from '../_shared/cors.ts';
 import { fastLlm } from '../_shared/llm.ts';
 import { captionTarget, fitAtSentence, lengthRule } from '../_shared/caption-fit.ts';
 /* PostPeer (2026-11-18): the studio's own accounts, connected in social-connect (for=studio). */
-import { deliveryOf, pp, ppError, PP_NAME, ppKey, ppPublishOn, studioPostBody } from '../postpeer-webhook/postpeer.ts';
+import {
+  deliveryOf, instagramSafeMedia, pp, ppError, PP_NAME, ppKey, ppLimitOf, ppPublishOn, studioPostBody,
+} from '../postpeer-webhook/postpeer.ts';
 
 type Admin = ReturnType<typeof createClient>;
 type Row = Record<string, unknown>;
@@ -729,13 +731,19 @@ async function sendPostPeer(settle: (patch: Row) => unknown, retry: (why: string
     return false;
   }
   const caption = platform === 'x' ? fitForX(String(p.caption ?? '')) : String(p.caption ?? '');
-  const built = studioPostBody(platform, caption, (p.media_urls as string[]) ?? [], integrationId, String(p.id));
+  /* Instagram refuses a photo outside 4:5 to 1.91:1, and studio uploads are phone photos (26 Nov): cropped first. */
+  const mediaIn = (p.media_urls as string[]) ?? [];
+  const media = platform === 'instagram' ? await instagramSafeMedia(mediaIn.slice(0, 10)) : mediaIn;
+  const built = studioPostBody(platform, caption, media, integrationId, String(p.id));
   if ('error' in built) { await settle({ status: 'failed', failure_reason: built.error }); return false; }
 
   const r = await pp('/posts/', { method: 'POST', body: JSON.stringify(built.body) }, 60000);
   const b = (r.body ?? {}) as Row;
   if (r.status === 0) return await retry('Could not reach PostPeer: ' + ppError(r));
-  if (r.status === 402) { await settle({ status: 'failed', failure_reason: 'PostPeer credits are used up. Add credits at postpeer.dev, then send it again.' }); return false; }
+  /* Our plan's limits, in words: out of credits or too fast is tried again; not allowed is said plainly. */
+  const limit = ppLimitOf(r);
+  if (limit?.retryInMin) return await retry(limit.message);
+  if (limit) { await settle({ status: 'failed', failure_reason: limit.message }); return false; }
   if (r.status >= 500) return await retry('PostPeer had a problem (HTTP ' + r.status + '): ' + ppError(r));
   if (r.status !== 200 && r.status !== 202) { await settle({ status: 'failed', failure_reason: 'PostPeer refused the post: ' + ppError(r) }); return false; }
 
