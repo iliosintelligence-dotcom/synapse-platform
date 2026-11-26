@@ -1752,6 +1752,7 @@ Deno.serve(async (req: Request) => {
       youtube: Boolean(ytClientId && ytClientSecret) || viaPp('youtube'),
       x: viaPp('x'),
       linkedin: viaPp('linkedin'),
+      facebook: viaPp('facebook'),
     };
     const studioPp = (p: string) => studioCanConnect(p, agencyReady[p] === true, ppPublishOn(p));
     if (url.searchParams.get('action') === 'status') {
@@ -2273,9 +2274,13 @@ Deno.serve(async (req: Request) => {
     if (url.searchParams.get('action') === 'start') {
       const startPlatform = (url.searchParams.get('platform') ?? 'instagram').toLowerCase();
       if (url.searchParams.get('for') === 'studio') {
-        /* Synapse Studio (2026-11-18): Facebook keeps the studio's own Page login below; every other platform the
-           studio offers goes through Synapse's own PostPeer profile. Never the agency path: staff belong to no agency. */
-        if (startPlatform !== 'facebook') return await startStudioPostPeer(req, startPlatform, studioPp(startPlatform));
+        /* Synapse Studio (2026-11-18): every platform the studio offers goes through Synapse's own PostPeer profile.
+           Facebook too since 2026-11-26 (PostPeer hosts the Page choice): our own Page login below showed staff without
+           a role on our Meta app "Feature Unavailable". It is still used if PostPeer is off for Facebook. Never the
+           agency path: staff belong to no agency. */
+        if (startPlatform !== 'facebook' || studioPp('facebook')) {
+          return await startStudioPostPeer(req, startPlatform, studioPp(startPlatform));
+        }
       } else {
         const viaPostPeer = await startPostPeer(req, startPlatform);
         if (viaPostPeer) return viaPostPeer;

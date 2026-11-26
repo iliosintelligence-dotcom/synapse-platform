@@ -5,7 +5,7 @@ Deno.test('studio offers only what agencies are offered, and only through PostPe
   assertEquals(studioCanConnect('instagram', true, true), true);
   assertEquals(studioCanConnect('instagram', false, true), false);   // agencies are not offered it: nor is the studio
   assertEquals(studioCanConnect('x', true, false), false);           // PostPeer posting paused for X
-  assertEquals(studioCanConnect('facebook', true, true), false);     // Facebook keeps the studio's own Page login
+  assertEquals(studioCanConnect('facebook', true, true), true);      // Facebook through PostPeer since 2026-11-26
   assertEquals(studioCanConnect('telegram', true, true), false);     // Telegram keeps our bot
 });
 
@@ -35,5 +35,16 @@ Deno.test('studio post body: media rules', () => {
   const xs = studioPostBody('x', 'x', ['1.jpg', '2.jpg', '3.jpg', '4.jpg', '5.jpg'], 'i', 'p');
   if (!('body' in xs)) throw new Error(xs.error);
   assertEquals((xs.body.mediaItems as unknown[]).length, 4);
-  assertEquals('error' in studioPostBody('facebook', 'x', ['1.jpg'], 'i', 'p'), true);
+  assertEquals('error' in studioPostBody('facebook', 'x', ['1.jpg'], 'i', 'p'), false);   // a Page post with a photo
+});
+
+Deno.test('studio Facebook goes through PostPeer: offered when switched on, one kind of media, text alone allowed', () => {
+  assertEquals(studioCanConnect('facebook', true, true), true);
+  assertEquals(studioCanConnect('facebook', true, false), false);
+  type Built = { body: { mediaItems: unknown; platforms: Array<{ platform: string }> } };
+  const mixed = studioPostBody('facebook', 'Hi', ['a.jpg', 'b.mp4'], 'acc', 'p1') as Built;
+  assertEquals(mixed.body.mediaItems, [{ type: 'video', url: 'b.mp4' }]);
+  assertEquals(mixed.body.platforms[0].platform, 'facebook');
+  const text = studioPostBody('facebook', 'Just words', [], 'acc', 'p2') as Built;
+  assertEquals(text.body.mediaItems, []);
 });

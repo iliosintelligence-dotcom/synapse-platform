@@ -193,8 +193,11 @@ export function deliveryOf(status: string): 'live' | 'failed' | 'pending' {
 
 /* ── Synapse Studio (2026-11-18) ──────────────────────────────────────────── */
 
-/** Platforms the studio connects through PostPeer. Facebook (our own Page login) and Telegram (our bot) stay as they were. */
-export const STUDIO_PP_PLATFORMS = ['instagram', 'tiktok', 'youtube', 'x', 'linkedin'];
+/** Platforms the studio connects through PostPeer. Telegram (our bot) stays as it was. Facebook joined on 2026-11-26:
+ *  the studio's own Page login runs on Synapse's Meta app, which is in Development mode, so Facebook showed everyone
+ *  without a role on that app "Feature Unavailable". PostPeer's Facebook app is approved; Pages already connected
+ *  through our own login keep working as they are. */
+export const STUDIO_PP_PLATFORMS = ['instagram', 'tiktok', 'youtube', 'x', 'linkedin', 'facebook'];
 
 /** Whether the studio offers a platform: only one the agency studio offers too (`agencyReady`, social-connect's status),
  *  and only while posting to it through PostPeer is switched on (`publishOn`, ppPublishOn). */
@@ -232,6 +235,9 @@ export function studioPostBody(
     const vids = media.filter((u) => mediaTypeOf(u) === 'video');
     media = vids.length ? vids.slice(0, 1) : media.slice(0, platform === 'x' ? 4 : 9);
     if (platform === 'linkedin') specific = { visibility: 'PUBLIC' };
+  } else if (platform === 'facebook') {
+    /* A Page post: one kind of media (Facebook refuses video and photos together), or text alone. */
+    media = oneKindOfMedia('facebook', media).slice(0, 10);
   } else {
     return { error: 'The studio does not post to ' + platform + ' through PostPeer.' };
   }
