@@ -245,3 +245,98 @@ export function studioPostBody(
     },
   };
 }
+
+/* ── media every platform accepts (2026-11-26) ─────────────────────────────
+   Read from the posts PostPeer refused in November: "Facebook does not allow mixing video and images in one post",
+   "TikTok posts cannot mix video and image media items", "The aspect ratio is not supported" (Instagram), "Daily
+   YouTube upload limit reached (5 per day). Resets at midnight Pacific." A listing's gallery is photos and videos
+   together, and phone photos are tall, so each of these is the ordinary case, not an edge case. */
+
+/** Facebook and TikTok take one kind of media per post: the first video alone when there is one, else the photos. */
+export function oneKindOfMedia(platform: string, media: string[]): string[] {
+  if (platform !== 'facebook' && platform !== 'tiktok') return media;
+  const vids = media.filter((u) => mediaTypeOf(u) === 'video');
+  return vids.length ? vids.slice(0, 1) : media;
+}
+
+/** Instagram feed photos must be between 4:5 (0.8) and 1.91:1. The largest crop inside a photo that is, or null when
+ *  the photo already is. Rounded inwards, so the result is never just outside the range. */
+export function igCropSize(w: number, h: number): { width: number; height: number } | null {
+  if (!(w > 0 && h > 0)) return null;
+  const r = w / h;
+  if (r >= 0.8 && r <= 1.91) return null;
+  return r < 0.8 ? { width: w, height: Math.floor(w / 0.8) } : { width: Math.floor(h * 1.91), height: h };
+}
+
+/** A public Supabase Storage URL, cropped by Storage's own image renderer. Null for any other host. The crop must fit
+ *  inside the photo: the renderer never enlarges, and asked to, it returns the photo unchanged. format=origin keeps
+ *  it a JPEG; without it a WebP can come back, which Instagram refuses. */
+export function storageCropUrl(url: string, size: { width: number; height: number }): string | null {
+  const m = String(url || '').match(/^(https:\/\/[^/]+)\/storage\/v1\/object\/public\/([^?#]+)/);
+  if (!m) return null;
+  return m[1] + '/storage/v1/render/image/public/' + m[2]
+    + '?width=' + size.width + '&height=' + size.height + '&resize=cover&quality=90&format=origin';
+}
+
+/** Width and height from the first bytes of a JPEG, PNG or WebP. Null when it cannot tell. */
+export function imageSizeFromBytes(d: Uint8Array): { w: number; h: number } | null {
+  const u16 = (i: number) => (d[i] << 8) | d[i + 1];
+  const u32 = (i: number) => ((d[i] << 24) >>> 0) + (d[i + 1] << 16) + (d[i + 2] << 8) + d[i + 3];
+  if (d.length > 24 && d[0] === 0x89 && d[1] === 0x50 && d[2] === 0x4e && d[3] === 0x47) return { w: u32(16), h: u32(20) };
+  if (d.length > 30 && d[0] === 0x52 && d[1] === 0x49 && d[8] === 0x57 && d[9] === 0x45) {
+    const kind = String.fromCharCode(d[12], d[13], d[14], d[15]);
+    if (kind === 'VP8 ') return { w: (d[26] | (d[27] << 8)) & 0x3fff, h: (d[28] | (d[29] << 8)) & 0x3fff };
+    if (kind === 'VP8L') {
+      const b = d[21] | (d[22] << 8) | (d[23] << 16) | (d[24] << 24);
+      return { w: (b & 0x3fff) + 1, h: ((b >> 14) & 0x3fff) + 1 };
+    }
+    if (kind === 'VP8X') return { w: 1 + (d[24] | (d[25] << 8) | (d[26] << 16)), h: 1 + (d[27] | (d[28] << 8) | (d[29] << 16)) };
+    return null;
+  }
+  if (d[0] !== 0xff || d[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < d.length) {
+    if (d[i] !== 0xff) { i++; continue; }
+    const m = d[i + 1];
+    if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return { w: u16(i + 7), h: u16(i + 5) };
+    if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue; }
+    i += 2 + u16(i + 2);
+  }
+  return null;
+}
+
+/** Each Instagram feed photo made a shape Instagram takes. A photo whose size cannot be read, or that is not in
+ *  Supabase Storage, is sent as it was -- never dropped. Videos are left alone. */
+export async function instagramSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
+  return await Promise.all(media.map(async (url) => {
+    if (mediaTypeOf(url) !== 'image') return url;
+    try {
+      const r = await fetcher(url, { headers: { Range: 'bytes=0-131071' }, signal: AbortSignal.timeout(10000) });
+      if (!r.ok && r.status !== 206) return url;
+      const size = imageSizeFromBytes(new Uint8Array(await r.arrayBuffer()));
+      const crop = size ? igCropSize(size.w, size.h) : null;
+      return (crop && storageCropUrl(url, crop)) || url;
+    } catch {
+      return url;
+    }
+  }));
+}
+
+/** YouTube takes 5 uploads per channel per day, and the day ends at midnight Pacific. */
+export const YOUTUBE_DAILY_UPLOADS = 5;
+
+/** The start of the Pacific day `now` is in, and of the next one, as UTC instants. */
+export function pacificDay(now = new Date()): { start: Date; next: Date } {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit', timeZoneName: 'shortOffset',
+  }).formatToParts(now).map((p) => [p.type, p.value]));
+  const off = /GMT([+-]\d+)(?::(\d+))?/.exec(parts.timeZoneName ?? '');
+  const offMin = off ? Number(off[1]) * 60 + Math.sign(Number(off[1])) * Number(off[2] ?? 0) : -480;
+  const startUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) - offMin * 60000;
+  return { start: new Date(startUtc), next: new Date(startUtc + 864e5) };
+}
+
+/** Whether a PostPeer refusal is YouTube's daily cap (or Google's upload quota): wait for tomorrow, do not fail. */
+export function isDailyUploadLimit(message: string): boolean {
+  return /daily youtube upload limit|quota metric 'video uploads'|uploadlimitexceeded/i.test(String(message ?? ''));
+}
