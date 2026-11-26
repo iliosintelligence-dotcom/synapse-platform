@@ -271,19 +271,14 @@ export function oneKindOfMedia(platform: string, media: string[]): string[] {
 /** Instagram feed photos must be between 4:5 (0.8) and 1.91:1. The largest crop inside a photo that is, or null when
  *  the photo already is. Rounded inwards, so the result is never just outside the range. */
 export function igCropSize(w: number, h: number): { width: number; height: number } | null {
-  if (!(w > 0 && h > 0)) return null;
-  const r = w / h;
-  if (r >= 0.8 && r <= 1.91) return null;
-  return r < 0.8 ? { width: w, height: Math.floor(w / 0.8) } : { width: Math.floor(h * 1.91), height: h };
+  return cropIntoRange(w, h, 0.8, 1.91);
 }
 
 /** The largest exact 4:5 crop inside a photo, for an Instagram carousel (one aspect ratio throughout). Rounded so the
  *  result is never narrower than 4:5. Null when the photo already is 4:5. */
 export function ig45Size(w: number, h: number): { width: number; height: number } | null {
-  if (!(w > 0 && h > 0)) return null;
   /* Already 4:5, or a hair wider: left alone. Never a hair narrower, which is below Instagram's minimum (Greptile). */
-  if (w / h >= 0.8 && w / h - 0.8 < 0.005) return null;
-  return w / h > 0.8 ? { width: Math.min(w, Math.ceil(h * 0.8)), height: h } : { width: w, height: Math.floor(w / 0.8) };
+  return cropToRatio(w, h, 0.8);
 }
 
 /** A public Supabase Storage URL, cropped by Storage's own image renderer. Null for any other host. The crop must fit
@@ -333,10 +328,33 @@ function isOwnStorage(url: string): boolean {
   }
 }
 
-/** Each Instagram feed photo made a shape Instagram takes: one photo, the largest crop inside 4:5..1.91:1; several
- *  (a carousel, one aspect ratio throughout), each cropped to exactly 4:5. A photo whose size cannot be read, or that
- *  is not in our own Storage, is sent as it was -- never dropped. Videos are left alone. */
-export async function instagramSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
+/** The largest crop inside a photo with exactly ratio r (width / height), never on the wrong side of r. Null when the photo
+ *  already is r, or a hair over it. */
+export function cropToRatio(w: number, h: number, r: number): { width: number; height: number } | null {
+  if (!(w > 0 && h > 0)) return null;
+  if (w / h >= r && w / h - r < 0.005) return null;
+  return w / h > r ? { width: Math.min(w, Math.ceil(h * r)), height: h } : { width: w, height: Math.floor(w / r) };
+}
+
+/** The largest crop inside a photo that falls between min and max (width / height). Null when it already does. */
+export function cropIntoRange(w: number, h: number, min: number, max: number): { width: number; height: number } | null {
+  if (!(w > 0 && h > 0)) return null;
+  const r = w / h;
+  if (r >= min && r <= max) return null;
+  return r < min ? { width: w, height: Math.floor(w / min) } : { width: Math.floor(h * max), height: h };
+}
+
+type ShapeRule = { min: number; max: number; carousel: number };
+/** Instagram: one photo 4:5..1.91:1; a carousel all exactly 4:5 (PostPeer's Instagram guide). */
+export const IG_SHAPES: ShapeRule = { min: 0.8, max: 1.91, carousel: 0.8 };
+/** TikTok: each photo 1:2.13..2.13:1, and every carousel photo the same shape (PostPeer's TikTok guide, 26 Nov: "TikTok
+ *  photo carousels require all images to share the same aspect ratio"). 3:4 is the usual phone photo, so it crops least. */
+export const TIKTOK_SHAPES: ShapeRule = { min: 1 / 2.13, max: 2.13, carousel: 0.75 };
+
+/** Each photo made a shape the platform takes: one photo, the largest crop inside the range; several (a carousel), each
+ *  cropped to the carousel shape. A photo whose size cannot be read, or that is not in our own Storage, is sent as it was --
+ *  never dropped. Videos are left alone. */
+export async function safeShapedMedia(media: string[], rule: ShapeRule, fetcher: typeof fetch = fetch): Promise<string[]> {
   const carousel = media.filter((u) => mediaTypeOf(u) === 'image').length > 1;
   return await Promise.all(media.map(async (url) => {
     if (mediaTypeOf(url) !== 'image') return url;
@@ -346,12 +364,22 @@ export async function instagramSafeMedia(media: string[], fetcher: typeof fetch 
       const r = await fetcher(url, { headers: { Range: 'bytes=0-131071' }, signal: AbortSignal.timeout(10000) });
       if (!r.ok && r.status !== 206) return url;
       const size = imageSizeFromBytes(new Uint8Array(await r.arrayBuffer()));
-      const crop = size ? (carousel ? ig45Size(size.w, size.h) : igCropSize(size.w, size.h)) : null;
+      const crop = size ? (carousel ? cropToRatio(size.w, size.h, rule.carousel) : cropIntoRange(size.w, size.h, rule.min, rule.max)) : null;
       return (crop && storageCropUrl(url, crop)) || url;
     } catch {
       return url;
     }
   }));
+}
+
+/** Instagram's shapes (see IG_SHAPES). */
+export function instagramSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
+  return safeShapedMedia(media, IG_SHAPES, fetcher);
+}
+
+/** TikTok's shapes (see TIKTOK_SHAPES). */
+export function tiktokSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
+  return safeShapedMedia(media, TIKTOK_SHAPES, fetcher);
 }
 
 /** A video's length in seconds from the first bytes of an MP4/MOV whose index (moov) is at the front, as Instagram

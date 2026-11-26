@@ -28,7 +28,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer (2026-11-13): its switches and API call, from postpeer-webhook's folder (see that file for why not _shared).
    Cross-folder imports bundle fine with `supabase functions deploy`, as the _shared imports elsewhere show. */
 import {
-  allowanceOf, videoSeconds, X_MAX_VIDEO_SEC, fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, ppKey, ppLimitOf, type PpLimit, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
+  allowanceOf, tiktokSafeMedia, videoSeconds, X_MAX_VIDEO_SEC, fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, ppKey, ppLimitOf, type PpLimit, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
   pp, ppError, PP_NAME, ppPublishOn, YOUTUBE_DAILY_UPLOADS,
 } from '../postpeer-webhook/postpeer.ts';
 /* Inlined rather than imported from ../_shared. The import escapes the
@@ -1559,6 +1559,9 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   /* Facebook and TikTok refuse a post that mixes video and photos (four Facebook posts and one TikTok post, Nov). */
   media = oneKindOfMedia(post.platform, media);
   if (post.platform === 'tiktok' && !media.length) return fail('TikTok needs a photo or video.');
+  /* TikTok photos: each inside 1:2.13..2.13:1, and a carousel all one shape (26 Nov: "TikTok photo carousels require
+     all images to share the same aspect ratio"). */
+  if (post.platform === 'tiktok') media = await tiktokSafeMedia(media);
 
   const body = {
     content: caption,
@@ -1576,7 +1579,8 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   };
   Object.assign(payload, { postpeer_request: { ...body, content: undefined } });
 
-  let r = await pp('/posts/', { method: 'POST', body: JSON.stringify(body) }, 60000);
+  /* 45 s, inside the run's time budget: a slower answer is retried on the same key, which PostPeer replays, never doubles. */
+  let r = await pp('/posts/', { method: 'POST', body: JSON.stringify(body) }, 45000);
   let b = r.body as Record<string, any>;
   /* The key replayed an earlier failed attempt: ask PostPeer to send that one again. */
   if ((r.status === 200 || r.status === 202) && b?.status === 'failed' && b?.postId && post.attempts > 1) {
@@ -1640,6 +1644,35 @@ const ADAPTERS: Record<string, Adapter> = {
 const PLATFORM_NAME: Record<string, string> = { x: 'X', linkedin: 'LinkedIn', youtube: 'YouTube', tiktok: 'TikTok' };
 function notConnected(platform: string): string {
   return 'No ' + (PLATFORM_NAME[platform] ?? platform) + ' account is connected to this agency. Connect one in the portal, then publish.';
+}
+
+/** Posts left at 'publishing' for 15 minutes by a run that was cut off (see where it is called). */
+// deno-lint-ignore no-explicit-any
+async function rescueStuck(admin: any): Promise<void> {
+  // deno-lint-ignore no-explicit-any
+  const db: any = admin;
+  const { data: stuck } = await db.from('social_posts')
+    .select('id, agency_id, platform, social_account_id, city_channel_id, attempts')
+    .eq('status', 'publishing').is('deleted_at', null)
+    .lt('updated_at', new Date(Date.now() - 15 * 60_000).toISOString()).limit(50);
+  for (const row of (stuck ?? []) as Array<Record<string, unknown>>) {
+    let viaPostPeer = false;
+    if (row.city_channel_id) {
+      const { data: c } = await db.from('city_channels').select('postpeer_integration_id').eq('id', row.city_channel_id).maybeSingle();
+      viaPostPeer = Boolean(c?.postpeer_integration_id);
+    } else {
+      let q = db.from('social_accounts').select('auth_source').eq('agency_id', row.agency_id).eq('platform', row.platform)
+        .eq('is_active', true).is('deleted_at', null);
+      q = row.social_account_id ? q.eq('id', row.social_account_id) : q.order('connected_at', { ascending: true }).limit(1);
+      const { data: a } = await q;
+      viaPostPeer = Array.isArray(a) && a[0]?.auth_source === 'postpeer';
+    }
+    await db.from('social_posts').update(viaPostPeer
+      ? { status: 'scheduled', attempts: Math.max(0, Number(row.attempts) - 1), scheduled_at: new Date().toISOString(),
+          failure_reason: 'Sending was cut off; sent again (it cannot go out twice).' }
+      : { status: 'failed', failure_reason: 'Not confirmed: sending was cut off and it may have gone out. Check the account before posting it again.' })
+      .eq('id', row.id).eq('status', 'publishing');
+  }
 }
 
 /** A dry run always goes to the mock, whatever the platform -- that is what
@@ -2001,6 +2034,11 @@ Deno.serve(async (req: Request) => {
        scheduled post would rehearse forever and never go out. */
     const live = scheduled ? true : body.live === true;
 
+    /* STUCK MID-SEND (2026-11-26). A run cut off by the time limit left its claimed posts at 'publishing', and nothing
+       ever picked them up again. After 15 minutes: one that goes through PostPeer is sent again (its key makes PostPeer
+       replay the first answer, so it can never go out twice); any other is marked failed with what to check. */
+    if (scheduled) await rescueStuck(admin);
+
     const { data: claimed, error: claimErr } = scheduled
       ? await admin.rpc('claim_social_due_any', { p_limit: limit })
       : await admin.rpc('claim_social_batch', { p_agency_id: agencyId, p_limit: limit });
@@ -2054,7 +2092,8 @@ Deno.serve(async (req: Request) => {
     let dryRun = 0;
     const results: Array<Record<string, unknown>> = [];
 
-    for (const post of rows) {
+    /* ONE POST, start to finish. Was the body of a one-by-one loop (see the lanes below). */
+    const handle = async (post: QueuedPost): Promise<void> => {
       const rehearsal = post.dry_run || !live;
       /* Whose account: ours from synapse_channels, or the agency's from
          social_accounts. Reading the agency's connection for a synapse-leg
@@ -2142,7 +2181,7 @@ Deno.serve(async (req: Request) => {
         results.push({ id: post.id, platform: post.platform, leg: post.leg, status: 'deferred',
           until: result.deferUntil, reason: result.error, limit: result.limit?.code ?? null });
         if (result.limit) limits[result.limit.code] = result.limit.message;
-        continue;
+        return;
       }
 
       if (result.ok) {
@@ -2168,7 +2207,7 @@ Deno.serve(async (req: Request) => {
           console.error('social-publish: provider accepted ' + post.id + ' but the save failed', saveErr);
           results.push({ id: post.id, platform: post.platform, leg: post.leg, status: 'published_unsaved',
             provider: result.provider, dryRun: post.dry_run, postId: result.postId });
-          continue;
+          return;
         }
         published++;
         /* A Telegram post gets its Story kit: see sendStoryKit. Never allowed
@@ -2181,7 +2220,7 @@ Deno.serve(async (req: Request) => {
           id: post.id, platform: post.platform, leg: post.leg, status: 'published',
           provider: result.provider, dryRun: post.dry_run, postId: result.postId,
         });
-        continue;
+        return;
       }
 
       // attempts was incremented by the claim, so this row has had `attempts`
@@ -2209,7 +2248,45 @@ Deno.serve(async (req: Request) => {
         status: exhausted ? 'failed' : 'scheduled',
         provider: result.provider, error: result.error, limit: result.limit?.code ?? null,
       });
+    };
+
+    /* SIDE BY SIDE, NOT ONE BY ONE (2026-11-26). The 26 Nov 3pm batch: each PostPeer send takes ~45 s, so posts sent one
+       after another ran into the function's time limit and the rest were cut off mid-send. Now: one lane per account,
+       posts for the same account still in order (YouTube's daily count stays exact), up to four lanes at once; nothing new
+       starts after 75 s, and a post not started goes back to the queue for the next minute, uncounted. A post that throws
+       goes back to the queue with its reason instead of taking the batch down with it. */
+    const startedAt = Date.now();
+    const BUDGET_MS = 75_000;
+    const lanes = new Map<string, QueuedPost[]>();
+    for (const post of rows) {
+      const key = [post.agency_id, post.leg, post.platform, post.city_channel_id ?? '', post.social_account_id ?? ''].join('|');
+      if (!lanes.has(key)) lanes.set(key, []);
+      (lanes.get(key) as QueuedPost[]).push(post);
     }
+    const waiting = [...lanes.values()];
+    const notStarted: QueuedPost[] = [];
+    const runLane = async (lane: QueuedPost[]) => {
+      for (const post of lane) {
+        if (Date.now() - startedAt > BUDGET_MS) { notStarted.push(post); continue; }
+        try {
+          await handle(post);
+        } catch (e) {
+          const why = 'Sending stopped on an error and will be tried again: ' + (e instanceof Error ? e.message : String(e)).slice(0, 200);
+          console.error('social-publish: ' + post.id + ' ' + why);
+          const exhausted = post.attempts >= post.max_attempts;
+          await admin.from('social_posts').update(exhausted ? { status: 'failed', failure_reason: why }
+            : { status: 'scheduled', failure_reason: why, scheduled_at: new Date(Date.now() + 2 * 60_000).toISOString() }).eq('id', post.id);
+          failed++; results.push({ id: post.id, platform: post.platform, status: exhausted ? 'failed' : 'scheduled', error: why });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, waiting.length) }, async () => {
+      while (waiting.length) await runLane(waiting.shift() as QueuedPost[]);
+    }));
+    /* Not started: back in the queue as it was (the claim counted an attempt that never happened). */
+    await Promise.all(notStarted.map((post) => admin.from('social_posts')
+      .update({ status: 'scheduled', attempts: Math.max(0, post.attempts - 1) }).eq('id', post.id)));
+    for (const post of notStarted) results.push({ id: post.id, platform: post.platform, status: 'next_run' });
 
     return json({
       claimed: rows.length,
