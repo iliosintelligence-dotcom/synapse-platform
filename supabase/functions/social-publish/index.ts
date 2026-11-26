@@ -2258,8 +2258,18 @@ Deno.serve(async (req: Request) => {
     const startedAt = Date.now();
     const BUDGET_MS = 75_000;
     const lanes = new Map<string, QueuedPost[]>();
+    /* Keyed by the account a post actually resolves to (Greptile on #53): a post naming the agency's default account and
+       one naming none reach the same account, so they share a lane and its YouTube count. */
+    const laneKey = (post: QueuedPost): string => {
+      const ours = onSynapseAccount(post, connByAgency[post.agency_id]);
+      const c = ours
+        ? (post.city_channel_id ? cityChannels[post.city_channel_id] : synapseChannels[post.platform])
+        : (connByAgency[post.agency_id] ?? {})[post.social_account_id || post.platform];
+      return c ? 'acct|' + post.platform + '|' + c.accountId
+        : [post.agency_id, post.leg, post.platform, post.city_channel_id ?? '', post.social_account_id ?? ''].join('|');
+    };
     for (const post of rows) {
-      const key = [post.agency_id, post.leg, post.platform, post.city_channel_id ?? '', post.social_account_id ?? ''].join('|');
+      const key = laneKey(post);
       if (!lanes.has(key)) lanes.set(key, []);
       (lanes.get(key) as QueuedPost[]).push(post);
     }
