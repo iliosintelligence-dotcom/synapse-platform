@@ -221,8 +221,10 @@ async function confirmPostPeerDelivery(h: Record<string, string>, days: number, 
     } else if (delivery === 'failed' && row.platform === 'youtube' && isDailyUploadLimit(String(entry?.errorMessage ?? ''))) {
       /* YouTube's 5 a day: waits for midnight Pacific instead of failing (the same rule as postpeer-webhook). */
       patch = { status: 'scheduled', scheduled_at: new Date(pacificDay().next.getTime() + 5 * 60000).toISOString(),
-                failure_reason: 'YouTube allows 5 uploads a day on this channel. This one goes out after midnight Pacific.',
-                payload: { ...base, delivery: 'waiting' } };
+                failure_reason: 'YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.',
+                /* attempts back to 0 and a fresh key, as in postpeer-webhook (Greptile on #50). */
+                attempts: 0,
+                payload: { ...base, delivery: 'waiting', pp_key_gen: Math.max(1, Number((row.payload ?? {}).pp_key_gen) || 1) + 1 } };
       settled++;
     } else if (delivery === 'failed') {
       const why = String(entry?.errorMessage ?? 'This post could not be published.').slice(0, 500);

@@ -1769,7 +1769,7 @@ Deno.serve(async (req: Request) => {
           facebook: {
             ready: Boolean(appId && appSecret),
             mode: fbConfigId ? 'login-for-business' : 'classic',
-            studio: Boolean(appId && appSecret),
+            studio: Boolean(appId && appSecret) || studioPp('facebook'),
           },
           instagram: { ready: agencyReady.instagram, studio: studioPp('instagram') },
           /* Reported like the others so the portal can decline to offer a

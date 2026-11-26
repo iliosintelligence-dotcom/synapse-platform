@@ -130,6 +130,9 @@ function buildPayload(post: QueuedPost): Record<string, unknown> {
     media: post.media_urls,
     media_count: post.media_urls.length,
     property_id: post.property_id,
+    /* Carried on every write-back: a failed try replaces the row's payload with this one, and losing pp_key_gen would
+       send the next try with the old PostPeer key (Greptile on #50). */
+    ...(Number(post.payload?.pp_key_gen) > 1 ? { pp_key_gen: Number(post.payload?.pp_key_gen) } : {}),
   };
 }
 
@@ -2089,7 +2092,8 @@ Deno.serve(async (req: Request) => {
             deferUntil: new Date(day.next.getTime() + 5 * 60000).toISOString() };
         }
       }
-      const result: PublishResult = capped ?? (!rehearsal && !conn && needsAccount)
+      /* Parenthesised: `a ?? b ? c : d` reads as `(a ?? b) ? c : d`, which sent a capped post down the no-account branch. */
+      const result: PublishResult = capped ?? ((!rehearsal && !conn && needsAccount)
         ? {
             ok: false, postId: null, provider: post.platform,
             /* A missing Synapse channel is OUR configuration problem, not the
@@ -2105,7 +2109,7 @@ Deno.serve(async (req: Request) => {
               : notConnected(post.platform),
             payload: buildPayload(post),
           }
-        : await adapterFor(post, live, conn, ours)(post, conn ?? NO_CONNECTION);
+        : await adapterFor(post, live, conn, ours)(post, conn ?? NO_CONNECTION));
       if (post.dry_run || !live) dryRun++;
       if (result.ok && !rehearsal && post.platform === 'youtube' && conn) {
         const key = conn.platformAccountId || conn.accountId;
@@ -2114,9 +2118,12 @@ Deno.serve(async (req: Request) => {
 
       if (!result.ok && result.deferUntil) {
         /* Back in the queue for later, and this try is not counted: the post did nothing wrong. */
+        /* And a fresh PostPeer key for the next try: if PostPeer made a post for this one (the daily cap reported after
+           the fact), the old key would only replay that refusal, and the retry path needs attempts > 1 (Greptile). */
         await admin.from('social_posts').update({
           status: 'scheduled', scheduled_at: result.deferUntil, failure_reason: result.error,
           attempts: Math.max(0, post.attempts - 1),
+          payload: { ...(post.payload ?? {}), pp_key_gen: Math.max(1, Number(post.payload?.pp_key_gen) || 1) + 1 },
         }).eq('id', post.id);
         results.push({ id: post.id, platform: post.platform, leg: post.leg, status: 'deferred',
           until: result.deferUntil, reason: result.error, limit: result.limit?.code ?? null });

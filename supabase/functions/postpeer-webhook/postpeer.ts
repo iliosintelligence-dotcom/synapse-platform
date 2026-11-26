@@ -312,11 +312,23 @@ export function imageSizeFromBytes(d: Uint8Array): { w: number; h: number } | nu
   return null;
 }
 
+/** Whether a URL is this project's own Storage (SUPABASE_URL's host). */
+function isOwnStorage(url: string): boolean {
+  try {
+    const own = new URL(Deno.env.get('SUPABASE_URL') ?? '').host;
+    return Boolean(own) && new URL(url).host === own;
+  } catch {
+    return false;
+  }
+}
+
 /** Each Instagram feed photo made a shape Instagram takes. A photo whose size cannot be read, or that is not in
  *  Supabase Storage, is sent as it was -- never dropped. Videos are left alone. */
 export async function instagramSafeMedia(media: string[], fetcher: typeof fetch = fetch): Promise<string[]> {
   return await Promise.all(media.map(async (url) => {
     if (mediaTypeOf(url) !== 'image') return url;
+    /* Only our own Storage is read: an address typed into a listing is never fetched from here (Greptile on #50). */
+    if (!storageCropUrl(url, { width: 1, height: 1 }) || !isOwnStorage(url)) return url;
     try {
       const r = await fetcher(url, { headers: { Range: 'bytes=0-131071' }, signal: AbortSignal.timeout(10000) });
       if (!r.ok && r.status !== 206) return url;
@@ -332,15 +344,32 @@ export async function instagramSafeMedia(media: string[], fetcher: typeof fetch 
 /** YouTube takes 5 uploads per channel per day, and the day ends at midnight Pacific. */
 export const YOUTUBE_DAILY_UPLOADS = 5;
 
+/** Los Angeles' offset from UTC, in minutes, at one instant (-480 in winter, -420 in summer). */
+function laOffsetMin(at: Date): number {
+  const name = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', timeZoneName: 'shortOffset' })
+    .formatToParts(at).find((p) => p.type === 'timeZoneName')?.value ?? '';
+  const m = /GMT([+-]\d+)(?::(\d+))?/.exec(name);
+  return m ? Number(m[1]) * 60 + Math.sign(Number(m[1])) * Number(m[2] ?? 0) : -480;
+}
+
+/** Midnight at the start of a Los Angeles calendar day, as a UTC instant. The offset is read at that midnight itself,
+ *  not at "now", so the two daylight-saving change days are right too (Greptile on #50). */
+function laMidnight(y: number, mo: number, d: number): Date {
+  const guess = Date.UTC(y, mo - 1, d) - laOffsetMin(new Date(Date.UTC(y, mo - 1, d, 12))) * 60000;
+  return new Date(Date.UTC(y, mo - 1, d) - laOffsetMin(new Date(guess)) * 60000);
+}
+
 /** The start of the Pacific day `now` is in, and of the next one, as UTC instants. */
 export function pacificDay(now = new Date()): { start: Date; next: Date } {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit', timeZoneName: 'shortOffset',
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
   }).formatToParts(now).map((p) => [p.type, p.value]));
-  const off = /GMT([+-]\d+)(?::(\d+))?/.exec(parts.timeZoneName ?? '');
-  const offMin = off ? Number(off[1]) * 60 + Math.sign(Number(off[1])) * Number(off[2] ?? 0) : -480;
-  const startUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) - offMin * 60000;
-  return { start: new Date(startUtc), next: new Date(startUtc + 864e5) };
+  const y = Number(parts.year), mo = Number(parts.month), d = Number(parts.day);
+  const tomorrow = new Date(Date.UTC(y, mo - 1, d + 1));
+  return {
+    start: laMidnight(y, mo, d),
+    next: laMidnight(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate()),
+  };
 }
 
 /** Whether a PostPeer refusal is YouTube's daily cap (or Google's upload quota): wait for tomorrow, do not fail. */

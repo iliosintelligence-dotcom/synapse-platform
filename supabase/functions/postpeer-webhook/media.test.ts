@@ -38,6 +38,7 @@ Deno.test('image size from a JPEG and a PNG header', () => {
 });
 
 Deno.test('instagramSafeMedia crops a tall storage photo, leaves videos and unreadable photos', async () => {
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
   const tall = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0x05, 0x00, 0x02, 0x4f, 3, 0, 0, 0, 0, 0, 0]);
   const fake = ((url: string) => Promise.resolve(url.includes('tall')
     ? new Response(tall, { status: 206 }) : new Response('nope', { status: 404 }))) as unknown as typeof fetch;
@@ -81,4 +82,26 @@ Deno.test('allowance: paused only when monthly and purchased are both used', () 
   assertEquals(allowanceOf(r(0, 5)).paused, false);
   assertEquals(allowanceOf(r(0, 0)), { remaining: 0, resetsAt: '2026-12-25T12:52:05.000Z', paused: true });
   assertEquals(allowanceOf({ status: 500, body: {} }).paused, false);
+});
+
+Deno.test('instagramSafeMedia never fetches an address outside our own Storage', async () => {
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
+  const seen: string[] = [];
+  const spy = ((url: string) => { seen.push(url); return Promise.resolve(new Response('x', { status: 404 })); }) as unknown as typeof fetch;
+  const out = await instagramSafeMedia([
+    'http://169.254.169.254/latest/meta-data/a.jpg',
+    'https://other.supabase.co/storage/v1/object/public/p/a.jpg',
+    'https://x.supabase.co/storage/v1/object/public/p/ok.jpg',
+  ], spy);
+  assertEquals(seen, ['https://x.supabase.co/storage/v1/object/public/p/ok.jpg']);
+  assertEquals(out[0], 'http://169.254.169.254/latest/meta-data/a.jpg');
+});
+
+Deno.test('pacific day on both daylight-saving change days', () => {
+  const fall = pacificDay(new Date('2026-11-01T20:00:00Z'));     // 1 Nov: PDT until 02:00, PST after
+  assertEquals(fall.start.toISOString(), '2026-11-01T07:00:00.000Z');
+  assertEquals(fall.next.toISOString(), '2026-11-02T08:00:00.000Z');
+  const spring = pacificDay(new Date('2026-03-08T20:00:00Z'));   // 8 Mar: PST until 02:00, PDT after
+  assertEquals(spring.start.toISOString(), '2026-03-08T08:00:00.000Z');
+  assertEquals(spring.next.toISOString(), '2026-03-09T07:00:00.000Z');
 });
