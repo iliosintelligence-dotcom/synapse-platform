@@ -351,6 +351,14 @@ export function fitWithin(s: { width: number; height: number }, maxSide?: number
   return { width: Math.max(1, Math.floor(s.width * k)), height: Math.max(1, Math.floor(s.height * k)) };
 }
 
+/** Rounding a scaled size down can leave it a hair outside the allowed shapes (2560x1200 -> 1080x507 is 2.1302 against
+ *  2.13; Greptile on #55). Trimmed back inside, never enlarged. */
+function intoRange(s: { width: number; height: number }, rule: { min: number; max: number }): { width: number; height: number } {
+  if (s.width / s.height > rule.max) return { width: Math.floor(s.height * rule.max), height: s.height };
+  if (s.width / s.height < rule.min) return { width: s.width, height: Math.floor(s.width / rule.min) };
+  return s;
+}
+
 type ShapeRule = { min: number; max: number; carousel: number; maxSide?: number };
 /** Instagram: one photo 4:5..1.91:1; a carousel all exactly 4:5 (PostPeer's Instagram guide). */
 export const IG_SHAPES: ShapeRule = { min: 0.8, max: 1.91, carousel: 0.8 };
@@ -375,7 +383,7 @@ export async function safeShapedMedia(media: string[], rule: ShapeRule, fetcher:
       if (!r.ok && r.status !== 206) return url;
       const size = imageSizeFromBytes(new Uint8Array(await r.arrayBuffer()));
       const crop = size ? (carousel ? cropToRatio(size.w, size.h, rule.carousel) : cropIntoRange(size.w, size.h, rule.min, rule.max)) : null;
-      const target = size ? fitWithin(crop ?? { width: size.w, height: size.h }, rule.maxSide) : null;
+      const target = size ? intoRange(fitWithin(crop ?? { width: size.w, height: size.h }, rule.maxSide), rule) : null;
       const changed = target && size && (crop || target.width !== size.w || target.height !== size.h);
       return (changed && storageCropUrl(url, target)) || url;
     } catch {

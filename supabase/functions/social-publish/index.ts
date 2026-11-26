@@ -1561,6 +1561,7 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   if (post.platform === 'tiktok' && !media.length) return fail('TikTok needs a photo or video.');
   /* TikTok photos: each inside 1:2.13..2.13:1, and a carousel all one shape (26 Nov: "TikTok photo carousels require
      all images to share the same aspect ratio"). */
+  /* (redeployed with postpeer.ts on 26 Nov: TikTok photos at 1080 px at most) */
   if (post.platform === 'tiktok') media = await tiktokSafeMedia(media);
 
   const body = {

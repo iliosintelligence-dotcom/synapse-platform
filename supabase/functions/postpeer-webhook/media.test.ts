@@ -191,3 +191,16 @@ Deno.test('tiktok photos: longest side at most 1080, shape kept; the photos TikT
   const [small] = await tiktokSafeMedia([base + 'e.jpg'], fake);
   assertEquals(small, base + 'e.jpg');                                    // already fine: sent as it is
 });
+
+Deno.test('tiktok: scaling never leaves a photo outside 1:2.13..2.13:1 (both edges)', async () => {
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
+  const jpeg = (w: number, h: number) => new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 0, 0, 0, 0, 0, 0]);
+  const sizes: Record<string, [number, number]> = { w: [2560, 1200], t: [1200, 2560] };
+  const fake = ((url: string) => Promise.resolve(new Response(jpeg(...sizes[url.split('/').pop()!.split('.')[0]]), { status: 206 }))) as unknown as typeof fetch;
+  const base = 'https://x.supabase.co/storage/v1/object/public/p/';
+  for (const k of ['w', 't']) {
+    const [u] = await tiktokSafeMedia([base + k + '.jpg'], fake);
+    const [, w, h] = u.match(/width=(\d+)&height=(\d+)/)!.map(Number);
+    assertEquals(w / h <= 2.13 && w / h >= 1 / 2.13 && Math.max(w, h) <= 1080, true, k + ' ' + w + 'x' + h + ' ' + w / h);
+  }
+});
