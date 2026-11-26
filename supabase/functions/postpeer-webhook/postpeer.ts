@@ -449,3 +449,13 @@ export function allowanceOf(r: PpResult): { remaining: number | null; resetsAt: 
   const left = Number(bal.monthly?.remaining ?? 0) + Number(bal.purchased?.remaining ?? 0);
   return { remaining: left, resetsAt: bal.monthly?.cycleEnd ?? null, paused: left <= 0 };
 }
+
+/** Why a studio Create cannot go to a channel connected through PostPeer, or null when it can (2026-11-26). The same
+ *  rules the sender applies (studioPostBody), checked when the post is saved, so a saved post is one that can go out.
+ *  `name` is the channel as the studio shows it. */
+export function studioComposeProblem(platform: string, name: string, caption: string, media: string[], publishOn: boolean): string | null {
+  if (!publishOn) return name + ' is switched off for posting right now.';
+  if (!STUDIO_PP_PLATFORMS.includes(platform)) return name + ' cannot take studio posts yet.';
+  const built = studioPostBody(platform, caption, media, 'check', 'check');
+  return 'error' in built ? built.error.replace(/\.$/, '') + ', or untick ' + name + '.' : null;
+}

@@ -48,3 +48,19 @@ Deno.test('studio Facebook goes through PostPeer: offered when switched on, one 
   const text = studioPostBody('facebook', 'Just words', [], 'acc', 'p2') as Built;
   assertEquals(text.body.mediaItems, []);
 });
+
+import { studioComposeProblem } from './postpeer.ts';
+
+Deno.test('studio Create accepts PostPeer channels with the sender\'s own media rules', () => {
+  const photo = ['https://a/1.jpg'], video = ['https://a/v.mp4'], both = ['https://a/1.jpg', 'https://a/v.mp4'];
+  assertEquals(studioComposeProblem('instagram', '@greenlight.estate', 'New home', photo, true), null);
+  assertEquals(studioComposeProblem('instagram', '@greenlight.estate', 'New home', both, true), null);   // goes as a Reel
+  assertEquals(studioComposeProblem('tiktok', '@synapse_naij', 'New home', video, true), null);
+  assertEquals(studioComposeProblem('facebook', 'Page', 'Just words', [], true), null);
+  assertEquals(studioComposeProblem('x', '@x', 'New home', photo, true), null);
+  assertEquals(studioComposeProblem('instagram', '@g', 'x', [], true), 'Instagram needs at least one photo or video, or untick @g.');
+  assertEquals(studioComposeProblem('tiktok', '@t', 'x', [], true), 'TikTok needs a photo or video, or untick @t.');
+  assertEquals(studioComposeProblem('youtube', 'YT', 'x', photo, true)?.startsWith('YouTube takes video only'), true);
+  assertEquals(studioComposeProblem('instagram', '@g', 'x', photo, false), '@g is switched off for posting right now.');
+  assertEquals(studioComposeProblem('telegram', 'T', 'x', photo, true), 'T cannot take studio posts yet.');
+});
