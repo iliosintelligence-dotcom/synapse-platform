@@ -169,3 +169,25 @@ Deno.test('tiktok: the 26 Nov 3pm carousel (1086x1448 beside other shapes) comes
   assertEquals(cropIntoRange(1080, 1920, TIKTOK_SHAPES.min, TIKTOK_SHAPES.max), null);   // 9:16 is fine as it is
   assertEquals(cropToRatio(1086, 1448, 0.75), null);                                     // already 3:4
 });
+
+import { fitWithin } from './postpeer.ts';
+
+Deno.test('tiktok photos: longest side at most 1080, shape kept; the photos TikTok refused come out inside it', async () => {
+  assertEquals(fitWithin({ width: 1086, height: 1448 }, 1080), { width: 810, height: 1080 });
+  assertEquals(fitWithin({ width: 2560, height: 1920 }, 1080), { width: 1080, height: 810 });
+  assertEquals(fitWithin({ width: 800, height: 1000 }, 1080), { width: 800, height: 1000 });
+  Deno.env.set('SUPABASE_URL', 'https://x.supabase.co');
+  const jpeg = (w: number, h: number) => new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 0, 0, 0, 0, 0, 0]);
+  const sizes: Record<string, [number, number]> = { a: [1086, 1448], b: [1087, 1447], c: [815, 1086], d: [2560, 1920], e: [800, 1000] };
+  const fake = ((url: string) => Promise.resolve(new Response(jpeg(...sizes[url.split('/').pop()!.split('.')[0]]), { status: 206 }))) as unknown as typeof fetch;
+  const base = 'https://x.supabase.co/storage/v1/object/public/p/';
+  const carousel = await tiktokSafeMedia(['a', 'b', 'c'].map((k) => base + k + '.jpg'), fake);
+  for (const u of carousel) {
+    const [, w, h] = u.match(/width=(\d+)&height=(\d+)/)!.map(Number);
+    assertEquals(Math.max(w, h) <= 1080 && w / h >= 0.75 && w / h < 0.755, true, u);
+  }
+  const [wide] = await tiktokSafeMedia([base + 'd.jpg'], fake);
+  assertEquals(wide.includes('width=1080&height=810'), true, wide);
+  const [small] = await tiktokSafeMedia([base + 'e.jpg'], fake);
+  assertEquals(small, base + 'e.jpg');                                    // already fine: sent as it is
+});
