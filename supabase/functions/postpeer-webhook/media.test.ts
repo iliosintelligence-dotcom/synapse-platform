@@ -60,3 +60,25 @@ Deno.test('the daily upload limit is recognised in both wordings PostPeer used',
   assertEquals(isDailyUploadLimit("Failed to start YouTube upload session: 429 { \"message\": \"Quota exceeded for quota metric 'Video Uploads'"), true);
   assertEquals(isDailyUploadLimit('YouTube takes video only.'), false);
 });
+
+import { allowanceOf, ppLimitOf } from './postpeer.ts';
+
+Deno.test('plan limits are said in terms of the plan, never the posting service, and say what happens next', () => {
+  for (const status of [402, 403, 429]) {
+    const l = ppLimitOf({ status, body: { message: 'x' } })!;
+    assertEquals(/postpeer/i.test(l.message), false);
+    assertEquals(/plan/i.test(l.message), true);
+  }
+  assertEquals(ppLimitOf({ status: 402, body: {} })!.retryInMin, 60);
+  assertEquals(ppLimitOf({ status: 403, body: {} })!.retryInMin, null);
+  assertEquals(ppLimitOf({ status: 200, body: {} }), null);
+  assertEquals(ppLimitOf({ status: 500, body: {} }), null);
+});
+
+Deno.test('allowance: paused only when monthly and purchased are both used', () => {
+  const r = (m: number, p: number) => ({ status: 200, body: { balance: { monthly: { remaining: m, cycleEnd: '2026-12-25T12:52:05.000Z' }, purchased: { remaining: p } } } });
+  assertEquals(allowanceOf(r(1999, 0)).paused, false);
+  assertEquals(allowanceOf(r(0, 5)).paused, false);
+  assertEquals(allowanceOf(r(0, 0)), { remaining: 0, resetsAt: '2026-12-25T12:52:05.000Z', paused: true });
+  assertEquals(allowanceOf({ status: 500, body: {} }).paused, false);
+});

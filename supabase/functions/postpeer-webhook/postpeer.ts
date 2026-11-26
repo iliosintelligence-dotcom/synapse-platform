@@ -213,6 +213,7 @@ export function studioPostBody(
   const content = platform === 'linkedin' ? fitForLinkedIn(caption) : caption;
   let specific: Record<string, unknown> = {};
   if (platform === 'tiktok') {
+    media = oneKindOfMedia('tiktok', media);
     if (!media.length) return { error: 'TikTok needs a photo or video.' };
     specific = {
       privacyLevel: 'PUBLIC_TO_EVERYONE', disableComment: false, disableDuet: false, disableStitch: false,
@@ -339,4 +340,34 @@ export function pacificDay(now = new Date()): { start: Date; next: Date } {
 /** Whether a PostPeer refusal is YouTube's daily cap (or Google's upload quota): wait for tomorrow, do not fail. */
 export function isDailyUploadLimit(message: string): boolean {
   return /daily youtube upload limit|quota metric 'video uploads'|uploadlimitexceeded/i.test(String(message ?? ''));
+}
+
+/* ── what our PostPeer plan does not allow, in words for the person who pressed the button (2026-11-26) ──────
+   Every agency posts through Synapse's one PostPeer project, so its limits are ours, not the agency's: an agency
+   must be told plainly that this action cannot be done right now, and that its post is kept -- never just "failed".
+   402: the month's credits are used up (1 per post). 403: the plan or the account does not allow this. 429: too fast. */
+export type PpLimit = { code: 'credits' | 'not_allowed' | 'busy'; message: string; retryInMin: number | null };
+
+export function ppLimitOf(r: PpResult): PpLimit | null {
+  if (r.status === 402) {
+    return { code: 'credits', retryInMin: 60, message: 'This can’t be posted right now: the monthly posting allowance on '
+      + 'your plan has been reached. Your post is kept and goes out automatically as soon as the allowance resets.' };
+  }
+  if (r.status === 403) {
+    return { code: 'not_allowed', retryInMin: null, message: 'This isn’t included in your current plan, so nothing '
+      + 'was posted. See Subscription for what each plan includes.' };
+  }
+  if (r.status === 429) {
+    return { code: 'busy', retryInMin: 5, message: 'Your plan posts a few at a time. '
+      + 'This one goes out automatically in a few minutes.' };
+  }
+  return null;
+}
+
+/** The allowance in one answer, read from PostPeer's usage (free to read). */
+export function allowanceOf(r: PpResult): { remaining: number | null; resetsAt: string | null; paused: boolean } {
+  const b = r.body as Record<string, any>;
+  if (r.status !== 200 || !b?.balance) return { remaining: null, resetsAt: null, paused: false };
+  const left = Number(b.balance?.monthly?.remaining ?? 0) + Number(b.balance?.purchased?.remaining ?? 0);
+  return { remaining: left, resetsAt: b.balance?.monthly?.cycleEnd ?? null, paused: left <= 0 };
 }

@@ -28,7 +28,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 /* PostPeer (2026-11-13): its switches and API call, from postpeer-webhook's folder (see that file for why not _shared).
    Cross-folder imports bundle fine with `supabase functions deploy`, as the _shared imports elsewhere show. */
 import {
-  fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
+  allowanceOf, fitForLinkedIn, goesOnSynapseAccount, instagramSafeMedia, ppKey, ppLimitOf, type PpLimit, isDailyUploadLimit, mediaTypeOf, oneKindOfMedia, pacificDay,
   pp, ppError, PP_NAME, ppPublishOn, YOUTUBE_DAILY_UPLOADS,
 } from '../postpeer-webhook/postpeer.ts';
 /* Inlined rather than imported from ../_shared. The import escapes the
@@ -92,6 +92,8 @@ interface PublishResult {
   /** Not a failure: the platform will take this post later (YouTube's daily cap). The row goes back to the queue at
    *  this time, and the try does not count against its attempts. */
   deferUntil?: string;
+  /** A limit of our PostPeer plan (credits, not allowed, too fast), in words for the person who asked. */
+  limit?: PpLimit;
 }
 
 /* -- adapters ---------------------------------------------------------------
@@ -1467,9 +1469,9 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   };
   const fail = (error: string) => ({ ok: false, postId: null, provider: 'postpeer', error, payload } as PublishResult);
   if (!ppPublishOn(post.platform)) {
-    return fail('Posting to ' + post.platform + ' through PostPeer is paused (POSTPEER_PLATFORMS).');
+    return fail('Posting to ' + (({ instagram: 'Instagram', facebook: 'Facebook', tiktok: 'TikTok', youtube: 'YouTube', x: 'X', linkedin: 'LinkedIn' } as Record<string, string>)[post.platform] ?? post.platform) + ' isn’t included in your plan right now. Your post is kept; contact Synapse to turn it on.');
   }
-  if (!conn.platformAccountId) return fail('This PostPeer connection has no integration id. Connect it again.');
+  if (!conn.platformAccountId) return fail('This account’s connection is incomplete. Connect it again under Channels.');
 
   let media = post.media_urls ?? [];
   const caption = post.platform === 'x' ? fitForX(post.caption ?? '')
@@ -1563,14 +1565,19 @@ const postpeerAdapter: Adapter = async (post, conn) => {
     b = r.body as Record<string, any>;
     payload.postpeer_retried = true;
   }
-  if (r.status === 402) return fail('PostPeer credits are used up. Add credits at postpeer.dev, then this post retries.');
-  if (r.status === 0) return fail('Could not reach PostPeer: ' + ppError(r));
+  /* OUR PLAN'S LIMITS: told plainly, and the post kept. Out of credits or too fast: back in the queue, not failed. */
+  const limit = ppLimitOf(r);
+  if (limit) {
+    return { ...fail(limit.message), limit,
+             ...(limit.retryInMin ? { deferUntil: new Date(Date.now() + limit.retryInMin * 60000).toISOString() } : {}) };
+  }
+  if (r.status === 0) return fail('Could not reach the posting service just now. It tries again automatically.');
   if (r.status !== 200 && r.status !== 202) {
     if (post.platform === 'youtube' && isDailyUploadLimit(ppError(r))) {
-      return { ...fail('YouTube’s 5 uploads a day are used on this channel. It goes out after midnight Pacific.'),
+      return { ...fail('YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.'),
                deferUntil: new Date(pacificDay().next.getTime() + 5 * 60000).toISOString() };
     }
-    return fail('PostPeer refused the post: ' + ppError(r));
+    return fail('The post was refused: ' + ppError(r));
   }
 
   const entry = (Array.isArray(b?.platforms) ? b.platforms : [])[0] as Record<string, any> | undefined;
@@ -1579,14 +1586,14 @@ const postpeerAdapter: Adapter = async (post, conn) => {
   payload.postpeer_post_id = ppPostId || null;
   payload.postpeer_status = status || null;
   if (status === 'failed' || entry?.success === false) {
-    const why = (entry?.error ? String(entry.error) : 'PostPeer could not publish this post.').slice(0, 500);
+    const why = (entry?.error ? String(entry.error) : 'This post could not be published.').slice(0, 500);
     if (post.platform === 'youtube' && isDailyUploadLimit(why)) {
-      return { ...fail('YouTube’s 5 uploads a day are used on this channel. It goes out after midnight Pacific.'),
+      return { ...fail('YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.'),
                deferUntil: new Date(pacificDay().next.getTime() + 5 * 60000).toISOString() };
     }
     return fail(why);
   }
-  if (!ppPostId) return fail('PostPeer accepted the post but returned no id.');
+  if (!ppPostId) return fail('The post was sent but no confirmation came back. It tries again automatically.');
   if (status === 'published') {
     Object.assign(payload, { delivery: 'live', live_at: new Date().toISOString(), live_url: entry?.platformPostUrl ?? null });
   } else {
@@ -1932,6 +1939,15 @@ Deno.serve(async (req: Request) => {
        many photographs a carousel may hold. The portal caps galleries at ten
        because that is Meta's limit; this is how to check trypost agrees rather
        than assume it. Read-only, and it returns no credential. */
+    /* WHAT OUR POSTPEER PLAN HAS LEFT, so the portal can say "this can't be posted right now" before anybody presses
+       the button rather than after. Reading usage costs no credit. */
+    if (body.action === 'allowance') {
+      if (!ppKey()) return json({ configured: false, paused: false, remaining: null, resetsAt: null });
+      const a = allowanceOf(await pp('/usage/', { method: 'GET' }, 15000));
+      return json({ configured: true, ...a,
+        message: a.paused ? 'Posting is paused: the monthly posting allowance on your plan has been reached'
+          + (a.resetsAt ? ' until ' + a.resetsAt.slice(0, 10) : '') + '. You can still schedule; posts go out automatically once it resets.' : null });
+    }
     if (body.action === 'content-types') {
       if (!trypostConfigured()) return json({ error: 'TryPost has been disconnected' }, 400);
       const res = await fetch(TRYPOST_URL + '/api/content-types', {
@@ -2011,6 +2027,8 @@ Deno.serve(async (req: Request) => {
 
     /* YouTube uploads already made today, per channel (see the cap below). */
     const ytToday: Record<string, number> = {};
+    /* What our PostPeer plan would not allow in this batch, one message per kind, for the portal to show. */
+    const limits: Record<string, string> = {};
     let published = 0;
     let failed = 0;
     let dryRun = 0;
@@ -2064,7 +2082,7 @@ Deno.serve(async (req: Request) => {
         }
         if (ytToday[key] >= YOUTUBE_DAILY_UPLOADS) {
           capped = { ok: false, postId: null, provider: 'postpeer', payload: buildPayload(post),
-            error: 'YouTube’s 5 uploads a day are used on this channel. It goes out after midnight Pacific.',
+            error: 'YouTube allows 5 uploads a day on this channel. This one goes out automatically after midnight Pacific.',
             deferUntil: new Date(day.next.getTime() + 5 * 60000).toISOString() };
         }
       }
@@ -2098,7 +2116,8 @@ Deno.serve(async (req: Request) => {
           attempts: Math.max(0, post.attempts - 1),
         }).eq('id', post.id);
         results.push({ id: post.id, platform: post.platform, leg: post.leg, status: 'deferred',
-          until: result.deferUntil, reason: result.error });
+          until: result.deferUntil, reason: result.error, limit: result.limit?.code ?? null });
+        if (result.limit) limits[result.limit.code] = result.limit.message;
         continue;
       }
 
@@ -2160,10 +2179,11 @@ Deno.serve(async (req: Request) => {
         .eq('id', post.id);
 
       failed++;
+      if (result.limit) limits[result.limit.code] = result.limit.message;
       results.push({
         id: post.id, platform: post.platform, leg: post.leg,
         status: exhausted ? 'failed' : 'scheduled',
-        provider: result.provider, error: result.error,
+        provider: result.provider, error: result.error, limit: result.limit?.code ?? null,
       });
     }
 
@@ -2175,6 +2195,8 @@ Deno.serve(async (req: Request) => {
       published,
       failed,
       dryRun,
+      deferred: results.filter((x) => x.status === 'deferred').length,
+      limits: Object.entries(limits).map(([code, message]) => ({ code, message })),
       // Stated plainly so a caller cannot mistake a rehearsal for a send.
       note: dryRun === rows.length
         ? 'Every post in this batch was a rehearsal. No network call was made.'
